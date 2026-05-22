@@ -1,0 +1,57 @@
+{
+  "_meta": {
+    "description": "Padrões regex (case-insensitive) que identificam contêineres administrativos do NCBI Taxonomy a serem ignorados na construção da árvore taxonômica. Nós cujo scientific_name casa com qualquer padrão são pulados; suas sequências escalam para o próximo ancestor válido.",
+    "policy": "Adicione padrões aqui à medida que identificá-los no census do registry. Comente o porquê de cada padrão no campo 'description' do bloco correspondente.",
+    "last_updated": "2026-05-21"
+  },
+  "patterns": [
+    {
+      "regex": "^unclassified\\b",
+      "description": "Contêineres 'unclassified X' do NCBI - posição taxonômica não resolvida. Cobre 'unclassified Caudoviricetes', 'unclassified Begomovirus', 'unclassified viruses', etc."
+    },
+    {
+      "regex": "\\bincertae sedis\\b",
+      "description": "Variante latina formal de 'unclassified'. Cobre 'Caudoviricetes incertae sedis', 'Viruses incertae sedis', etc. Usado pelo ICTV para clados sem posição filogenética definida."
+    },
+    {
+      "regex": "^environmental samples\\b",
+      "description": "Amostras ambientais/metagenômicas sem isolado caracterizado. Geralmente são folhas únicas por accession."
+    },
+    {
+      "regex": "^uncultured ",
+      "description": "Organismos detectados via sequenciamento mas nunca cultivados. Tipicamente metagenoma."
+    },
+    {
+      "regex": "^unidentified",
+      "description": "Submissões NCBI sem identificação. Raro em vírus, comum em outros domínios."
+    },
+    {
+      "regex": "\\bShiM-\\d{4}\\b",
+      "description": "Depósito de descobertas do paper Shi et al. - viroma de invertebrados. ShiM-2016 sozinho tem 883 espécies sob 'unclassified RNA viruses ShiM-2016'. Outros papers podem ter padrões similares - adicionar conforme identificados."
+    },
+    {
+      "regex": " isolates?$",
+      "description": "Contêineres de isolates clínicos/de surto. Ex.: 'Norovirus isolates', 'Sapovirus isolates'. São agrupamentos abaixo de espécie, não classes taxonômicas."
+    },
+    {
+      "regex": " genogroup \\d",
+      "description": "Subgrupos sorológicos de norovirus e similares. 'Norovirus genogroup 1 isolates' etc."
+    },
+    {
+      "regex": "^HIV-\\d+ M:CRF",
+      "description": "Formas recombinantes circulantes de HIV-1. Subdivisão clínica, não taxonômica."
+    },
+    {
+      "regex": " with incomplete names?$",
+      "description": "Bolso para entradas com nomes mal-formados. Ex.: 'Influenza A virus with incomplete names'."
+    },
+    {
+      "regex": "^mixed subtypes?$",
+      "description": "Contêiner literal 'mixed subtypes' do NCBI para Influenza."
+    }
+  ],
+  "rank_blacklist": {
+    "description": "Ranks taxonômicos administrativos que indicam subdivisão abaixo de espécie (sorologia clínica, não biologia). Nós com esses ranks são pulados independente do nome.",
+    "ranks": ["serotype", "serogroup", "subtype", "isolate", "strain", "genotype"]
+  }
+}

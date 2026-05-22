@@ -1,0 +1,12 @@
+/.history/
+/.history/*
+# Ignorar arquivos de cache do Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+# Ignorar arquivos de log
+*.log
+# Ignorar arquivos da pasta data/vault
+data/vault/
+data/vault/*
