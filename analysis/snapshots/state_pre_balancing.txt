@@ -1,0 +1,9 @@
+=== SNAPSHOT PRE-BALANCING (n=100 hardcoded) ===
+Heads: 1094
+Virtual buckets: 74
+
+=== DISTRIBUIÇÃO DE LINHAS POR HEAD ===
+Total rows across all parquets: 1,815,200
+Avg per parquet: 75,633
+Max: 535,700  (taxid=2732396)
+Min (non-zero): 3,000

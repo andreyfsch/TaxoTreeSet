@@ -10,3 +10,4 @@ __pycache__/
 # Ignorar arquivos da pasta data/vault
 data/vault/
 data/vault/*
+data/datasets/*

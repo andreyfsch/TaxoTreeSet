@@ -1,49 +1,70 @@
 import os
-import tqdm
+from tqdm import tqdm
 import pandas as pd
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 from src.taxotreeset.dataset.sequence_utils import extract_subseqs
 from src.taxotreeset.dataset.utils import _read_single_sequence, _pool_worker_initializer
 
+
 def extract_parent_node_worker(job):
-    """Worker paralelo para extrair e escrever sequências em Parquet."""
     parent_taxid, target_dir, parent_tasks, max_subseq_len, seed, output_format = job
-    
+
+    BUFFER_SIZE = 10000
+
     for split in ["train", "val", "test"]:
         tasks = parent_tasks[split]
         if not tasks:
             continue
-            
-        data = []
-        for t in tasks:
-            # 1. Carrega a string de DNA real a partir do disco/LMDB
-            full_seq = _read_single_sequence(t['fasta_path'], t['header_id'])
-            if not full_seq:
-                continue
-                
-            # 2. Aplica o fatiamento da sequência (será 100% se houver diversidade no clado)
-            start_idx = int(len(full_seq) * t['start_pct'])
-            end_idx = int(len(full_seq) * t['end_pct'])
-            sub_seq = full_seq[start_idx:end_idx]
-            
-            # 3. Repassa a string biológica real e os parâmetros corretos para a função geradora
-            seqs = extract_subseqs(
-                seq=sub_seq,
-                n=t['n'],
-                min_len=100,  # Limite inferior fixado por segurança de auditoria
-                max_len=max_subseq_len
-            )
-            
-            for s in seqs:
-                # Inserção obrigatória da coluna de classe
-                data.append({"seq": s, "class_idx": int(t['class_idx'])})
-        
-        if data:
-            df = pd.DataFrame(data)
-            df['class_idx'] = df['class_idx'].astype(int)
-            out_path = os.path.join(target_dir, f"{split}.{output_format}")
-            df.to_parquet(out_path, index=False)
-            
+
+        out_path = os.path.join(target_dir, f"{split}.{output_format}")
+        writer = None
+        buffer = []
+
+        def _flush():
+            nonlocal writer, buffer
+            if not buffer:
+                return
+            df = pd.DataFrame(buffer)
+            df['class_idx'] = df['class_idx'].astype('int32')
+            table = pa.Table.from_pandas(df, preserve_index=False)
+            if writer is None:
+                writer = pq.ParquetWriter(
+                    out_path, table.schema, compression='snappy')
+            writer.write_table(table)
+            buffer.clear()
+
+        try:
+            for t in tasks:
+                full_seq = _read_single_sequence(
+                    t['fasta_path'], t['header_id'])
+                if not full_seq:
+                    continue
+
+                start_idx = int(len(full_seq) * t['start_pct'])
+                end_idx = int(len(full_seq) * t['end_pct'])
+                sub_seq = full_seq[start_idx:end_idx]
+
+                # USA n DA TASK (balanceado), não hardcoded 100
+                seqs = extract_subseqs(
+                    seq=sub_seq,
+                    n=t['n'],         # ← n variável por classe
+                    min_len=100,
+                    max_len=max_subseq_len,
+                )
+
+                for s in seqs:
+                    buffer.append({"seq": s, "class_idx": int(t['class_idx'])})
+
+                if len(buffer) >= BUFFER_SIZE:
+                    _flush()
+
+            _flush()
+        finally:
+            if writer is not None:
+                writer.close()
+
     return True
 
 
@@ -53,7 +74,7 @@ class DatasetBuilder:
         self.max_subseq_len = max_subseq_len
         self.seed = seed
         self.output_format = output_format
-        
+
     def prepare_stratified_split(self, nodes):
         """
         Divide as folhas em train/val/test de forma estratificada.
@@ -62,51 +83,52 @@ class DatasetBuilder:
         """
         splits = {"train": [], "val": [], "test": []}
         all_leaves = []
-        
+
         for node in nodes:
-            all_leaves.extend([l for l in node.leaves if getattr(l, "rank", "") == "sequence"])
-        
+            all_leaves.extend(
+                [l for l in node.leaves if getattr(l, "rank", "") == "sequence"])
+
         if not all_leaves:
             return splits
 
         # Fixa o gerador de sementes para garantir consistência de split entre execuções
         np.random.seed(self.seed)
         np.random.shuffle(all_leaves)
-        
+
         n = len(all_leaves)
-        
+
         # 🚀 CENÁRIO 1: DIVERSIDADE SUFICIENTE (Sem vazamento de dados intra-sequência)
         if n >= 3:
             train_idx = max(1, int(n * 0.70))
             val_idx = train_idx + max(1, int(n * 0.15))
-            
+
             for i, leaf in enumerate(all_leaves):
                 f_path = getattr(leaf, "fasta_path", "")
                 h_id = getattr(leaf, "header_id", "")
-                
+
                 # 0.0 a 1.0 significa que 100% da sequência vai para o split sorteado
-                task = (f_path, h_id, 0.0, 1.0) 
-                
+                task = (f_path, h_id, 0.0, 1.0)
+
                 if i < train_idx:
                     splits["train"].append(task)
                 elif i < val_idx:
                     splits["val"].append(task)
                 else:
                     splits["test"].append(task)
-                    
+
         # 🚀 CENÁRIO 2: ESCASSEZ EXTREMA (Fatiamento de sobrevivência)
         else:
             for leaf in all_leaves:
                 f_path = getattr(leaf, "fasta_path", "")
                 h_id = getattr(leaf, "header_id", "")
-                
+
                 # A mesma sequência é fatiada entre os splits
                 splits["train"].append((f_path, h_id, 0.0, 0.70))
                 splits["val"].append((f_path, h_id, 0.70, 0.85))
                 splits["test"].append((f_path, h_id, 0.85, 1.0))
-                
+
         return splits
-        
+
     def build_node_dataset(self, jobs, parallel=False):
         """Executa a extração, usando paralelismo na I/O de disco."""
         if parallel:
