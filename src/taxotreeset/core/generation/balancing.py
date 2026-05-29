@@ -46,7 +46,7 @@ Typical usage::
         use_exact_capacity=False,
         max_n_per_class=20_000,
     )
-    if plan["low_data_children"]:
+    if plan["low_capacity_children"]:
         # create the low-capacity bucket and re-parent children
         ...
 """
@@ -114,7 +114,7 @@ def compute_balanced_extraction_plan(
             - 'n_per_class': number of unique subsequences per child.
             - 'retained_children': list of children that remain as
               training labels.
-            - 'low_data_children': list of children below the cutoff
+            - 'low_capacity_children': list of children below the cutoff
               (empty in level-all scenarios). The caller is
               responsible for creating the low-capacity bucket and
               re-parenting these children.
@@ -196,7 +196,7 @@ def _empty_extraction_plan() -> dict:
         "scenario": _SCENARIO_LEVEL_ALL,
         "n_per_class": 0,
         "retained_children": [],
-        "low_data_children": [],
+        "low_capacity_children": [],
         "capacities": {},
     }
 
@@ -244,7 +244,7 @@ def _build_level_all_plan(
         "scenario": scenario,
         "n_per_class": n_per_class,
         "retained_children": list(children),
-        "low_data_children": [],
+        "low_capacity_children": [],
         "capacities": capacities,
     }
 
@@ -278,7 +278,7 @@ def _build_cutoff_plan(
         cutoff_percentage=cutoff_percentage,
     )
 
-    retained_children, low_data_children = _partition_by_cutoff(
+    retained_children, low_capacity_children = _partition_by_cutoff(
         children=children,
         capacities=capacities,
         cutoff_value=cutoff_value,
@@ -294,7 +294,7 @@ def _build_cutoff_plan(
         f"  [BALANCE] {parent_name}: scenario=cutoff_applied; "
         f"cutoff_value={cutoff_value:,}; "
         f"retained={len(retained_children)}; "
-        f"low_data={len(low_data_children)}; "
+        f"low_capacity={len(low_capacity_children)}; "
         f"n_per_class={n_per_class:,}"
     )
 
@@ -302,7 +302,7 @@ def _build_cutoff_plan(
         "scenario": _SCENARIO_CUTOFF_APPLIED,
         "n_per_class": n_per_class,
         "retained_children": retained_children,
-        "low_data_children": low_data_children,
+        "low_capacity_children": low_capacity_children,
         "capacities": capacities,
     }
 
@@ -359,17 +359,17 @@ def _partition_by_cutoff(
         cutoff_value: Value computed by _compute_percentile_cutoff.
 
     Returns:
-        Two-tuple ``(retained_children, low_data_children)``.
+        Two-tuple ``(retained_children, low_capacity_children)``.
     """
     retained_children: list = []
-    low_data_children: list = []
+    low_capacity_children: list = []
     for child in children:
         child_capacity = capacities[str(child.name)]
         if child_capacity >= cutoff_value:
             retained_children.append(child)
         else:
-            low_data_children.append(child)
-    return retained_children, low_data_children
+            low_capacity_children.append(child)
+    return retained_children, low_capacity_children
 
 
 def _compute_n_per_class_from_retained(

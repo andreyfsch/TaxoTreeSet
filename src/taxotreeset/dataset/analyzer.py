@@ -1,8 +1,7 @@
-import os
 import logging
 import hashlib
 from bigtree import Node, find_attrs
-from src.taxotreeset.dataset.utils import _get_fasta_sequence_length, _read_single_sequence
+from src.taxotreeset.dataset.utils import _read_single_sequence
 
 # Local module logger setup
 logger = logging.getLogger("TaxoTreeSet.Dataset.Analyzer")

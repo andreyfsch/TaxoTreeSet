@@ -739,7 +739,7 @@ class GenerationOrchestrator:
             Final list of retained training labels, including the
             low-capacity bucket if created.
         """
-        if not plan["low_data_children"]:
+        if not plan["low_capacity_children"]:
             return plan["retained_children"]
 
         parent_taxid = str(current_node.name)
@@ -747,7 +747,7 @@ class GenerationOrchestrator:
 
         bucket_node, bucket_meta = make_low_capacity_bucket_node(
             parent_node=current_node,
-            low_capacity_children=plan["low_data_children"],
+            low_capacity_children=plan["low_capacity_children"],
             parent_taxid=parent_taxid,
             parent_name=parent_name,
         )

@@ -97,7 +97,7 @@ for taxid in test_taxids:
     print(f"    Cenário: {plan['scenario']}")
     print(f"    n_per_class: {plan['n_per_class']:,}")
     print(f"    Eligible children: {len(plan['eligible_children'])}")
-    print(f"    Low data children: {len(plan['low_data_children'])}")
+    print(f"    Low capacity children: {len(plan['low_capacity_children'])}")
     print(f"    Decisão: {plan['decision_log']}")
 
     # Mostra capacidades top 5 e bottom 5
@@ -126,6 +126,6 @@ plan = compute_balanced_extraction_plan(
 print(f"  Cenário: {plan['scenario']}")
 print(f"  n_per_class: {plan['n_per_class']:,}")
 print(f"  Eligible: {len(plan['eligible_children'])}")
-print(f"  Low_data: {len(plan['low_data_children'])}")
+print(f"  Low_capacity: {len(plan['low_capacity_children'])}")
 
 print("Teste concluído.")
