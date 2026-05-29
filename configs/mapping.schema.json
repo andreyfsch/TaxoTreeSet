@@ -1,0 +1,116 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/aschoier/TaxoTreeSet/configs/mapping.schema.json",
+  "title": "TaxoTreeSet Mapping Configuration",
+  "description": "Schema for the TaxoTreeSet domain scope mapping configuration file. This file defines the biological domain scopes (Viruses, Bacteria, Archaea, Eukaryota) and the redirection rules that route NCBI taxa with unclear placement into curated fallback groups. The mechanism enables the cascaded LoRA architecture to handle taxa that lack proper kingdom/realm assignments by mapping them to semantic fallback groups (taxids in the 999000-999999 range, see CuratedRealmFallback in docs/GLOSSARY.md).",
+  "type": "object",
+  "required": [
+    "project_name",
+    "schema_version",
+    "global_fallback_id",
+    "global_fallback_label",
+    "scopes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "project_name": {
+      "type": "string",
+      "description": "Human-readable project identifier. Should match the repository name.",
+      "const": "TaxoTreeSet"
+    },
+    "schema_version": {
+      "type": "string",
+      "description": "Semantic version of the mapping schema. Increment when introducing breaking changes.",
+      "pattern": "^[0-9]+\\.[0-9]+$"
+    },
+    "global_fallback_id": {
+      "type": "string",
+      "description": "Top-level NCBI TaxID used when a taxon does not match any defined scope. By convention this is '1' (root of NCBI Taxonomy).",
+      "pattern": "^[0-9]+$"
+    },
+    "global_fallback_label": {
+      "type": "string",
+      "description": "Human-readable label corresponding to global_fallback_id.",
+      "pattern": "^[A-Z][A-Za-z]*(_[A-Z][A-Za-z]*)*$"
+    },
+    "scopes": {
+      "type": "object",
+      "description": "Map of biological domain scopes keyed by NCBI superkingdom TaxID. Common keys: 10239 (Viruses), 2 (Bacteria), 2157 (Archaea), 2759 (Eukaryota).",
+      "patternProperties": {
+        "^[0-9]+$": {
+          "$ref": "#/$defs/scopeDefinition"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "scopeDefinition": {
+      "type": "object",
+      "description": "Definition of a single biological domain scope, including its label, default fallback bucket, and redirection rules for taxa under this scope.",
+      "required": [
+        "label",
+        "default_id",
+        "virtual_id_labels",
+        "redirections"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "type": "string",
+          "description": "Human-readable name of the biological domain (e.g., 'Viruses', 'Bacteria').",
+          "pattern": "^[A-Z][a-zA-Z]+$"
+        },
+        "default_id": {
+          "type": "string",
+          "description": "Virtual TaxID used as the default catch-all fallback within this scope. Must be one of the keys in virtual_id_labels.",
+          "pattern": "^999[0-9]{3}$"
+        },
+        "virtual_id_labels": {
+          "type": "object",
+          "description": "Catalog of curated semantic fallback groups for this scope. Keys are virtual TaxIDs in the 999000-999999 range; values are descriptive labels. These groups represent biologically meaningful clusters of taxa that lack proper kingdom/realm placement in NCBI Taxonomy.",
+          "patternProperties": {
+            "^999[0-9]{3}$": {
+              "type": "string",
+              "description": "Title_Snake_Case label describing the semantic group (e.g., 'Archaeal_Viruses_Group').",
+              "pattern": "^[A-Z][A-Za-z]*(_[A-Z][A-Za-z0-9]*)*$"
+            }
+          },
+          "additionalProperties": false,
+          "minProperties": 1
+        },
+        "redirections": {
+          "type": "object",
+          "description": "Map of NCBI TaxIDs under this scope to their routing decisions. Keys are real NCBI TaxIDs; values specify whether the taxon is kept canonical (target_id equals the key) or redirected to one of the virtual fallback groups (target_id is a 999xxx virtual ID).",
+          "patternProperties": {
+            "^[0-9]+$": {
+              "$ref": "#/$defs/redirectionEntry"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "redirectionEntry": {
+      "type": "object",
+      "description": "Single redirection rule for a NCBI taxon under a given scope.",
+      "required": [
+        "target_id",
+        "label"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "target_id": {
+          "type": "string",
+          "description": "Destination TaxID for this taxon. When equal to the rule key, the taxon is preserved as canonical in the cascade. When pointing to a 999xxx virtual ID, the taxon is absorbed into the corresponding semantic fallback group.",
+          "pattern": "^[0-9]+$"
+        },
+        "label": {
+          "type": "string",
+          "description": "Human-readable label for the source taxon (typically the formal NCBI scientific name in Title_Snake_Case).",
+          "pattern": "^[A-Z][A-Za-z0-9]*(_[A-Z][A-Za-z0-9]*)*$"
+        }
+      }
+    }
+  }
+}

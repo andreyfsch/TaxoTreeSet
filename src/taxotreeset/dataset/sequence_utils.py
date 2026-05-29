@@ -1,25 +1,121 @@
-import math
-import random
+"""Subsequence sampling helpers for the dataset generation pipeline.
+
+This module provides primitives for extracting fixed-quantity samples of
+subsequences from a parent DNA sequence. The strategy adapts to the
+sequence length relative to the sampling budget, choosing between three
+distinct sampling scenarios to maintain extraction efficiency and
+diversity:
+
+1. **Non-overlapping sampling** for sequences that are at least twice
+   as long as the total sampling budget. Random positions are drawn
+   until they pack into the sequence without overlap, using a sorted
+   blacklist and binary search to keep collision detection in
+   logarithmic time.
+
+2. **Flanked block sampling** for sequences in the intermediate range.
+   Half of the samples are drawn from the left margin, half from the
+   right, with optional uniform spacing between them. An odd sample
+   count produces an extra middle window centered on the sequence.
+
+3. **Bounded random sampling with reverse complement** for sequences
+   that cannot fit the requested budget without overlap. Subsequences
+   are drawn at uniformly random positions and lengths; their reverse
+   complements are added when budget remains, doubling the effective
+   diversity of short sequences such as viroids.
+
+The module also exposes the IUPAC reverse-complement transformation
+table as a precomputed translation lookup, which is faster than calling
+``str.replace`` repeatedly. The table supports the complete IUPAC
+ambiguity alphabet (Y, R, W, S, K, M, D, H, V, B, N) so the module is
+safe to use with sequences containing degenerate bases.
+
+Typical usage::
+
+    from src.taxotreeset.dataset.sequence_utils import (
+        extract_subseqs,
+        get_complement,
+    )
+
+    samples = extract_subseqs(
+        seq="ACGTACGTACGT...",
+        n=100,
+        min_len=200,
+        max_len=2000,
+    )
+    rev_comp = get_complement("ATCGY")  # returns "RCGAT"
+
+References:
+    IUPAC nucleotide ambiguity codes: Cornish-Bowden, A. (1985).
+    Nucleic Acids Research, 13(9), 3021-3030.
+    https://doi.org/10.1021/bi00822a023
+"""
+
 import bisect
+import random
 
-# Precomputação da tabela de tradução IUPAC estrita (Notação IUPAC - https://doi.org/10.1021/bi00822a023)
-_IUPAC_MAP = {
-    "A": "T", "T": "A", "C": "G", "G": "C",
-    "Y": "R", "R": "Y", "W": "W", "S": "S",
-    "K": "M", "M": "K", "D": "H", "H": "D",
-    "V": "B", "B": "V", "N": "N"
+
+_IUPAC_COMPLEMENT_MAP: dict[str, str] = {
+    "A": "T",
+    "T": "A",
+    "C": "G",
+    "G": "C",
+    "Y": "R",
+    "R": "Y",
+    "W": "W",
+    "S": "S",
+    "K": "M",
+    "M": "K",
+    "D": "H",
+    "H": "D",
+    "V": "B",
+    "B": "V",
+    "N": "N",
 }
-_FROM_CHARS = "".join(chr(i) for i in range(256))
-_TO_CHARS = ["N"] * 256
-for _k, _v in _IUPAC_MAP.items():
-    _TO_CHARS[ord(_k)] = _v
-    _TO_CHARS[ord(_k.lower())] = _v
-_IUPAC_TRANSLATE_TABLE = str.maketrans(_FROM_CHARS, "".join(_TO_CHARS))
 
 
-def get_complement(seq: str) -> str:
-    """Retorna o complemento reverso de uma sequência de DNA preservando a notação IUPAC completa em nível de C."""
-    return seq[::-1].translate(_IUPAC_TRANSLATE_TABLE)
+def _build_iupac_translation_table() -> dict[int, int]:
+    """Build the byte-level translation table for IUPAC complementation.
+
+    Generates a 256-entry table where each byte maps to its IUPAC
+    complement. Unknown bytes default to 'N'. Both uppercase and
+    lowercase bases are accepted; lowercase inputs are normalized to
+    uppercase in the output.
+
+    Returns:
+        A translation table suitable for str.translate().
+    """
+    target_chars = ["N"] * 256
+    for base, complement in _IUPAC_COMPLEMENT_MAP.items():
+        target_chars[ord(base)] = complement
+        target_chars[ord(base.lower())] = complement
+    source_chars = "".join(chr(i) for i in range(256))
+    return str.maketrans(source_chars, "".join(target_chars))
+
+
+_IUPAC_TRANSLATE_TABLE: dict[int, int] = _build_iupac_translation_table()
+
+
+def get_complement(sequence: str) -> str:
+    """Return the reverse complement of a DNA sequence with IUPAC support.
+
+    Performs reverse complementation using the precomputed IUPAC
+    translation table. All ambiguity codes (Y, R, W, S, K, M, D, H, V,
+    B, N) are mapped to their canonical complements. Unknown characters
+    are mapped to 'N'.
+
+    Args:
+        sequence: DNA sequence to reverse-complement. Case-insensitive.
+
+    Returns:
+        The reverse complement of the input, in uppercase.
+
+    Example:
+        >>> get_complement("ATCG")
+        'CGAT'
+        >>> get_complement("ATCGY")  # Y is the pyrimidine ambiguity code
+        'RCGAT'
+    """
+    return sequence[::-1].translate(_IUPAC_TRANSLATE_TABLE)
 
 
 def extract_subseqs(
@@ -27,93 +123,250 @@ def extract_subseqs(
     n: int,
     min_len: int,
     max_len: int,
-    rng: random.Random | None = None
+    rng: random.Random | None = None,
 ) -> list[str]:
+    """Sample n subsequences from a DNA sequence with adaptive strategy.
+
+    Selects one of three sampling scenarios based on the ratio between
+    the sequence length and the requested sampling budget:
+
+    - **Non-overlapping** when ``len(seq) >= 2 * n * max_len``.
+    - **Flanked blocks** when ``n * max_len <= len(seq) < 2 * n * max_len``.
+    - **Bounded random with reverse complement** when
+      ``len(seq) < n * max_len`` and ``len(seq) >= min_len``.
+
+    Sequences shorter than ``min_len`` return an empty list rather than
+    raising, so callers can process possibly degenerate inputs without
+    wrapping every call.
+
+    Args:
+        seq: Parent DNA sequence from which subsequences are drawn.
+        n: Number of subsequences to return. Must be positive.
+        min_len: Minimum length of each returned subsequence.
+        max_len: Maximum length of each returned subsequence. Must be
+            greater than or equal to ``min_len``.
+        rng: Optional ``random.Random`` instance to drive sampling.
+            When None, the module-level ``random`` is used. Pass an
+            explicit RNG for deterministic, reproducible sampling.
+
+    Returns:
+        A list of at most n subsequences, each between min_len and
+        max_len characters. May contain fewer than n elements when the
+        sequence is shorter than min_len, or in the bounded random
+        scenario when diversity is exhausted.
+
+    Raises:
+        ValueError: If n is non-positive or min_len exceeds max_len.
+
+    Example:
+        >>> import random
+        >>> sequence = "ACGT" * 10000
+        >>> samples = extract_subseqs(sequence, n=10, min_len=100, max_len=200,
+        ...                            rng=random.Random(42))
+        >>> len(samples)
+        10
     """
-    Extrai n subsequências de uma string de DNA com tamanhos variando entre min_len e max_len.
-    Preserva a lógica original de otimização de sobreposição baseada no comprimento do vetor.
-    """
-    if n <= 0:
-        raise ValueError("n precisa ser positivo")
-    if min_len > max_len:
-        raise ValueError("min_len precisa ser <= max_len")
-    
+    _validate_extraction_parameters(n=n, min_len=min_len, max_len=max_len)
+
     if rng is None:
-        rng = random
-        
-    subseqs = []
+        rng = random.Random()
+
     if len(seq) < min_len:
         return []
 
-    # Cenário 1: Sequência longa o suficiente para extrações 100% sem sobreposição
     if len(seq) >= 2 * n * max_len:
-        blacklist = []  # Manterá uma lista ordenada de tuplas (start, end)
-        while len(subseqs) < n:
-            idx = rng.randrange(0, len(seq) - max_len + 1)
-            start, end = idx, idx + max_len
-            
-            # Encontra o ponto de inserção ideal via busca binária O(log N)
-            pos = bisect.bisect_left(blacklist, (start, end))
-            
-            # Valida sobreposição apenas com os vizinhos imediato esquerdo e direito
-            if pos > 0 and start < blacklist[pos - 1][1]:
+        return _sample_non_overlapping(seq, n, max_len, rng)
+
+    if len(seq) >= n * max_len:
+        return _sample_flanked_blocks(seq, n, max_len)
+
+    return _sample_bounded_random_with_complement(seq, n, min_len, max_len, rng)
+
+
+def _validate_extraction_parameters(n: int, min_len: int, max_len: int) -> None:
+    """Validate sampling parameter constraints.
+
+    Args:
+        n: Requested sample count.
+        min_len: Minimum sample length.
+        max_len: Maximum sample length.
+
+    Raises:
+        ValueError: If any constraint is violated.
+    """
+    if n <= 0:
+        raise ValueError(f"n must be positive (got {n})")
+    if min_len > max_len:
+        raise ValueError(f"min_len must be <= max_len (got {min_len} > {max_len})")
+
+
+def _sample_non_overlapping(
+    seq: str,
+    n: int,
+    max_len: int,
+    rng: random.Random,
+) -> list[str]:
+    """Sample n non-overlapping subsequences from a long parent sequence.
+
+    Uses a sorted blacklist of (start, end) intervals and binary search
+    to detect collisions in O(log n) per candidate. The strategy is
+    applicable when the parent sequence is at least twice the total
+    sampling budget (``len(seq) >= 2 * n * max_len``).
+
+    Args:
+        seq: Parent DNA sequence.
+        n: Number of samples to draw.
+        max_len: Fixed length of each sample.
+        rng: Random number generator.
+
+    Returns:
+        A list of n non-overlapping subsequences.
+    """
+    samples: list[str] = []
+    occupied_intervals: list[tuple[int, int]] = []
+    max_start = len(seq) - max_len + 1
+
+    while len(samples) < n:
+        candidate_start = rng.randrange(0, max_start)
+        candidate_end = candidate_start + max_len
+        candidate = (candidate_start, candidate_end)
+
+        insertion_point = bisect.bisect_left(occupied_intervals, candidate)
+
+        if insertion_point > 0:
+            previous_end = occupied_intervals[insertion_point - 1][1]
+            if candidate_start < previous_end:
                 continue
-            if pos < len(blacklist) and end > blacklist[pos][0]:
+
+        if insertion_point < len(occupied_intervals):
+            next_start = occupied_intervals[insertion_point][0]
+            if candidate_end > next_start:
                 continue
-                
-            blacklist.insert(pos, (start, end))
-            subseqs.append(seq[start:end])
-            
-    # Cenário 2: Sequência média, aplica blocos quase não-sobrepostos flanqueados
-    elif len(seq) < 2 * n * max_len and len(seq) >= n * max_len:
-        rest = (len(seq) // max_len) - n
-        if rest <= 0:
-            left_start = 0
-            for _ in range(n):
-                subseqs.append(seq[left_start:left_start + max_len])
-                left_start += max_len
-            return subseqs
-            
-        window_bases = max(0, (len(seq) - n * max_len) // (n + 1))
-        left_start = 0
-        right_start = len(seq) - max_len
-        operations = int(n / 2) if n % 2 == 0 else int((n - 1) / 2)
-        
-        for _ in range(operations):
-            subseqs.append(seq[left_start: left_start + max_len])
-            left_start += max_len + window_bases
-            subseqs.append(seq[right_start: right_start + max_len])
-            right_start -= max_len + window_bases
-            
-        if n % 2 != 0:
-            mid_seq = int(math.floor(len(seq) / 2))
-            mid_max_len = int(math.floor(max_len / 2))
-            subseqs.append(seq[mid_seq - mid_max_len: mid_seq + mid_max_len])
-            
-    # Cenário 3: Sequência curta, sorteio direto sem materializar produto cartesiano.
-    # Inclui complemento reverso quando ainda há espaço no orçamento de n.
-    else:
-        max_L = min(max_len, len(seq))
-        subseqs_set = set()
-        attempts = 0
-        # Teto de tentativas: protege contra loops infinitos quando a diversidade
-        # disponível é menor do que n (caso real em viroides, ~300 bp).
-        max_attempts = n * 50
 
-        while len(subseqs) < n and attempts < max_attempts:
-            attempts += 1
-            L = rng.randint(min_len, max_L)
-            start = rng.randint(0, len(seq) - L)
-            s = seq[start:start + L]
+        occupied_intervals.insert(insertion_point, candidate)
+        samples.append(seq[candidate_start:candidate_end])
 
-            if s not in subseqs_set:
-                subseqs.append(s)
-                subseqs_set.add(s)
+    return samples
 
-            if len(subseqs) < n:
-                c = get_complement(s)
-                if c not in subseqs_set:
-                    subseqs.append(c)
-                    subseqs_set.add(c)
 
-    return subseqs
+def _sample_flanked_blocks(seq: str, n: int, max_len: int) -> list[str]:
+    """Sample n quasi-non-overlapping blocks from a moderate-length sequence.
+
+    Distributes samples evenly between the left and right margins of
+    the sequence with uniform spacing between consecutive blocks. When
+    ``n`` is odd, an extra middle block is centered on the sequence.
+
+    Applicable when the parent sequence cannot accommodate strictly
+    non-overlapping blocks but is still long enough to space them
+    deterministically (``n * max_len <= len(seq) < 2 * n * max_len``).
+
+    Args:
+        seq: Parent DNA sequence.
+        n: Number of samples to draw.
+        max_len: Fixed length of each sample.
+
+    Returns:
+        A list of n subsequences with deterministic positions.
+    """
+    samples: list[str] = []
+    remaining_budget = (len(seq) // max_len) - n
+
+    if remaining_budget <= 0:
+        return _sample_contiguous_blocks(seq, n, max_len)
+
+    spacing = max(0, (len(seq) - n * max_len) // (n + 1))
+    left_cursor = 0
+    right_cursor = len(seq) - max_len
+    paired_blocks = n // 2
+
+    for _ in range(paired_blocks):
+        samples.append(seq[left_cursor : left_cursor + max_len])
+        left_cursor += max_len + spacing
+        samples.append(seq[right_cursor : right_cursor + max_len])
+        right_cursor -= max_len + spacing
+
+    if n % 2 != 0:
+        center = len(seq) // 2
+        half_window = max_len // 2
+        samples.append(seq[center - half_window : center + half_window])
+
+    return samples
+
+
+def _sample_contiguous_blocks(seq: str, n: int, max_len: int) -> list[str]:
+    """Sample n contiguous blocks starting from the left of the sequence.
+
+    Used as a fallback when ``_sample_flanked_blocks`` lacks budget for
+    its spacing strategy. Produces strictly adjacent samples without
+    gaps.
+
+    Args:
+        seq: Parent DNA sequence.
+        n: Number of samples to draw.
+        max_len: Fixed length of each sample.
+
+    Returns:
+        A list of n contiguous subsequences.
+    """
+    samples: list[str] = []
+    cursor = 0
+    for _ in range(n):
+        samples.append(seq[cursor : cursor + max_len])
+        cursor += max_len
+    return samples
+
+
+def _sample_bounded_random_with_complement(
+    seq: str,
+    n: int,
+    min_len: int,
+    max_len: int,
+    rng: random.Random,
+) -> list[str]:
+    """Sample n subsequences from a short sequence using overlap and complement.
+
+    Draws subsequences at uniformly random positions and random lengths
+    within the valid range. Each unique subsequence is added to the
+    output; its reverse complement is also added when budget remains.
+    This doubles the effective diversity for short sequences such as
+    viroids (~300 bp).
+
+    A retry budget bounds the loop to ``n * 50`` iterations to protect
+    against pathological inputs where diversity is exhausted before
+    ``n`` unique samples are found.
+
+    Args:
+        seq: Parent DNA sequence (assumed shorter than ``n * max_len``).
+        n: Number of samples to draw.
+        min_len: Minimum sample length.
+        max_len: Maximum sample length.
+        rng: Random number generator.
+
+    Returns:
+        A list of at most n unique subsequences. Fewer samples are
+        returned when the retry budget is exhausted before reaching n.
+    """
+    samples: list[str] = []
+    seen_samples: set[str] = set()
+    effective_max_len = min(max_len, len(seq))
+    max_attempts = n * 50
+
+    for _ in range(max_attempts):
+        if len(samples) >= n:
+            break
+
+        sample_length = rng.randint(min_len, effective_max_len)
+        start = rng.randint(0, len(seq) - sample_length)
+        candidate = seq[start : start + sample_length]
+
+        if candidate not in seen_samples:
+            samples.append(candidate)
+            seen_samples.add(candidate)
+
+        if len(samples) < n:
+            reverse_complement = get_complement(candidate)
+            if reverse_complement not in seen_samples:
+                samples.append(reverse_complement)
+                seen_samples.add(reverse_complement)
+
+    return samples

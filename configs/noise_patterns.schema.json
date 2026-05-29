@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/aschoier/TaxoTreeSet/configs/noise_patterns.schema.json",
+  "title": "TaxoTreeSet Noise Patterns Configuration",
+  "description": "Schema for the noise patterns configuration consumed by the NoiseFilter. This file defines regex patterns and rank filters that identify administrative containers in the NCBI Taxonomy to be excluded from the cascaded taxonomic tree. Filtering happens during tree construction: matching nodes are skipped, and their sequences are reassigned to the next valid ancestor in the lineage.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "name_patterns",
+    "rank_blacklist"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Semantic version of the noise patterns schema. Increment when introducing breaking changes.",
+      "pattern": "^[0-9]+\\.[0-9]+$"
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Optional documentation block describing the file's purpose and maintenance policy.",
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "High-level explanation of what this file controls."
+        },
+        "policy": {
+          "type": "string",
+          "description": "Guidelines for adding or removing patterns."
+        },
+        "last_updated": {
+          "type": "string",
+          "description": "Date of the last modification in ISO 8601 format (YYYY-MM-DD).",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        }
+      }
+    },
+    "name_patterns": {
+      "type": "array",
+      "description": "Ordered list of regex patterns matched against scientific names. The list order matters only for logging clarity; matching is OR across all patterns.",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/definitions/namePattern"
+      }
+    },
+    "rank_blacklist": {
+      "type": "object",
+      "description": "Rank-level filter that complements the name-based patterns. Nodes carrying any blacklisted rank are skipped independently of their scientific name.",
+      "required": [
+        "ranks"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Explanation of why these ranks are blocked."
+        },
+        "ranks": {
+          "type": "array",
+          "description": "NCBI rank names to exclude during tree construction. Common entries: serotype, serogroup, subtype, isolate, strain, genotype.",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z_]+$"
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "namePattern": {
+      "type": "object",
+      "description": "A single regex pattern entry with its biological or taxonomic rationale.",
+      "required": [
+        "regex",
+        "description"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "regex": {
+          "type": "string",
+          "description": "Case-insensitive Python regex applied to scientific_name. Use anchors (^, $) and word boundaries (\\b) to constrain matching.",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "description": "Rationale for filtering this pattern, including a concrete example when possible. Required for maintainability.",
+          "minLength": 10
+        }
+      }
+    }
+  }
+}

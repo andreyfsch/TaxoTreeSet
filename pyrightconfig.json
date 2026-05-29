@@ -1,0 +1,18 @@
+{
+  "include": ["src", "main_discovery.py", "main_generation.py"],
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    ".venv",
+    "build",
+    "dist"
+  ],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic",
+  "reportPrivateImportUsage": "none",
+  "reportAttributeAccessIssue": "none",
+  "reportMissingTypeStubs": "none",
+  "reportGeneralTypeIssues": "warning",
+  "reportOptionalMemberAccess": "warning",
+  "reportArgumentType": "warning"
+}

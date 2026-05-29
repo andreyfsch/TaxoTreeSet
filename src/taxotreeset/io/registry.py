@@ -1,62 +1,224 @@
+"""Local metadata registry for NCBI Taxonomy and genome accessions.
+
+This module provides the NCBIRegistry class, which manages the local
+JSON-based registry used by the discovery and generation phases of the
+TaxoTreeSet pipeline. The registry serves as the authoritative inventory
+of:
+
+- Taxon-to-accession associations (which genome accessions belong to
+  each NCBI TaxID).
+- Per-accession metadata (organism name, assembly level, download
+  status, local storage path).
+- Scope mapping configuration (loaded from configs/mapping.json).
+
+The registry is designed for incremental updates: existing entries are
+preserved across runs, and new metadata is merged in without overwriting
+previously discovered information. This enables resuming interrupted
+discovery sessions and adding new domains to an existing registry.
+
+Sequence data itself is stored separately in an LMDB vault (see
+src/taxotreeset/io/downloader.py); the registry only holds metadata
+needed to locate and identify each accession.
+
+Typical usage::
+
+    from src.taxotreeset.io.registry import NCBIRegistry
+
+    registry = NCBIRegistry(
+        config_path="configs/mapping.json",
+        registry_path="data/registry.json",
+    )
+    registry.discover_taxon_metadata(taxon_id=10239)
+    registry.save()
+"""
+
 import json
+import logging
 import os
 import subprocess
-import logging
+from typing import Any, Union
 
-# Local module logger setup
 logger = logging.getLogger("TaxoTreeSet.IO.Registry")
 
+TaxonId = Union[int, str]
+
+
 class NCBIRegistry:
-    """
-    Manages the local metadata registry database, handles incremental updates,
-    and interfaces with the NCBI Datasets CLI to discover reference genomes.
-    """
-    def __init__(self, config_path: str = "configs/mapping.json", registry_path: str = "data/registry.json"):
-        self.config_path = config_path
-        self.registry_path = registry_path
-        self.registry = self._load_registry()
-        self.mapping = self._load_mapping()
+    """Inventory of NCBI taxa and genome accessions with persistence.
 
-    def _load_registry(self) -> dict:
-        """Loads an existing registry file or initializes a new one to support resume features."""
+    Maintains an in-memory representation of the registry that is loaded
+    from disk at construction time and serialized back via ``save()``.
+    The registry structure is::
+
+        {
+            "last_update": <ISO timestamp or None>,
+            "taxons": {
+                "<taxid>": ["<accession_1>", "<accession_2>", ...]
+            },
+            "accessions": {
+                "<accession>": {
+                    "taxid": "<taxid>",
+                    "organism": "<organism_name>",
+                    "is_reference": <bool>,
+                    "downloaded": <bool>,
+                    "local_path": "<path_to_lmdb or None>"
+                }
+            }
+        }
+
+    Attributes:
+        config_path: Path to the scope mapping configuration JSON file.
+        registry_path: Path to the registry JSON file (loaded and saved
+            from this location).
+        registry: The in-memory registry dictionary.
+        mapping: The in-memory scope mapping configuration.
+    """
+
+    _DEFAULT_CONFIG_PATH = "configs/mapping.json"
+    _DEFAULT_REGISTRY_PATH = "data/registry.json"
+    _REFERENCE_ASSEMBLY_LEVELS = frozenset({"Complete Genome", "Chromosome"})
+
+    def __init__(
+        self,
+        config_path: str = _DEFAULT_CONFIG_PATH,
+        registry_path: str = _DEFAULT_REGISTRY_PATH,
+    ) -> None:
+        """Initialize the registry by loading existing state and configuration.
+
+        Args:
+            config_path: Path to the scope mapping configuration file.
+                Defaults to ``configs/mapping.json``.
+            registry_path: Path to the registry persistence file.
+                If the file exists, it is loaded; otherwise an empty
+                registry structure is initialized. Defaults to
+                ``data/registry.json``.
+        """
+        self.config_path: str = config_path
+        self.registry_path: str = registry_path
+        self.registry: dict[str, Any] = self._load_registry()
+        self.mapping: dict[str, Any] = self._load_mapping()
+
+    def _load_registry(self) -> dict[str, Any]:
+        """Load an existing registry from disk or initialize a fresh one.
+
+        When the registry file exists, its content is parsed and returned
+        as-is. When it does not exist, an empty registry skeleton is
+        returned, enabling incremental population on the next save.
+
+        Returns:
+            The loaded or freshly initialized registry dictionary.
+        """
         if os.path.exists(self.registry_path):
-            with open(self.registry_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        return {"last_update": None, "taxons": {}, "accessions": {}}
+            with open(self.registry_path, encoding="utf-8") as registry_file:
+                return json.load(registry_file)
+        return self._empty_registry()
 
-    def _load_mapping(self) -> dict:
-        """Loads scope and redirection rules from the configuration path."""
-        with open(self.config_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+    @staticmethod
+    def _empty_registry() -> dict[str, Any]:
+        """Return a fresh, empty registry skeleton.
 
-    def discover_taxon_metadata(self, taxon_id: int | str) -> None:
+        Returns:
+            Dictionary with the canonical registry structure and empty
+            sub-dictionaries.
         """
-        Queries the NCBI Datasets CLI to fetch representative and reference assembly metadata.
+        return {
+            "last_update": None,
+            "taxons": {},
+            "accessions": {},
+        }
+
+    def _load_mapping(self) -> dict[str, Any]:
+        """Load scope and redirection rules from the configuration file.
+
+        Returns:
+            Parsed mapping configuration as a dictionary.
+
+        Raises:
+            FileNotFoundError: If the configuration file does not exist.
+            json.JSONDecodeError: If the configuration file is malformed.
         """
-        logger.info(f"Discovering genomic metadata for TaxID: {taxon_id}...")
-        
-        # Command executing the official NCBI Datasets summary API
-        cmd = [
-            "datasets", "summary", "genome", "taxon", str(taxon_id),
-            "--reference", "--as-json-lines"
+        with open(self.config_path, encoding="utf-8") as config_file:
+            return json.load(config_file)
+
+    def discover_taxon_metadata(self, taxon_id: TaxonId) -> None:
+        """Fetch reference genome metadata for a taxon via NCBI Datasets.
+
+        Spawns a subprocess running the ``datasets summary`` command from
+        the NCBI Datasets CLI to retrieve assembly summaries for all
+        reference genomes under the given taxon. Each returned assembly
+        record is parsed and merged into the registry.
+
+        On subprocess failure, an error is logged and the registry is
+        left in its current state (no partial updates). The caller may
+        retry the discovery on transient failures.
+
+        Args:
+            taxon_id: NCBI TaxID to query. Accepts both int and str
+                representations; internally normalized to string.
+
+        Example:
+            >>> registry = NCBIRegistry()
+            >>> registry.discover_taxon_metadata(10239)
+            >>> registry.save()
+        """
+        logger.info(f"Discovering genomic metadata for TaxID: {taxon_id}")
+
+        command = [
+            "datasets",
+            "summary",
+            "genome",
+            "taxon",
+            str(taxon_id),
+            "--reference",
+            "--as-json-lines",
         ]
-        
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            for line in result.stdout.splitlines():
-                if not line.strip():
-                    continue
-                data = json.loads(line)
-                self._update_taxon_entry(taxon_id, data)
-        except subprocess.CalledProcessError as e:
-            error_msg = e.stderr.strip() if e.stderr else str(e)
-            logger.error(f"Failed to query TaxID {taxon_id} via NCBI CLI: {error_msg}")
 
-    def _update_taxon_entry(self, taxon_id: int | str, data: dict) -> None:
-        """Parses and organizes incoming NCBI assembly reports into the local registry structure."""
-        reports = data.get("reports", [])
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            error_message = exc.stderr.strip() if exc.stderr else str(exc)
+            logger.error(
+                f"Failed to query TaxID {taxon_id} via NCBI CLI: {error_message}"
+            )
+            return
+
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            assembly_data = json.loads(line)
+            self._update_taxon_entry(taxon_id, assembly_data)
+
+    def _update_taxon_entry(
+        self,
+        taxon_id: TaxonId,
+        assembly_data: dict[str, Any],
+    ) -> None:
+        """Merge a single NCBI assembly report into the registry.
+
+        For each report in the payload, this method:
+        1. Associates the accession with the taxon under ``taxons``.
+        2. Creates a new accession metadata entry under ``accessions``
+           if not already present.
+
+        Existing accession metadata is never overwritten — once an
+        accession has been recorded, subsequent discoveries are
+        idempotent. This ensures downloaded status and local paths
+        survive across discovery passes.
+
+        Args:
+            taxon_id: NCBI TaxID owning the assembly records.
+            assembly_data: Parsed JSON dictionary from a single line of
+                the NCBI Datasets CLI output. Expected to contain a
+                ``reports`` array.
+        """
+        reports = assembly_data.get("reports", [])
         taxon_key = str(taxon_id)
-        
+
         if taxon_key not in self.registry["taxons"]:
             self.registry["taxons"][taxon_key] = []
 
@@ -64,32 +226,69 @@ class NCBIRegistry:
             accession = report.get("accession")
             if not accession:
                 continue
-            
-            # Map the connection between the Taxon Node and the specific Accession ID
+
             if accession not in self.registry["taxons"][taxon_key]:
                 self.registry["taxons"][taxon_key].append(accession)
-            
-            # Populate absolute technical metadata fields into the registry if new
+
             if accession not in self.registry["accessions"]:
-                assembly_level = report.get("assembly_info", {}).get("assembly_level", "")
-                
-                # Resilient check: includes both complete bacterial plasmids/chromosomes 
-                # and high-quality eukaryotic chromosome assemblies.
-                is_reference = assembly_level in ["Complete Genome", "Chromosome"]
-                
-                self.registry["accessions"][accession] = {
-                    "taxid": taxon_key,
-                    "organism": report.get("organism", {}).get("organism_name"),
-                    "is_reference": is_reference,
-                    "downloaded": False,
-                    "local_path": None
-                }
+                self.registry["accessions"][accession] = self._build_accession_entry(
+                    taxon_key, report
+                )
+
+    @classmethod
+    def _build_accession_entry(
+        cls,
+        taxon_key: str,
+        report: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Construct a new accession metadata entry from an NCBI report.
+
+        The reference status is derived from the assembly level: a genome
+        is considered reference-quality when its level is either
+        'Complete Genome' or 'Chromosome'. This catches both bacterial
+        complete assemblies and high-quality eukaryotic chromosome-level
+        assemblies in a single check.
+
+        Args:
+            taxon_key: String representation of the owning TaxID.
+            report: Single assembly report dictionary from the NCBI
+                Datasets CLI output.
+
+        Returns:
+            New accession metadata dictionary ready to be inserted into
+            the registry.
+        """
+        assembly_info = report.get("assembly_info", {})
+        assembly_level = assembly_info.get("assembly_level", "")
+        is_reference = assembly_level in cls._REFERENCE_ASSEMBLY_LEVELS
+
+        organism_info = report.get("organism", {})
+        organism_name = organism_info.get("organism_name")
+
+        return {
+            "taxid": taxon_key,
+            "organism": organism_name,
+            "is_reference": is_reference,
+            "downloaded": False,
+            "local_path": None,
+        }
 
     def save(self) -> None:
-        """Persists the updated metadata tree registry structure onto the storage disk."""
-        os.makedirs(os.path.dirname(self.registry_path), exist_ok=True)
-        with open(self.registry_path, "w", encoding="utf-8") as f:
-            json.dump(self.registry, f, indent=2)
-            
-        # Changed from logger.info to logger.debug to prevent progress bar distortion
-        logger.debug(f"Registry log successfully persisted to: {self.registry_path}")
+        """Persist the current registry state to disk as formatted JSON.
+
+        Creates the destination directory if it does not exist. The
+        registry file is written in pretty-printed form (indent=2) to
+        ease manual inspection and git diff readability.
+
+        This method is intentionally logged at DEBUG level rather than
+        INFO because it is called frequently during discovery (after
+        each batch) and would otherwise distort progress bar output.
+        """
+        destination_dir = os.path.dirname(self.registry_path)
+        if destination_dir:
+            os.makedirs(destination_dir, exist_ok=True)
+
+        with open(self.registry_path, "w", encoding="utf-8") as registry_file:
+            json.dump(self.registry, registry_file, indent=2)
+
+        logger.debug(f"Registry persisted to: {self.registry_path}")
