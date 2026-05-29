@@ -148,3 +148,78 @@ def _make_virtual_bucket_node(
     bucket_node.parent_taxid = parent_taxid
     bucket_node.parent_name = parent_name
     return bucket_node
+
+
+def register_virtual_bucket(
+    virtual_id_registry: dict,
+    bucket_metadata: dict,
+    parent_taxid: str,
+    parent_name: str,
+) -> None:
+    """Register a virtual bucket in the registry with collision detection.
+
+    Defends against statistical collisions in ``make_virtual_id``,
+    which truncates SHA256 to 8 hex chars and is therefore not
+    collision-free in principle. Re-registering the same virtual ID
+    with a different (parent_taxid, purpose) tuple raises
+    ``RuntimeError`` because it would silently overwrite a previously
+    created bucket's metadata.
+
+    Re-registering with the same (parent_taxid, purpose) is a no-op,
+    preserving idempotency when the orchestrator visits a parent
+    multiple times.
+
+    Args:
+        virtual_id_registry: The registry dict to populate (mutated).
+        bucket_metadata: Dict returned by ``make_low_capacity_bucket_node``
+            or by the rank-aware bucketing helpers. Must contain
+            'taxid', 'name', 'rank', 'purpose', 'absorbed_taxids'.
+        parent_taxid: Parent TaxID hosting the bucket.
+        parent_name: Parent's scientific name (human-readable).
+
+    Raises:
+        RuntimeError: When a collision is detected, i.e. the virtual
+            ID already maps to a different (parent_taxid, purpose)
+            pair in the registry.
+
+    Example:
+        >>> registry = {}
+        >>> bucket_meta = {
+        ...     "taxid": "912345678",
+        ...     "name": "virtual_misc_X",
+        ...     "rank": "virtual_misc",
+        ...     "purpose": "misc",
+        ...     "absorbed_taxids": ["1", "2"],
+        ... }
+        >>> register_virtual_bucket(registry, bucket_meta, "10239", "Viruses")
+        >>> registry["912345678"]["parent_taxid"]
+        '10239'
+    """
+    virtual_id = bucket_metadata["taxid"]
+    purpose = bucket_metadata["purpose"]
+
+    existing = virtual_id_registry.get(virtual_id)
+    if existing is not None:
+        if (
+            existing.get("parent_taxid") != parent_taxid
+            or existing.get("purpose") != purpose
+        ):
+            raise RuntimeError(
+                f"Virtual ID collision: {virtual_id} is already registered "
+                f"as (parent={existing.get('parent_taxid')}, "
+                f"purpose={existing.get('purpose')}); attempted to "
+                f"reassign as (parent={parent_taxid}, purpose={purpose}). "
+                "This indicates either a statistical collision in "
+                "make_virtual_id() or a logic bug at the call site."
+            )
+        return
+
+    virtual_id_registry[virtual_id] = {
+        "parent_taxid": parent_taxid,
+        "parent_name": parent_name,
+        "name": bucket_metadata["name"],
+        "rank": bucket_metadata["rank"],
+        "purpose": purpose,
+        "absorbed_taxids": bucket_metadata["absorbed_taxids"],
+    }
+

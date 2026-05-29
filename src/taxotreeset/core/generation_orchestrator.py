@@ -63,6 +63,7 @@ from src.taxotreeset.core.generation import (
     compute_balanced_extraction_plan,
     distribute_n_per_class_across_leaves,
     make_low_capacity_bucket_node,
+    register_virtual_bucket,
 )
 from src.taxotreeset.core.generation.constants import (
     DEFAULT_CUTOFF_PERCENTAGE,
@@ -571,7 +572,12 @@ class GenerationOrchestrator:
             children_list,
             min_subclades_per_bucket=self.min_subclades_per_bucket,
         )
-        self._register_virtual_buckets(new_virtual_buckets, virtual_id_registry)
+        self._register_virtual_buckets(
+            new_virtual_buckets=new_virtual_buckets,
+            virtual_id_registry=virtual_id_registry,
+            parent_taxid=str(current_node.name),
+            parent_name=getattr(current_node, "scientific_name", str(current_node.name)),
+        )
 
         if not effective_children:
             return
@@ -692,20 +698,29 @@ class GenerationOrchestrator:
     def _register_virtual_buckets(
         new_virtual_buckets: list[dict],
         virtual_id_registry: dict,
+        parent_taxid: str,
+        parent_name: str,
     ) -> None:
         """Add freshly created virtual buckets to the registry.
+
+        Delegates each bucket's registration to
+        ``register_virtual_bucket``, which records the parent context
+        and raises on virtual-ID collisions.
 
         Args:
             new_virtual_buckets: List of bucket metadata dicts.
             virtual_id_registry: The registry to populate (mutated).
+            parent_taxid: TaxID of the parent under which all the
+                buckets in this batch were created.
+            parent_name: Parent's scientific name (human-readable).
         """
         for bucket in new_virtual_buckets:
-            virtual_id_registry[bucket["taxid"]] = {
-                "name": bucket["name"],
-                "rank": bucket["rank"],
-                "purpose": bucket["purpose"],
-                "absorbed_taxids": bucket["absorbed_taxids"],
-            }
+            register_virtual_bucket(
+                virtual_id_registry=virtual_id_registry,
+                bucket_metadata=bucket,
+                parent_taxid=parent_taxid,
+                parent_name=parent_name,
+            )
 
     def _handle_low_capacity_bucket(
         self,
@@ -727,17 +742,21 @@ class GenerationOrchestrator:
         if not plan["low_data_children"]:
             return plan["retained_children"]
 
+        parent_taxid = str(current_node.name)
+        parent_name = getattr(current_node, "scientific_name", parent_taxid)
+
         bucket_node, bucket_meta = make_low_capacity_bucket_node(
             parent_node=current_node,
             low_capacity_children=plan["low_data_children"],
+            parent_taxid=parent_taxid,
+            parent_name=parent_name,
         )
-
-        virtual_id_registry[bucket_meta["taxid"]] = {
-            "name": bucket_meta["name"],
-            "rank": bucket_meta["rank"],
-            "purpose": bucket_meta["purpose"],
-            "absorbed_taxids": bucket_meta["absorbed_taxids"],
-        }
+        register_virtual_bucket(
+            virtual_id_registry=virtual_id_registry,
+            bucket_metadata=bucket_meta,
+            parent_taxid=parent_taxid,
+            parent_name=parent_name,
+        )
 
         return [*plan["retained_children"], bucket_node]
 
