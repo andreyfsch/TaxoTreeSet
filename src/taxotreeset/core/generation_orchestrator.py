@@ -69,8 +69,6 @@ from src.taxotreeset.core.generation.constants import (
     DEFAULT_MAX_N_PER_CLASS,
     DEFAULT_MIN_NUM_SEQS,
     DEFAULT_USE_EXACT_CAPACITY,
-    PROTECTED_RANKS,
-    is_protected_rank,
     is_recursion_terminator,
 )
 from src.taxotreeset.dataset.builder import DatasetBuilder

@@ -53,10 +53,7 @@ from collections import Counter, defaultdict
 
 from bigtree import Node
 
-from src.taxotreeset.core.generation.constants import (
-    PROTECTED_RANKS,
-    is_protected_rank,
-)
+from src.taxotreeset.core.generation.constants import is_protected_rank
 from src.taxotreeset.core.generation.low_capacity_bucket import (
     _make_virtual_bucket_node,
 )
@@ -82,7 +79,7 @@ def classify_children_by_rank(
     buckets. Ranks with fewer than ``min_subclades_per_bucket``
     subclades are merged into a generic ``virtual_misc`` bucket.
 
-    Children whose rank is in ``PROTECTED_RANKS`` (already-virtual
+    Children for which ``is_protected_rank`` returns True (already-virtual
     buckets from a previous bucketing pass or from the curated
     fallback layer) are preserved as-is, keeping the function
     idempotent.
@@ -129,7 +126,7 @@ def classify_children_by_rank(
 def _count_ranks_excluding_protected(children: list) -> Counter:
     """Count occurrences of each rank among non-protected children.
 
-    Children whose rank is in PROTECTED_RANKS are excluded from the
+    Children for which ``is_protected_rank`` returns True are excluded from the
     count because they should not influence the modal rank decision
     (they are bucket nodes from previous passes, not real taxa).
 
@@ -263,7 +260,7 @@ def _partition_children_by_rank(
     Returns:
         Three-tuple ``(canonical, protected, by_rank)``:
             - canonical: children whose rank matches canonical_rank.
-            - protected: children whose rank is in PROTECTED_RANKS.
+            - protected: children for which ``is_protected_rank`` returns True.
             - by_rank: dict mapping non-canonical rank -> list of
               children with that rank.
     """
