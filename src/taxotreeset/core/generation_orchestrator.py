@@ -814,23 +814,30 @@ class GenerationOrchestrator:
             for split_name in _SPLITS:
                 parent_tasks[split_name].extend(leaf_split[split_name])
 
+            child_rank = getattr(child, "rank", "unknown")
             labels_metadata[child_taxid] = {
                 "class_idx": class_index,
                 "taxid": child_taxid,
                 "name": getattr(child, "scientific_name", child_taxid),
-                "rank": getattr(child, "rank", "unknown"),
+                "rank": child_rank,
+                "fallback": child_rank.startswith("virtual_"),
                 "capacity": plan["capacities"].get(child_taxid, 0),
             }
 
         if not any(parent_tasks[split] for split in _SPLITS):
             return None
 
+        num_leaves = sum(
+            1 for leaf in current_node.leaves
+            if getattr(leaf, "rank", "") == "sequence"
+        )
         master_manifest[parent_taxid] = {
             "directory_path": target_dir,
             "scientific_name": getattr(current_node, "scientific_name", parent_taxid),
             "rank": getattr(current_node, "rank", "unknown"),
             "scenario": plan["scenario"],
             "n_per_class": plan["n_per_class"],
+            "num_leaves": num_leaves,
             "labels": labels_metadata,
         }
 
