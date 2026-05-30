@@ -41,6 +41,33 @@ Configured via `--min-num-seqs` and `--cutoff-percentage` CLI arguments.
 
 Previously called "Op_B" or "Opção B" during development.
 
+### Rare-Taxa Bucketing
+Mechanism that handles taxonomic heads where some child classes have too few
+distinct source sequences to learn a generalizable decision boundary. This is
+independent of capacity: capacity measures the *quantity* of subsequences
+extractable from a node (a single long genome yields many), whereas this
+mechanism measures the *diversity* of source sequences (the count of sequence
+leaves). A child can have high capacity yet only one leaf.
+
+When a child has fewer than `min_leaves_per_class` sequence leaves:
+
+1. Under the `fallback` strategy, the child is absorbed into a single
+   `virtual_rare_taxa` bucket on its parent
+2. The bucket becomes one fallback label in the parent head, which the model
+   learns to predict for rare or novel inputs (out-of-distribution-aware
+   classification) rather than forcing them into an under-supported class
+3. The diversion is gated: it applies only when at least two children clear
+   the floor, so a head never degenerates into a single rare_taxa label
+4. Under the `keep` strategy, the mechanism is disabled and every child is
+   retained regardless of leaf count (reproduces the v0.1-balanced baseline)
+
+This addresses high-cardinality heads created by the post-ICTV-2022 viral
+taxonomy, where clades like `Caudoviricetes` accumulate hundreds of orphaned,
+single-sequence genera. See `docs/PLANS/caudoviricetes_cardinality.md`.
+
+Configured via `--min-leaves-per-class` and `--rare-taxa-strategy` CLI
+arguments.
+
 ## Bucket Types in `virtual_id_registry`
 
 | Rank string             | Created by                  | Purpose                                                |
@@ -48,6 +75,7 @@ Previously called "Op_B" or "Opção B" during development.
 | `virtual_bucket`        | RankAwareBucketing          | Groups children whose rank differs from the modal rank |
 | `virtual_misc`          | RankAwareBucketing          | Generic bucket for rare ranks with < min subclades     |
 | `virtual_low_capacity`  | LowCapacityBucketing        | Absorbs children with insufficient genomic material    |
+| `virtual_rare_taxa`     | RareTaxaBucketing           | Absorbs children with too few sequence leaves to train  |
 | `virtual_cluster`       | MolecularClusterBucket      | (Legacy) K-means clustering of similar taxa            |
 | `realm_group`           | CuratedRealmFallback        | Pre-configured semantic fallbacks (999000-999003)      |
 

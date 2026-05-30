@@ -1,37 +1,55 @@
-## Revised evaluation plan (computational realism)
+# Evaluation Plan (Computational Realism)
 
-### Experimento 1 (prioridade máxima): Validação externa em CAMI II
+This plan scopes the experiments that validate the cascaded classifier within
+a realistic compute budget. It favors a small number of high-value experiments
+over a full ablation matrix, and marks which design components are justified
+theoretically rather than empirically.
+
+## Experiment 1 (top priority): External validation on CAMI II
 - Cascade vs Kraken2, Kaiju, MetaPhlAn, geNomad, vConTACT3
 - Datasets: CAMI II marine, strain madness
-- Métricas: purity, completeness, F1 macro, UniFrac weighted, coverage
-- Custo: ~1-2 semanas GPU + 2 semanas análise
+- Metrics: purity, completeness, macro F1, weighted UniFrac, coverage
+- Cost: ~1-2 weeks GPU + 2 weeks analysis
 
-### Experimento 2 (custo zero): Análise threshold-coverage
-- Mesmo modelo, varia threshold de poda
-- Curvas precision vs coverage por nível taxonômico
-- Demonstra a "graceful degradation" da cascata
-- Custo: horas de inferência adicional
+## Experiment 2 (zero cost): Threshold-coverage analysis
+- Same model, varying the pruning threshold
+- Precision vs coverage curves per taxonomic level
+- Demonstrates the cascade's graceful degradation
+- Cost: a few hours of additional inference
 
-### Experimento 3 (ablation seletiva): Balanceamento em sub-árvore
-- Regenera Caudovirales (~150 heads) com e sem balanceamento
-- Treina ambos, compara F1 macro
-- Limitação reconhecida: sub-conjunto representativo
-- Custo: ~3-5 dias GPU
+## Experiment 3 (selective ablation): Balancing on a subtree
+- Regenerate Caudovirales (~150 heads) with and without balancing
+- Train both, compare macro F1
+- Acknowledged limitation: a representative subset, not the full tree
+- Cost: ~3-5 days GPU
 
-### Experimento 4 (análise estrutural): Justificativa do Op3
-- Estatísticas: o que aconteceria sem Op3
-  - Cardinalidade máxima de heads sem o bucketing
-  - Heads que viraríam intratáveis (>1000 classes)
-- Argumento estrutural, não empírico
-- Custo: algumas horas de análise
+## Experiment 4 (structural analysis): Justifying rank-aware bucketing
+- Statistics: what would happen without rank-aware bucketing
+  - Maximum head cardinality without the bucketing pass
+  - Heads that would become intractable (>1000 classes)
+- A structural argument, not an empirical one
+- Cost: a few hours of analysis
 
-### Experimento 5 (ambicioso): Submissão pública ao portal CAMI
-- Resultado citável permanentemente
-- Custo: tempo de preparação dos outputs no formato CAMI
+## Experiment 5 (ambitious): Public submission to the CAMI portal
+- Permanently citable result
+- Cost: time to prepare outputs in the CAMI format
 
-## Componentes justificados teoricamente (sem ablation):
-- NoiseFilter: containers NCBI não são clados biológicos
-- Cap absoluto: previne explosão fora da faixa testada do DNABERT-2
-- Distribuição proporcional por folha: adaptação documentada do mestrado
+## Experiment 6 (zero cost): Cardinality threshold ablation
+- Same subtree, varying `--min-leaves-per-class` (e.g. 2, 3, 5) and
+  `--rare-taxa-strategy` (fallback vs keep)
+- Compare head-size distribution, total label count, and downstream macro F1
+  on the trainable classes vs recall of the rare_taxa fallback
+- Justifies the default leaf-count floor empirically
+- See `docs/PLANS/caudoviricetes_cardinality.md` for the diagnosis
+- Cost: hours of regeneration + inference
 
-Total estimated GPU time: 3-4 weeks (vs 12+ weeks for full ablation)
+## Components justified theoretically (no ablation)
+- NoiseFilter: NCBI administrative containers are not biological clades
+- Absolute cap: prevents dataset explosion outside the DNABERT-2 tested range
+- Proportional per-leaf distribution: documented adaptation from the master's
+  thesis
+- Rare-taxa fallback: addresses single-sequence orphan classes that cannot be
+  learned regardless of model (structural, supported by the head-size
+  distribution analysis)
+
+Total estimated GPU time: 3-4 weeks (vs 12+ weeks for a full ablation).
