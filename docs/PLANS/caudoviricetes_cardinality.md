@@ -231,6 +231,55 @@ For exact reproduction of the v0.1-balanced dataset, run with
 it produces trainable heads; the `keep` path is retained for completeness
 studies and for regenerating the historical baseline.
 
+## 7. Rejected alternative: unifying rare-taxa with rank-species
+
+The leaf-count threshold and the rank-aware bucketing pass produce two
+different fallback buckets that, in practice, often hold the same kind of
+content. Singleton genera are diverted to `virtual_rare_taxa` by the
+leaf-count floor, while singleton species are absorbed into `virtual_species`
+by the rank-aware pass (because species attaching directly to a higher node
+are non-canonical in rank). Empirically these overlap heavily: across the
+tree, `rank_species` buckets are ~97% singletons and `rank_no_rank` ~94%, so
+`virtual_species` behaves largely as a rare-taxa bucket grouped by rank rather
+than by leaf count. Both ultimately mean the same thing to a downstream
+classifier: "cannot be classified more specifically from here."
+
+We investigated unifying them by moving the leaf-count partition to run
+*before* the rank-aware pass, so a single uniform leaf-count criterion would
+divert all singletons of any rank into `virtual_rare_taxa`, leaving the
+rank-aware pass to handle only taxa with real substance. On a subtree this
+produced the intended effect: `virtual_species` disappeared and `rank_species`
+dropped to near zero, with singletons of every rank converging into one
+fallback.
+
+This was rejected after a full-build validation revealed a damaging side
+effect. The leaf-count floor and the capacity cutoff interact through the
+cascade: a node can clear the leaf-count floor (enough distinct leaves) yet
+have low capacity (few extractable subsequences). In the original ordering,
+such nodes were pruned by the capacity cutoff at an ancestor and never
+recursed into. Moving the leaf-count partition earlier changed which nodes
+survive into the balancing layer, so whole low-capacity subtrees that were
+previously pruned now survived and were recursed into. The result was 237 new
+heads on the full viruses build -- many of them shallow, untrainable heads of
+single-sequence species (for example, the genus Vesivirus became a head of
+nine species each with one or two leaves). The build ended with more heads
+than the no-threshold baseline (1074 vs 1061), the opposite of the threshold's
+purpose, with runtime up 5 minutes and output up 3 GB.
+
+The root cause is that the reordering decoupled the leaf-count floor from the
+cascade's capacity-based pruning, which is a more delicate interaction than it
+appears. Correcting it would require an additional pruning mechanism to
+re-collect the shallow singleton heads -- adding complexity to fix a problem
+the reordering itself introduced. Since the benefit of unification was mainly
+semantic (one fallback label instead of two, for content that was already
+bucketed) while the cost was structural, the change was reverted.
+
+The accepted consequence: `virtual_species` and `virtual_rare_taxa` coexist as
+two paths to the same "not classifiable here" outcome, separated only by which
+mechanism caught the taxon first. Anyone reordering the cascade's passes should
+be aware that the leaf-count floor must not run ahead of the capacity-based
+pruning, or low-capacity subtrees will be exposed as untrainable heads.
+
 ## References
 
 Zhu Y, Shang J, Peng C, Sun Y (2022). Phage family classification under
