@@ -87,7 +87,7 @@ def main():
     )
 
     parser.add_argument(
-        "--output-format", "-f",         # ← renomeado de --format para --output-format
+        "--output-format", "-f",
         type=str,
         default="parquet",
         choices=["parquet", "csv"],
@@ -95,7 +95,7 @@ def main():
     )
 
     parser.add_argument(
-        "--max-subseq-len", "-w",        # ← renomeado de --window para --max-subseq-len
+        "--max-subseq-len", "-w",
         type=int,
         default=2000,
         help="Sliding window context size (bp) extracted for DNABERT tokens processing"
@@ -202,7 +202,7 @@ def main():
         )
 
         print("\n" + "="*60)
-        print("   🎉 CASCADED DATASET PRODUCTION SUCCEEDED!")
+        print("   CASCADED DATASET PRODUCTION SUCCEEDED")
         print(f"   Target Domain Group: {args.rank.upper()}")
         print("   Depth Boundary     : GENUS (Fixed Floor)")
         print(f"   Output Encoding    : {args.output_format.upper()}")

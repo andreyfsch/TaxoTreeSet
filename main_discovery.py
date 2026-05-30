@@ -8,7 +8,7 @@ from src.taxotreeset.core.orchestrator import DiscoveryOrchestrator
 
 
 def setup_logging():
-    """Configura a telemetria gravando em arquivo e exibindo no terminal."""
+    """Configure telemetry by writing to a file and printing to the terminal."""
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -23,9 +23,9 @@ def main():
     setup_logging()
     logger = logging.getLogger("TaxoTreeSet.CLI")
 
-    # 1. Configuração do Parser de Argumentos de Linha de Comando (CLI)
+    # 1. Command-line argument parser configuration (CLI)
     parser = argparse.ArgumentParser(
-        description="TaxoTreeSet - Motor de Mapeamento Taxonômico e Geração de Registros para ML",
+        description="TaxoTreeSet - Taxonomic mapping engine and registry generation for ML",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
@@ -33,59 +33,59 @@ def main():
         "--taxon-id", "-t",
         type=int,
         default=10239,
-        help="NCBI TaxID da raiz biológica para iniciar o mapeamento (ex: 10239 para Vírus, 2 para Bacteria)"
+        help="NCBI TaxID of the biological root to start mapping from (e.g. 10239 for Viruses, 2 for Bacteria)"
     )
     parser.add_argument(
         "--mapping", "-m",
         type=str,
         default="configs/mapping.json",
-        help="Caminho para o arquivo JSON de mapeamento de escopos e redirecionamentos"
+        help="Path to the JSON file mapping scopes and fallback redirections"
     )
     parser.add_argument(
         "--registry", "-r",
         type=str,
         default="data/registry.json",
-        help="Caminho de destino para o arquivo de inventário/registro"
+        help="Destination path for the inventory/registry file"
     )
     parser.add_argument(
         "--reset", "-f",
         action="store_true",
-        help="Se definido, força a exclusão do registry.json antigo antes de iniciar a nova descoberta"
+        help="If set, forces deletion of the old registry.json before starting a new discovery run"
     )
 
     args = parser.parse_args()
 
-    # 2. Tratamento da Idempotência (Gerenciamento do arquivo antigo)
+    # 2. Idempotency handling (managing the old registry file)
     if args.reset and os.path.exists(args.registry):
         try:
             os.remove(args.registry)
             logger.info(
-                f"🧹 Flag --reset ativada. Arquivo antigo removido com sucesso: {args.registry}")
+                f"Flag --reset enabled. Old registry removed successfully: {args.registry}")
         except Exception as e:
             logger.error(
-                f"Não foi possível remover o registro antigo em {args.registry}: {e}")
+                f"Could not remove the old registry at {args.registry}: {e}")
             sys.exit(1)
     elif os.path.exists(args.registry):
         logger.info(
-            f"🔄 Arquivo de registro localizado em {args.registry}. Modo de adição dinâmica/incremental ativo.")
+            f"Registry file found at {args.registry}. Incremental/append mode active.")
 
-    # 3. Validação do arquivo de mapeamento de escopos
+    # 3. Validate the scope mapping file
     if not os.path.exists(args.mapping):
         logger.error(
-            f"❌ Erro Crítico: Arquivo de mapeamento ausente em {args.mapping}")
+            f"Critical error: mapping file missing at {args.mapping}")
         sys.exit(1)
 
     try:
         with open(args.mapping, "r", encoding="utf-8") as f:
             mapping_config = json.load(f)
     except Exception as e:
-        logger.error(f"❌ Erro ao ler o arquivo JSON de mapeamento: {e}")
+        logger.error(f"Error reading the mapping JSON file: {e}")
         sys.exit(1)
 
-    # 4. Inicialização Segura dos Componentes Estruturais
+    # 4. Safe initialization of the structural components
     try:
-        # O NCBIRegistry internamente deve carregar o arquivo se ele existir (modo incremental)
-        # ou instanciar um dicionário vazio caso o arquivo não exista
+        # NCBIRegistry loads the file if it exists (incremental mode)
+        # or instantiates an empty dictionary if the file does not exist
         registry = NCBIRegistry(
             config_path=args.mapping,
             registry_path=args.registry
@@ -96,21 +96,21 @@ def main():
             mapping_config=mapping_config
         )
 
-        # 5. Execução do Fluxo de Trabalho (Workflow)
+        # 5. Run the workflow
         logger.info(
-            f"🚀 Iniciando varredura taxonômica para o TaxID: {args.taxon_id}")
+            f"Starting taxonomic scan for TaxID: {args.taxon_id}")
         orchestrator.discover_from_root(args.taxon_id)
 
-        logger.info("🎉 Processo de descoberta finalizado com sucesso.")
+        logger.info("Discovery process finished successfully.")
         print("\n" + "="*50)
-        print("   🧬 Mapeamento Taxonômico Concluído!")
-        print(f"   Raiz Processada : {args.taxon_id}")
-        print(f"   Registro Atualizado : {args.registry}")
+        print("   Taxonomic Mapping Complete")
+        print(f"   Root Processed     : {args.taxon_id}")
+        print(f"   Registry Updated   : {args.registry}")
         print("="*50 + "\n")
 
     except Exception as e:
         logger.error(
-            f"💥 Falha crítica durante a execução do pipeline: {e}", exc_info=True)
+            f"Critical failure during pipeline execution: {e}", exc_info=True)
         sys.exit(1)
 
 
