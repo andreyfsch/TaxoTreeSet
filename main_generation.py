@@ -66,10 +66,11 @@ def main():
     parser.add_argument(
         "--approximate-capacity",
         action="store_true",
-        help="Use a Bloom filter to estimate node capacity (~12MB memory). "
-            "Without this flag, capacity is computed exactly via set union "
-            "(more precise, but can consume hundreds of GB on large heads). "
-            "This flag is recommended for local environments (WSL, laptop)."
+        help="Use a Bloom filter to estimate node capacity (~12MB memory, "
+            "~1%% false-positive rate). Without this flag, capacity is computed "
+            "exactly via 2-bit-packed deduplication, which is memory-bounded "
+            "(spilling supernodes to disk) and runs on modest hardware. Use "
+            "this flag to trade exactness for speed on very large runs."
     )
 
     parser.add_argument(

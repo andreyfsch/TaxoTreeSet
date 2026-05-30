@@ -10,10 +10,18 @@ the group.
 This module provides two computation strategies and the dispatcher
 that selects between them:
 
-1. **Exact** (``_capacity_exact``): accumulates all unique sliding-
-   window subseqs in a Python set. Precise but memory-intensive on
-   large clades; the set can reach hundreds of gigabytes on viral
-   heads like Caudoviricetes.
+1. **Exact** (``_capacity_exact``): counts unique sliding-window
+   subseqs without loss. Pure-ACGT windows are packed into 2 bits per
+   base (4 bases per byte) and deduplicated; the rare windows holding
+   IUPAC ambiguity codes are tracked in an exact string set. The two
+   groups are disjoint, so their unique counts sum exactly. Memory is
+   adaptive: mid-size clades deduplicate in memory with ``np.unique``,
+   while supernodes whose key count would risk exhausting RAM switch to
+   prefix-bucketed deduplication on disk (256 buckets by the first
+   packed byte), bounding peak memory regardless of clade size. This
+   replaced an earlier string-set implementation that could reach tens
+   of gigabytes of RAM on viral heads like Caudoviricetes or the
+   Viruses root.
 
 2. **Approximate** (``_capacity_approximate``): uses a Bloom filter
    sized for ``BLOOM_EXPECTED_INSERTIONS`` distinct items at a
@@ -62,6 +70,24 @@ _SEQUENCE_CACHE_MAX_ENTRIES: int = 30_000
 
 _EARLY_STOP_SAFETY_MULTIPLIER: int = 5
 _PROGRESS_LOG_INTERVAL: int = 200
+
+# Exact-hashed encoding: each ACGT base packs into 2 bits, 4 bases per byte.
+# The packed key length in bytes is derived from min_len at call time as
+# ceil(min_len / _BASES_PER_BYTE), so the method holds for any window size.
+_BASES_PER_BYTE: int = 4
+# Raw pure-ACGT keys accumulate until this many are pending, then a single
+# np.unique compacts them. A large threshold keeps the number of (costly)
+# unique passes tiny while bounding the peak by the pending-buffer size.
+_HASHED_FLUSH_THRESHOLD: int = 8_000_000
+
+# Above this many accumulated pure-ACGT keys, in-memory np.unique would risk
+# exhausting RAM (the sort allocates a full copy). Such supernodes switch to
+# prefix-bucketed deduplication on disk: keys are partitioned into 256 files
+# by their first packed byte (the first four 2-bit bases), then each bucket is
+# uniqued independently and the unique counts summed. Keys in different buckets
+# can never be equal, so the sum is exact.
+_HASHED_DISK_THRESHOLD: int = 30_000_000
+_HASHED_PREFIX_BUCKETS: int = 256
 
 
 def _read_sequence_cached(fasta_path: str, header_id: str) -> str:
@@ -148,49 +174,310 @@ def compute_node_capacity(
         return _capacity_approximate(all_seq_leaves, min_len, max_useful=max_useful)
 
 
+def _bucket_writer_paths(tmp_dir: str) -> list:
+    """Return the 256 prefix-bucket file paths under a temp directory.
+
+    Args:
+        tmp_dir: Directory to hold the per-bucket key files.
+
+    Returns:
+        List of 256 file paths, indexed by the first packed byte of a key.
+    """
+    import os
+
+    return [
+        os.path.join(tmp_dir, f"bucket_{i:03d}.bin")
+        for i in range(_HASHED_PREFIX_BUCKETS)
+    ]
+
+
+def _count_unique_bucketed_on_disk(bucket_paths: list, key_bytes: int) -> int:
+    """Count unique keys across prefix-bucket files, one bucket at a time.
+
+    Each file holds raw packed keys (fixed ``key_bytes`` per key) whose first
+    byte equals the bucket index. Keys in different buckets cannot be equal,
+    so de-duplicating each bucket independently and summing the per-bucket
+    unique counts yields the exact global unique count, while never holding
+    more than one bucket in memory at once.
+
+    Args:
+        bucket_paths: The 256 per-bucket file paths.
+        key_bytes: Width of each packed key in bytes.
+
+    Returns:
+        Total number of unique keys across all buckets.
+    """
+    import os
+
+    import numpy as np
+
+    void_dtype = np.dtype((np.void, key_bytes))
+    total_unique = 0
+    for path in bucket_paths:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            continue
+        raw = np.fromfile(path, dtype=np.uint8)
+        keys = raw.reshape(-1, key_bytes).view(void_dtype).reshape(-1)
+        total_unique += int(np.unique(keys).shape[0])
+        del raw, keys
+    return total_unique
+
+
+def _flush_keys_to_buckets(keys, bucket_files, key_bytes: int) -> None:
+    """Append a batch of packed keys to their prefix-bucket files.
+
+    Keys are partitioned by their first byte (the first four 2-bit bases),
+    which is the prefix that defines the bucket. Writing in first-byte order
+    groups the file appends so each bucket file is touched at most once per
+    flush.
+
+    Args:
+        keys: (N,) void-typed array of packed keys to distribute.
+        bucket_files: List of 256 open binary file handles, indexed by byte.
+        key_bytes: Width of each packed key in bytes.
+    """
+    import numpy as np
+
+    as_bytes = keys.view(np.uint8).reshape(-1, key_bytes)
+    first_byte = as_bytes[:, 0]
+    order = np.argsort(first_byte, kind="stable")
+    sorted_bytes = as_bytes[order]
+    sorted_first = first_byte[order]
+    # Boundaries between distinct first-byte values in the sorted array.
+    split_points = np.flatnonzero(np.diff(sorted_first)) + 1
+    starts = np.concatenate([[0], split_points])
+    ends = np.concatenate([split_points, [len(sorted_first)]])
+    for start, end in zip(starts, ends):
+        bucket = int(sorted_first[start])
+        bucket_files[bucket].write(sorted_bytes[start:end].tobytes())
+
+
+_ACGT_LUT_CACHE = None
+
+
+def _get_acgt_lut():
+    """Return the cached 256-entry ACGT-to-2-bit lookup table, building it once.
+
+    Non-ACGT bytes map to the sentinel 255, which marks a window as
+    ambiguous (containing IUPAC ambiguity codes or N) so it is routed to
+    the exact string-set path rather than the 2-bit-packed path. The table
+    is built lazily on first use because numpy is imported lazily within
+    this module.
+
+    Returns:
+        numpy uint8 array of length 256; index by ASCII byte value.
+    """
+    global _ACGT_LUT_CACHE
+    if _ACGT_LUT_CACHE is None:
+        import numpy as np
+
+        lut = np.full(256, 255, dtype=np.uint8)
+        for code, base in enumerate(b"ACGT"):
+            lut[base] = code
+        _ACGT_LUT_CACHE = lut
+    return _ACGT_LUT_CACHE
+
+
+def _encode_windows_2bit(windows, min_len: int):
+    """Pack pure-ACGT sliding windows into fixed-length 2-bit byte keys.
+
+    Each base occupies 2 bits and four bases pack into one byte, so a
+    window of ``min_len`` bases packs into ceil(min_len / 4) bytes. The
+    key length is derived from ``min_len`` here, so the encoding is valid
+    for any window size, not just the default of 100.
+
+    Windows containing any non-ACGT symbol are not encoded; the returned
+    boolean mask marks which windows were pure ACGT. Ambiguous windows are
+    handled separately by the caller via an exact string set, keeping the
+    two domains disjoint so their unique counts sum without double counting.
+
+    Args:
+        windows: (N, min_len) uint8 array of ASCII base values, typically
+            a ``sliding_window_view`` over one sequence.
+        min_len: Window size in bases; determines the packed key length.
+
+    Returns:
+        Two-tuple ``(packed_keys, pure_mask)``:
+            - packed_keys: (M,) array of void-typed keys of width
+              ceil(min_len / 4) bytes, one per pure-ACGT window (M <= N).
+            - pure_mask: (N,) boolean array, True where the window was
+              pure ACGT.
+    """
+    import numpy as np
+
+    codes = _get_acgt_lut()[windows]
+    pure_mask = np.all(codes != np.uint8(255), axis=1)
+    pure = codes[pure_mask]
+    n_pure = pure.shape[0]
+    key_bytes = (min_len + _BASES_PER_BYTE - 1) // _BASES_PER_BYTE
+    if n_pure == 0:
+        empty = np.empty((0,), dtype=np.dtype((np.void, key_bytes)))
+        return empty, pure_mask
+
+    # Pad the base axis up to a multiple of 4 with zeros so it reshapes
+    # cleanly into groups of four 2-bit codes. The padding is identical for
+    # every window, so it cannot introduce a spurious collision.
+    pad = (-min_len) % _BASES_PER_BYTE
+    if pad:
+        pure = np.concatenate(
+            [pure, np.zeros((n_pure, pad), dtype=np.uint8)], axis=1
+        )
+    groups = pure.reshape(n_pure, key_bytes, _BASES_PER_BYTE)
+    packed = (
+        groups[:, :, 0]
+        | (groups[:, :, 1] << np.uint8(2))
+        | (groups[:, :, 2] << np.uint8(4))
+        | (groups[:, :, 3] << np.uint8(6))
+    ).astype(np.uint8)
+    keys = np.ascontiguousarray(packed).view(
+        np.dtype((np.void, key_bytes))
+    ).reshape(n_pure)
+    return keys, pure_mask
+
+
 def _capacity_exact(
     seq_leaves: list,
     min_len: int,
     max_useful: int | None = None,
 ) -> int:
-    """Compute exact capacity via set union of sliding-window subseqs.
+    """Compute exact capacity via 2-bit packing of unique subseqs.
 
-    Iterates over every sequence leaf, applies a sliding window of
-    length ``min_len``, and accumulates unique subseqs in a Python
-    set. Memory grows proportionally with the unique subseq count;
-    use ``_capacity_approximate`` in memory-constrained environments.
+    Functionally identical to ``_capacity_exact`` -- it returns the exact
+    count of unique ``min_len``-length sliding-window subsequences -- but
+    stores pure-ACGT windows as packed 2-bit keys instead of full strings,
+    cutting memory severalfold. Rare windows containing IUPAC ambiguity
+    codes are kept in an exact string set; the two groups are disjoint by
+    construction, so their unique counts add up without double counting and
+    the result is exact.
+
+    Deduplication is adaptive in scale:
+
+    * Small and mid-size nodes accumulate keys in memory and compact them
+      with ``np.unique``. This is the fast common path.
+    * Supernodes whose accumulated key count would make an in-memory sort
+      risk exhausting RAM (above ``_HASHED_DISK_THRESHOLD``) switch to
+      prefix-bucketed deduplication on disk: keys are partitioned into
+      ``_HASHED_PREFIX_BUCKETS`` files by their first packed byte, then each
+      bucket is uniqued independently and the counts summed. No more than one
+      bucket is held in memory at once, so peak RAM stays bounded regardless
+      of clade size, at the cost of temporary disk I/O.
 
     Args:
-        seq_leaves: List of sequence leaf nodes.
+        seq_leaves: Sequence-rank leaf nodes to scan.
         min_len: Sliding window size in base pairs.
-        max_useful: Optional ceiling for early termination.
+        max_useful: Optional early-stop target; scanning stops once the
+            unique count provably exceeds ``max_useful`` times the
+            ``_EARLY_STOP_SAFETY_MULTIPLIER``. Early stop applies only on the
+            in-memory path.
 
     Returns:
         The total number of unique sliding-window subsequences.
     """
-    union_set: set[str] = set()
+    import os
+    import tempfile
+
+    import numpy as np
+    from numpy.lib.stride_tricks import sliding_window_view
+
     early_stop_threshold = (
         max_useful * _EARLY_STOP_SAFETY_MULTIPLIER if max_useful else None
     )
+    key_bytes = (min_len + _BASES_PER_BYTE - 1) // _BASES_PER_BYTE
+    void_dtype = np.dtype((np.void, key_bytes))
 
-    for leaf in seq_leaves:
-        fasta_path = getattr(leaf, "fasta_path", "")
-        header_id = getattr(leaf, "header_id", "")
-        if not fasta_path or not header_id:
-            continue
+    unique_pure = np.empty((0,), dtype=void_dtype)
+    pending: list = []
+    pending_count = 0
+    seen_keys_total = 0  # cumulative pure keys observed (pre-dedup)
+    ambiguous: set[str] = set()
 
-        sequence = _read_sequence_cached(fasta_path, header_id)
-        if not sequence or len(sequence) < min_len:
-            continue
+    # Disk-mode state, lazily activated when the node proves too large.
+    disk_mode = False
+    tmp_dir = None
+    bucket_files = None
+    bucket_paths = None
 
-        sequence_length = len(sequence)
-        for window_start in range(sequence_length - min_len + 1):
-            union_set.add(sequence[window_start : window_start + min_len])
+    def _compact(unique_pure, pending):
+        if not pending:
+            return unique_pure, [], 0
+        combined = np.concatenate([unique_pure, *pending])
+        return np.unique(combined), [], 0
 
-        if early_stop_threshold and len(union_set) >= early_stop_threshold:
-            break
+    def _activate_disk_mode(unique_pure, pending):
+        nonlocal tmp_dir, bucket_files, bucket_paths
+        tmp_dir = tempfile.mkdtemp(prefix="tts_exact_")
+        bucket_paths = _bucket_writer_paths(tmp_dir)
+        bucket_files = [open(p, "wb") for p in bucket_paths]
+        # Spill whatever is already in memory to the buckets.
+        if unique_pure.shape[0]:
+            _flush_keys_to_buckets(unique_pure, bucket_files, key_bytes)
+        for chunk in pending:
+            _flush_keys_to_buckets(chunk, bucket_files, key_bytes)
 
-    return len(union_set)
+    try:
+        for leaf in seq_leaves:
+            fasta_path = getattr(leaf, "fasta_path", "")
+            header_id = getattr(leaf, "header_id", "")
+            if not fasta_path or not header_id:
+                continue
+            sequence = _read_sequence_cached(fasta_path, header_id)
+            if not sequence or len(sequence) < min_len:
+                continue
+            seq_arr = np.frombuffer(sequence.encode("ascii"), dtype=np.uint8)
+            windows = sliding_window_view(seq_arr, min_len)
+            keys, pure_mask = _encode_windows_2bit(windows, min_len)
+            if keys.shape[0]:
+                seen_keys_total += keys.shape[0]
+                if disk_mode:
+                    _flush_keys_to_buckets(keys, bucket_files, key_bytes)
+                else:
+                    pending.append(keys)
+                    pending_count += keys.shape[0]
+            if not pure_mask.all():
+                ambig_idx = np.flatnonzero(~pure_mask)
+                ambiguous.update(
+                    sequence[i : i + min_len] for i in ambig_idx.tolist()
+                )
+
+            # Switch to disk mode once the node proves to be a supernode.
+            if not disk_mode and seen_keys_total >= _HASHED_DISK_THRESHOLD:
+                _activate_disk_mode(unique_pure, pending)
+                unique_pure = np.empty((0,), dtype=void_dtype)
+                pending = []
+                pending_count = 0
+                disk_mode = True
+                continue
+
+            if not disk_mode and pending_count >= _HASHED_FLUSH_THRESHOLD:
+                unique_pure, pending, pending_count = _compact(
+                    unique_pure, pending
+                )
+                if early_stop_threshold and (
+                    unique_pure.shape[0] + len(ambiguous)
+                    >= early_stop_threshold
+                ):
+                    return int(unique_pure.shape[0]) + len(ambiguous)
+
+        if disk_mode:
+            for handle in bucket_files:
+                handle.close()
+            unique_count = _count_unique_bucketed_on_disk(
+                bucket_paths, key_bytes
+            )
+            return unique_count + len(ambiguous)
+
+        unique_pure, pending, pending_count = _compact(unique_pure, pending)
+        return int(unique_pure.shape[0]) + len(ambiguous)
+    finally:
+        if tmp_dir is not None:
+            if bucket_files is not None:
+                for handle in bucket_files:
+                    if not handle.closed:
+                        handle.close()
+            for path in bucket_paths:
+                if os.path.exists(path):
+                    os.remove(path)
+            os.rmdir(tmp_dir)
 
 
 def _capacity_approximate(
