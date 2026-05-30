@@ -9,6 +9,7 @@ from src.taxotreeset.core.generation.distribution import (
 )
 from src.taxotreeset.core.generation.low_capacity_bucket import (
     make_low_capacity_bucket_node,
+    make_rare_taxa_bucket_node,
     register_virtual_bucket,
 )
 from src.taxotreeset.core.generation.rank_bucketing import (
@@ -22,6 +23,7 @@ __all__ = [
     "compute_node_capacity",
     "distribute_n_per_class_across_leaves",
     "make_low_capacity_bucket_node",
+    "make_rare_taxa_bucket_node",
     "make_virtual_id",
     "register_virtual_bucket",
 ]

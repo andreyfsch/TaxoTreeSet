@@ -26,6 +26,7 @@ PROTECTED_RANKS: frozenset[str] = frozenset(
         "virtual_cluster",
         "virtual_bucket",
         "virtual_low_capacity",
+        "virtual_rare_taxa",
         "virtual_misc",
         "virtual_no_rank",
         "virtual_species",
@@ -143,6 +144,36 @@ DEFAULT_MIN_NUM_SEQS: int = 1000
 DEFAULT_CUTOFF_PERCENTAGE: float = 98.0
 DEFAULT_USE_EXACT_CAPACITY: bool = True
 DEFAULT_MAX_N_PER_CLASS: int = 20_000
+
+DEFAULT_MIN_LEAVES_PER_CLASS: int = 3
+"""Minimum number of sequence leaves a child must have to qualify as a
+standalone training label.
+
+Children with fewer than this many sequence leaves carry too little
+signal for a classifier to learn a generalizable decision boundary:
+with one or two sequences, a model memorizes the exact sequence rather
+than learning the taxon. Such children are diverted into a
+``virtual_rare_taxa`` bucket (when the 'fallback' strategy is active),
+which becomes a single catch-all label rather than polluting the head
+with hundreds of near-empty classes.
+
+This is independent of capacity: a child can have high capacity (long
+sequences yielding many sliding windows) yet few distinct leaves. The
+leaf-count floor guards diversity of training examples, whereas the
+capacity cutoff guards their quantity."""
+
+DEFAULT_RARE_TAXA_STRATEGY: str = "fallback"
+"""Strategy for handling children below DEFAULT_MIN_LEAVES_PER_CLASS.
+
+* 'fallback': divert rare children into a virtual_rare_taxa bucket that
+  becomes a single fallback label under the parent head. The model
+  learns to route rare/novel inputs here rather than to a specific
+  under-supported class. Recommended for out-of-distribution-aware
+  classification (see Zhu et al. 2022 on OOD detection for phages).
+
+* 'keep': retain every child as its own label regardless of leaf count,
+  reproducing the pre-threshold behavior. Useful for completeness
+  studies or when downstream training applies its own class-balancing."""
 
 BLOOM_FALSE_POSITIVE_RATE: float = 0.01
 BLOOM_EXPECTED_INSERTIONS: int = 10_000_000

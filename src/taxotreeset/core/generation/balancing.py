@@ -59,6 +59,8 @@ from src.taxotreeset.core.generation.constants import (
     DEFAULT_MAX_N_PER_CLASS,
     DEFAULT_MIN_NUM_SEQS,
     DEFAULT_USE_EXACT_CAPACITY,
+    DEFAULT_MIN_LEAVES_PER_CLASS,
+    DEFAULT_RARE_TAXA_STRATEGY,
 )
 
 logger = logging.getLogger("TaxoTreeSet.Core.Generation.Balancing")
@@ -78,6 +80,8 @@ def compute_balanced_extraction_plan(
     cutoff_percentage: float = DEFAULT_CUTOFF_PERCENTAGE,
     use_exact_capacity: bool = DEFAULT_USE_EXACT_CAPACITY,
     max_n_per_class: int = DEFAULT_MAX_N_PER_CLASS,
+    min_leaves_per_class: int = DEFAULT_MIN_LEAVES_PER_CLASS,
+    rare_taxa_strategy: str = DEFAULT_RARE_TAXA_STRATEGY,
 ) -> dict:
     """Build a per-class extraction plan that balances training subseqs.
 
@@ -123,36 +127,121 @@ def compute_balanced_extraction_plan(
     capacity_mode = "exact" if use_exact_capacity else "approximate"
     parent_name = getattr(parent_node, "name", "?")
 
-    capacities = _compute_children_capacities(
+    # Phase 0: divert rare taxa (children with too few sequence leaves)
+    # into a fallback bucket before any capacity work. Gated on retaining
+    # at least two eligible children (decision A): if fewer than two clear
+    # the leaf-count floor, no diversion happens and every child stays.
+    eligible_children, rare_taxa_children = _partition_by_leaf_count(
         children=children,
+        leaf_cache=leaf_cache,
+        min_leaves_per_class=min_leaves_per_class,
+        rare_taxa_strategy=rare_taxa_strategy,
+    )
+    if rare_taxa_children:
+        logger.info(
+            f"  [RARE-TAXA] {parent_name}: diverting "
+            f"{len(rare_taxa_children)} children below "
+            f"{min_leaves_per_class}-leaf floor; "
+            f"{len(eligible_children)} eligible remain."
+        )
+
+    capacities = _compute_children_capacities(
+        children=eligible_children,
         min_len=min_len,
         leaf_cache=leaf_cache,
         capacity_mode=capacity_mode,
         max_n_per_class=max_n_per_class,
     )
-
     if not capacities:
-        return _empty_extraction_plan()
-
+        plan = _empty_extraction_plan()
+        plan["rare_taxa_children"] = rare_taxa_children
+        return plan
     min_capacity = min(capacities.values())
-
     if min_capacity >= min_num_seqs:
-        return _build_level_all_plan(
-            children=children,
+        plan = _build_level_all_plan(
+            children=eligible_children,
             capacities=capacities,
             min_capacity=min_capacity,
             max_n_per_class=max_n_per_class,
             parent_name=parent_name,
         )
+    else:
+        plan = _build_cutoff_plan(
+            children=eligible_children,
+            capacities=capacities,
+            cutoff_percentage=cutoff_percentage,
+            max_n_per_class=max_n_per_class,
+            parent_name=parent_name,
+        )
+    plan["rare_taxa_children"] = rare_taxa_children
+    return plan
 
-    return _build_cutoff_plan(
-        children=children,
-        capacities=capacities,
-        cutoff_percentage=cutoff_percentage,
-        max_n_per_class=max_n_per_class,
-        parent_name=parent_name,
+
+def _count_sequence_leaves(child, leaf_cache: dict) -> int:
+    """Count the sequence-rank leaves descending from a child node.
+
+    Uses the per-node leaf cache when available to avoid a full
+    subtree scan; falls back to scanning ``child.leaves`` on a miss.
+
+    Args:
+        child: bigtree Node to count leaves for.
+        leaf_cache: Per-node cache keyed by taxid string.
+
+    Returns:
+        Number of sequence-rank leaves under the child.
+    """
+    cached = leaf_cache.get(str(child.name))
+    if cached is not None:
+        return len(cached)
+    return sum(
+        1 for leaf in child.leaves if getattr(leaf, "rank", "") == "sequence"
     )
 
+
+def _partition_by_leaf_count(
+    children: list,
+    leaf_cache: dict,
+    min_leaves_per_class: int,
+    rare_taxa_strategy: str,
+) -> tuple[list, list]:
+    """Split children into leaf-count-eligible and rare-taxa groups.
+
+    Under the 'fallback' strategy, children with fewer than
+    ``min_leaves_per_class`` sequence leaves are diverted into the
+    rare-taxa group. The split is gated (decision A): when fewer than
+    two children clear the floor, the threshold is not applied and all
+    children are returned as eligible, preventing a head from
+    degenerating into a single rare_taxa label.
+
+    Under the 'keep' strategy, the split is a no-op: all children are
+    eligible regardless of leaf count.
+
+    Args:
+        children: Effective children of the parent.
+        leaf_cache: Per-node leaf cache keyed by taxid string.
+        min_leaves_per_class: Minimum sequence-leaf count to remain a
+            standalone training label.
+        rare_taxa_strategy: 'fallback' to divert rare children,
+            'keep' to retain every child.
+
+    Returns:
+        Two-tuple ``(eligible_children, rare_taxa_children)``.
+    """
+    if rare_taxa_strategy != "fallback":
+        return list(children), []
+
+    eligible: list = []
+    rare: list = []
+    for child in children:
+        if _count_sequence_leaves(child, leaf_cache) >= min_leaves_per_class:
+            eligible.append(child)
+        else:
+            rare.append(child)
+
+    if len(eligible) < 2:
+        return list(children), []
+
+    return eligible, rare
 
 def _compute_children_capacities(
     children: list,
@@ -197,6 +286,7 @@ def _empty_extraction_plan() -> dict:
         "n_per_class": 0,
         "retained_children": [],
         "low_capacity_children": [],
+        "rare_taxa_children": [],
         "capacities": {},
     }
 
@@ -245,6 +335,7 @@ def _build_level_all_plan(
         "n_per_class": n_per_class,
         "retained_children": list(children),
         "low_capacity_children": [],
+        "rare_taxa_children": [],
         "capacities": capacities,
     }
 
@@ -303,6 +394,7 @@ def _build_cutoff_plan(
         "n_per_class": n_per_class,
         "retained_children": retained_children,
         "low_capacity_children": low_capacity_children,
+        "rare_taxa_children": [],
         "capacities": capacities,
     }
 

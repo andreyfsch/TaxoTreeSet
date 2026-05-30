@@ -28,7 +28,7 @@ def main():
         "--mapping", "-m",
         type=str,
         default="configs/mapping.json",
-        help="Caminho para o arquivo JSON de mapeamento de escopos e redirecionamentos"
+        help="Path to the JSON file mapping scopes and fallback redirections"
     )
 
     parser.add_argument(
@@ -49,32 +49,33 @@ def main():
         "--min-num-seqs",
         type=int,
         default=1000,
-        help="Threshold de subseqs únicas por classe para nivelamento global "
-        "sem cutoff. Abaixo disso, aplica cutoff percentil e cria bucket "
-        "virtual_low_data (default: 1000)."
+        help="Threshold of unique subseqs per class for global leveling "
+        "without cutoff. Below this, a percentile cutoff is applied and a "
+        "virtual_low_capacity bucket is created (default: 1000)."
     )
 
     parser.add_argument(
         "--cutoff-percentage",
         type=float,
         default=98.0,
-        help="Percentual de filhos mantidos quando cutoff é aplicado. "
-            "Os (100-p)%% piores vão para o bucket low_data (default: 98.0)."
+        help="Percentage of children retained when cutoff is applied. "
+            "The lowest (100-p)%% by capacity go into the low_capacity "
+            "bucket (default: 98.0)."
     )
 
     parser.add_argument(
         "--approximate-capacity",
         action="store_true",
-        help="Usa Bloom filter para estimar capacidade dos nós (memória ~12MB). "
-            "Sem essa flag, usa cálculo exato via union de sets (mais preciso, "
-            "mas pode consumir centenas de GB em heads grandes). Recomenda-se "
-            "esta flag para ambientes locais (WSL, laptop)."
+        help="Use a Bloom filter to estimate node capacity (~12MB memory). "
+            "Without this flag, capacity is computed exactly via set union "
+            "(more precise, but can consume hundreds of GB on large heads). "
+            "This flag is recommended for local environments (WSL, laptop)."
     )
 
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Habilita logs DEBUG para diagnóstico"
+        help="Enable DEBUG-level logging for diagnostics"
     )
 
     parser.add_argument(
@@ -125,20 +126,43 @@ def main():
         "--min-subclades-per-bucket",
         type=int,
         default=5,
-        help="Mínimo de subclados (filhos) necessários para um rank anômalo "
-        "ter bucket virtual próprio. Abaixo disso, mescla no bucket 'misc' do pai."
+        help="Minimum number of subclades (children) required for an anomalous "
+        "rank to get its own virtual bucket. Below this, it is merged into "
+        "the parent's 'misc' bucket."
     )
 
     parser.add_argument(
         "--max-n-per-class",
         type=int,
         default=20000,
-        help="Teto absoluto de subseqs por classe em qualquer head. Limita "
-        "explosão em heads com genomas grandes (jumbo phages, etc). "
-        "Heads com capacity > este valor são capadas; demais ficam intactas "
-        "(default: 20000)."
+        help="Absolute ceiling on subseqs per class in any head. Limits "
+        "explosion on heads with large genomes (jumbo phages, etc). "
+        "Heads with capacity above this value are capped; others remain "
+        "intact (default: 20000)."
     )
 
+    parser.add_argument(
+        "--min-leaves-per-class",
+        type=int,
+        default=3,
+        help="Minimum number of sequence leaves a child must have to "
+        "remain a standalone training class. Children below this floor "
+        "carry too little signal (with 1-2 sequences the model memorizes "
+        "rather than generalizes) and, under the 'fallback' strategy, are "
+        "diverted into a virtual_rare_taxa bucket (default: 3)."
+    )
+    parser.add_argument(
+        "--rare-taxa-strategy",
+        type=str,
+        choices=["fallback", "keep"],
+        default="fallback",
+        help="How to handle children below --min-leaves-per-class. "
+        "'fallback': group them into a virtual_rare_taxa bucket that "
+        "becomes a single fallback label under the head (recommended for "
+        "out-of-distribution-aware classification). 'keep': retain every "
+        "child as its own class regardless of leaf count "
+        "(default: fallback)."
+    )
     args = parser.parse_args()
     setup_logging(level=logging.DEBUG if args.debug else logging.INFO)
     logger = logging.getLogger("TaxoTreeSet.Generation.CLI")
@@ -166,6 +190,8 @@ def main():
             cutoff_percentage=args.cutoff_percentage,
             max_n_per_class=args.max_n_per_class,
             use_exact_capacity=not args.approximate_capacity,
+            min_leaves_per_class=args.min_leaves_per_class,
+            rare_taxa_strategy=args.rare_taxa_strategy,
         )
 
         logger.info(
@@ -178,7 +204,7 @@ def main():
         print("\n" + "="*60)
         print("   🎉 CASCADED DATASET PRODUCTION SUCCEEDED!")
         print(f"   Target Domain Group: {args.rank.upper()}")
-        print(f"   Depth Boundary     : GENUS (Fixed Floor)")
+        print("   Depth Boundary     : GENUS (Fixed Floor)")
         print(f"   Output Encoding    : {args.output_format.upper()}")
         print(f"   Destination Vault  : {args.output}")
         print("="*60 + "\n")

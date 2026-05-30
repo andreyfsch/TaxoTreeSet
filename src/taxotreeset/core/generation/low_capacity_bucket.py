@@ -46,6 +46,10 @@ _LOW_CAPACITY_PURPOSE: str = "low_capacity"
 _LOW_CAPACITY_RANK: str = "virtual_low_capacity"
 _BUCKET_NAME_PREFIX: str = "virtual_low_capacity"
 
+_RARE_TAXA_PURPOSE: str = "rare_taxa"
+_RARE_TAXA_RANK: str = "virtual_rare_taxa"
+_RARE_TAXA_NAME_PREFIX: str = "virtual_rare_taxa"
+
 
 def make_low_capacity_bucket_node(
     parent_node,
@@ -109,6 +113,83 @@ def make_low_capacity_bucket_node(
         "rank": _LOW_CAPACITY_PURPOSE,
         "purpose": _LOW_CAPACITY_PURPOSE,
         "absorbed_taxids": [str(child.name) for child in low_capacity_children],
+    }
+    return bucket_node, metadata
+
+
+def make_rare_taxa_bucket_node(
+    parent_node,
+    rare_taxa_children: list,
+    parent_taxid: str | None = None,
+    parent_name: str | None = None,
+) -> tuple[Node, dict]:
+    """Create the rare-taxa bucket absorbing low-leaf-count children.
+
+    Called by the balancing layer (under the 'fallback' rare-taxa
+    strategy) for children whose sequence-leaf count falls below
+    ``DEFAULT_MIN_LEAVES_PER_CLASS``. Such children carry too few
+    distinct training examples to learn a generalizable boundary, so
+    rather than letting them dilute the head with near-empty classes,
+    they are grouped into a single fallback label. A classifier trained
+    on this head learns to route rare or novel inputs to the bucket
+    instead of forcing them into an under-supported specific class.
+
+    This is semantically distinct from the low-capacity bucket:
+    low-capacity groups children with insufficient *quantity* of
+    extractable subsequences (capacity below the percentile cutoff),
+    whereas rare-taxa groups children with insufficient *diversity*
+    of source sequences (too few leaves). A child may have high
+    capacity yet few leaves (e.g., a single very long genome), in
+    which case it is rare but not low-capacity.
+
+    The bucket's virtual TaxID is generated deterministically from
+    the parent TaxID and the purpose string 'rare_taxa', so the same
+    bucket always receives the same ID across pipeline runs.
+
+    Args:
+        parent_node: bigtree parent Node under which the bucket is
+            inserted.
+        rare_taxa_children: List of children below the leaf-count
+            floor. These children are re-parented under the new
+            bucket node by mutating their ``.parent`` attribute.
+        parent_taxid: Parent's TaxID. Defaults to ``parent_node.name``.
+        parent_name: Parent's human-readable scientific name.
+            Defaults to ``parent_node.scientific_name``.
+
+    Returns:
+        Two-tuple ``(bucket_node, bucket_metadata)``:
+            - bucket_node: the newly created Node, already attached
+              to parent_node with all the children re-parented.
+            - bucket_metadata: dict with keys 'taxid', 'name', 'rank',
+              'purpose', 'absorbed_taxids' suitable for inclusion in
+              the virtual ID registry.
+    """
+    resolved_parent_taxid = parent_taxid or str(parent_node.name)
+    resolved_parent_name = parent_name or getattr(
+        parent_node, "scientific_name", resolved_parent_taxid
+    )
+
+    virtual_id = make_virtual_id(resolved_parent_taxid, _RARE_TAXA_PURPOSE)
+    bucket_name = f"{_RARE_TAXA_NAME_PREFIX}_{resolved_parent_name}"
+
+    bucket_node = _make_virtual_bucket_node(
+        virtual_id=virtual_id,
+        parent_taxid=resolved_parent_taxid,
+        parent_name=resolved_parent_name,
+        rank=_RARE_TAXA_RANK,
+        scientific_name=bucket_name,
+        parent_node=parent_node,
+    )
+
+    for child in rare_taxa_children:
+        child.parent = bucket_node
+
+    metadata = {
+        "taxid": virtual_id,
+        "name": bucket_name,
+        "rank": _RARE_TAXA_PURPOSE,
+        "purpose": _RARE_TAXA_PURPOSE,
+        "absorbed_taxids": [str(child.name) for child in rare_taxa_children],
     }
     return bucket_node, metadata
 

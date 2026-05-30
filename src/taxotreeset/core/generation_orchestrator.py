@@ -63,12 +63,15 @@ from src.taxotreeset.core.generation import (
     compute_balanced_extraction_plan,
     distribute_n_per_class_across_leaves,
     make_low_capacity_bucket_node,
+    make_rare_taxa_bucket_node,
     register_virtual_bucket,
 )
 from src.taxotreeset.core.generation.constants import (
     DEFAULT_CUTOFF_PERCENTAGE,
     DEFAULT_MAX_N_PER_CLASS,
+    DEFAULT_MIN_LEAVES_PER_CLASS,
     DEFAULT_MIN_NUM_SEQS,
+    DEFAULT_RARE_TAXA_STRATEGY,
     DEFAULT_USE_EXACT_CAPACITY,
     is_recursion_terminator,
 )
@@ -146,6 +149,8 @@ class GenerationOrchestrator:
         cutoff_percentage: float = DEFAULT_CUTOFF_PERCENTAGE,
         max_n_per_class: int = DEFAULT_MAX_N_PER_CLASS,
         use_exact_capacity: bool = DEFAULT_USE_EXACT_CAPACITY,
+        min_leaves_per_class: int = DEFAULT_MIN_LEAVES_PER_CLASS,
+        rare_taxa_strategy: str = DEFAULT_RARE_TAXA_STRATEGY,
     ) -> None:
         """Initialize the orchestrator and its collaborating components.
 
@@ -166,6 +171,13 @@ class GenerationOrchestrator:
             max_n_per_class: Hard ceiling on n_per_class.
             use_exact_capacity: True for exact set union (precise),
                 False for Bloom filter (constant memory).
+            min_leaves_per_class: Minimum sequence-leaf count for a
+                child to remain a standalone training label. Children
+                below this floor are diverted to a rare-taxa bucket
+                under the 'fallback' strategy.
+            rare_taxa_strategy: 'fallback' to divert low-leaf children
+                into a virtual_rare_taxa bucket, or 'keep' to retain
+                every child regardless of leaf count.
         """
         self.registry: Any = registry
         self.config_path: str = config_path
@@ -179,6 +191,8 @@ class GenerationOrchestrator:
         self.cutoff_percentage: float = cutoff_percentage
         self.max_n_per_class: int = max_n_per_class
         self.use_exact_capacity: bool = use_exact_capacity
+        self.min_leaves_per_class: int = min_leaves_per_class
+        self.rare_taxa_strategy: str = rare_taxa_strategy
 
         self.downloader: NCBIDownloader = NCBIDownloader(
             registry=self.registry,
@@ -590,11 +604,19 @@ class GenerationOrchestrator:
             cutoff_percentage=self.cutoff_percentage,
             use_exact_capacity=self.use_exact_capacity,
             max_n_per_class=self.max_n_per_class,
+            min_leaves_per_class=self.min_leaves_per_class,
+            rare_taxa_strategy=self.rare_taxa_strategy,
         )
 
         retained_children = self._handle_low_capacity_bucket(
             current_node=current_node,
             plan=plan,
+            virtual_id_registry=virtual_id_registry,
+        )
+        retained_children = self._handle_rare_taxa_bucket(
+            current_node=current_node,
+            plan=plan,
+            retained_children=retained_children,
             virtual_id_registry=virtual_id_registry,
         )
 
@@ -759,6 +781,51 @@ class GenerationOrchestrator:
         )
 
         return [*plan["retained_children"], bucket_node]
+
+    def _handle_rare_taxa_bucket(
+        self,
+        current_node: Node,
+        plan: dict,
+        retained_children: list,
+        virtual_id_registry: dict,
+    ) -> list:
+        """Materialize the rare-taxa bucket when the leaf-count floor diverts children.
+
+        Runs after the low-capacity bucket so both synthetic labels can
+        coexist in the same head. Children diverted by the leaf-count
+        floor (plan['rare_taxa_children']) are absorbed into a single
+        virtual_rare_taxa node that becomes a fallback label; the model
+        learns to route rare or novel inputs here instead of forcing
+        them into an under-supported specific class.
+
+        Args:
+            current_node: Parent node being scheduled.
+            plan: Balancing plan from compute_balanced_extraction_plan.
+            retained_children: Current list of training labels (already
+                including the low-capacity bucket if one was created).
+            virtual_id_registry: Registry to populate (mutated).
+
+        Returns:
+            Updated list of retained training labels, with the rare-taxa
+            bucket appended when one is created.
+        """
+        if not plan.get("rare_taxa_children"):
+            return retained_children
+        parent_taxid = str(current_node.name)
+        parent_name = getattr(current_node, "scientific_name", parent_taxid)
+        bucket_node, bucket_meta = make_rare_taxa_bucket_node(
+            parent_node=current_node,
+            rare_taxa_children=plan["rare_taxa_children"],
+            parent_taxid=parent_taxid,
+            parent_name=parent_name,
+        )
+        register_virtual_bucket(
+            virtual_id_registry=virtual_id_registry,
+            bucket_metadata=bucket_meta,
+            parent_taxid=parent_taxid,
+            parent_name=parent_name,
+        )
+        return [*retained_children, bucket_node]
 
     def _build_extraction_job(
         self,
