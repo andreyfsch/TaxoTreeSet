@@ -111,5 +111,19 @@ one LoRA adapter on top of DNABERT-2.
 
 ### Capacity
 The number of unique subsequences of length `min_len` extractable from all
-genome sequences under a taxonomic node via sliding window. Can be computed
-exactly (set union) or approximately (Bloom filter).
+genome sequences under a taxonomic node via sliding window. Drives the
+balancing layer: each child's `n_per_class` is bounded by the minimum
+capacity across its sibling group.
+
+Computed in one of two modes:
+
+- **Exact** (default): a lossless count. Pure-ACGT windows are packed at
+  2 bits per base and deduplicated; the rare windows carrying IUPAC
+  ambiguity codes are tracked in an exact string set. The two groups are
+  disjoint, so their unique counts sum exactly. Memory is bounded: mid-size
+  clades deduplicate in RAM, while supernodes spill to prefix-bucketed
+  deduplication on disk, so even the Viruses root (442M unique 100-mers)
+  computes within a few GB of RAM.
+- **Approximate** (`--approximate-capacity`): a Bloom filter at ~12 MB
+  constant memory and ~1% false-positive rate. Trades exactness for speed
+  on very large runs.

@@ -77,7 +77,7 @@ Key options:
 | `--rank, -g`             | viruses       | Target biological domain scope                                 |
 | `--output, -o`           | data/datasets | Output directory for shards and manifests                      |
 | `--max-subseq-len, -w`   | 2000          | Sliding-window size (bp) for subsequence extraction            |
-| `--approximate-capacity` | off           | Use the Bloom filter for capacity (~12MB) instead of exact     |
+| `--approximate-capacity` | off           | Bloom filter for capacity (~12MB, ~1% error); default is exact, memory-bounded |
 | `--min-num-seqs`         | 1000          | Below this per-class capacity, the cutoff scenario triggers    |
 | `--cutoff-percentage`    | 98.0          | Percentile of children retained when cutoff applies            |
 | `--max-n-per-class`      | 20000         | Hard ceiling on subseqs per class                              |
