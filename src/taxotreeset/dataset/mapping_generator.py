@@ -11,7 +11,12 @@ class DynamicMappingGenerator:
     def __init__(self, abundance_threshold: int = 5):
         self.abundance_threshold = abundance_threshold
 
-    def compile_mapping(self, root_node: Node, target_rank: str, virtual_fallback_id: int = 999201) -> dict:
+    def compile_mapping(
+        self,
+        root_node: Node,
+        target_rank: str,
+        virtual_fallback_id: int = 999201,
+    ) -> dict:
         """
         Traverses the tree to find all nodes at the target_rank, counts their sequence abundance,
         and dynamically creates a redirection mapping for elements that fall below the threshold.
@@ -28,9 +33,13 @@ class DynamicMappingGenerator:
         Returns
         -------
         dict
-            A standalone dictionary representation of the mapping rules generated for this dataset run.
+            A standalone dictionary representation of the mapping rules
+            generated for this dataset run.
         """
-        logger.info(f"Compiling dynamic mapping at rank level: '{target_rank}' with abundance threshold >= {self.abundance_threshold}")
+        logger.info(
+            f"Compiling dynamic mapping at rank level: '{target_rank}' "
+            f"with abundance threshold >= {self.abundance_threshold}"
+        )
         
         # Locate all structural nodes matching the target ranking criteria
         target_nodes = find_attrs(root_node, "rank", target_rank)
@@ -47,7 +56,8 @@ class DynamicMappingGenerator:
             if not taxon_id_str:
                 continue
                 
-            # Count how many total physical sequence leaves exist under this specific taxonomic subtree
+            # Count how many total physical sequence leaves exist under
+            # this specific taxonomic subtree
             sequence_leaves = find_attrs(node, "rank", "sequence")
             abundance_count = len(sequence_leaves)
             
@@ -57,14 +67,20 @@ class DynamicMappingGenerator:
                     "target_id": taxon_id_str,
                     "label": node.node_name
                 }
-                logger.debug(f"Taxon '{node.node_name}' ({taxon_id_str}) passed with abundance: {abundance_count}")
+                logger.debug(
+                    f"Taxon '{node.node_name}' ({taxon_id_str}) passed "
+                    f"with abundance: {abundance_count}"
+                )
             else:
                 # Class is rare: forced redirection into the safe virtual fallback node
                 compiled_scopes["redirections"][taxon_id_str] = {
                     "target_id": str(virtual_fallback_id),
                     "label": node.node_name
                 }
-                logger.info(f"Taxon '{node.node_name}' ({taxon_id_str}) redirected to fallback due to low abundance ({abundance_count})")
+                logger.info(
+                    f"Taxon '{node.node_name}' ({taxon_id_str}) redirected "
+                    f"to fallback due to low abundance ({abundance_count})"
+                )
 
         # Wraps the layout into a structured configuration schema matching the orchestrator needs
         final_mapping = {

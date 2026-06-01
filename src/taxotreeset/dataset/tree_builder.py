@@ -33,7 +33,7 @@ pointing back to their location in the LMDB vault.
 
 Typical usage::
 
-    from src.taxotreeset.dataset.tree_builder import generate_seqs_by_taxon_tree
+    from taxotreeset.dataset.tree_builder import generate_seqs_by_taxon_tree
 
     tree_root = generate_seqs_by_taxon_tree(
         registry_path="data/registry.json",
@@ -53,7 +53,7 @@ import taxoniq
 from bigtree import Node
 from tqdm import tqdm
 
-from src.taxotreeset.io.noise_filter import NoiseFilter
+from taxotreeset.io.noise_filter import NoiseFilter
 
 logger = logging.getLogger("TaxoTreeSet.Dataset.TreeBuilder")
 

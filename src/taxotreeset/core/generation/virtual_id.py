@@ -22,7 +22,7 @@ across executions.
 
 Typical usage::
 
-    from src.taxotreeset.core.generation.virtual_id import make_virtual_id
+    from taxotreeset.core.generation.virtual_id import make_virtual_id
 
     bucket_taxid = make_virtual_id(
         parent_taxid="10239",  # Viruses

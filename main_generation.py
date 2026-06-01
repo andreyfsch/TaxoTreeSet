@@ -2,8 +2,8 @@ import argparse
 import logging
 import sys
 import os
-from src.taxotreeset.io.registry import NCBIRegistry
-from src.taxotreeset.core.generation_orchestrator import GenerationOrchestrator
+from taxotreeset.io.registry import NCBIRegistry
+from taxotreeset.core.generation_orchestrator import GenerationOrchestrator
 
 
 def setup_logging(level=logging.INFO):

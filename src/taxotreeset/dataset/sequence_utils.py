@@ -31,7 +31,7 @@ safe to use with sequences containing degenerate bases.
 
 Typical usage::
 
-    from src.taxotreeset.dataset.sequence_utils import (
+    from taxotreeset.dataset.sequence_utils import (
         extract_subseqs,
         get_complement,
     )

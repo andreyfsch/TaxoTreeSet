@@ -32,8 +32,8 @@ bisect_step.sh
 **/*.bak
 
 # IDE / editor settings
-.vscode/
 TaxoTreeSet.code-workspace
 
 # Intermediate refactoring artifacts
 src/taxotreeset/core/generation_orchestrator.py.part1
+*.egg-info/

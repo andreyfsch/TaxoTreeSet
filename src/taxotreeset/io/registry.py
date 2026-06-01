@@ -22,7 +22,7 @@ needed to locate and identify each accession.
 
 Typical usage::
 
-    from src.taxotreeset.io.registry import NCBIRegistry
+    from taxotreeset.io.registry import NCBIRegistry
 
     registry = NCBIRegistry(
         config_path="configs/mapping.json",

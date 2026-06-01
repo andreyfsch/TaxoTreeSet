@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taxotreeset"
+version = "0.1.0"
+description = "Balanced, hierarchically structured training datasets from NCBI RefSeq for cascaded fine-tuning of genomic language models"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { text = "MIT" }
+authors = [
+    { name = "Andrey Schoier" },
+]
+keywords = [
+    "bioinformatics",
+    "taxonomy",
+    "genomics",
+    "machine-learning",
+    "dataset-generation",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "bigtree>=0.23,<1",
+    "numpy>=2,<3",
+    "pyarrow>=24,<25",
+    "lmdb>=1.4,<3",
+    "zstandard>=0.22,<1",
+    "taxoniq>=0.6",
+]
+
+[project.urls]
+Repository = "https://github.com/andreyfsch/TaxoTreeSet"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# E/F: pycodestyle + pyflakes defaults. C901: cyclomatic complexity.
+select = ["E", "F", "C901"]
+
+[tool.ruff.lint.mccabe]
+# Functions above this complexity are flagged. One existing outlier,
+# _capacity_exact, carries an explicit noqa with rationale; it is slated
+# for refactoring once a test suite guarantees behavioral equivalence.
+# (The other former outliers lived in dead Kraken2-era code that has
+# since been removed.) See docs/TODOs/complexity_refactor.md.
+max-complexity = 12
+
+[tool.pyright]
+typeCheckingMode = "basic"
+include = ["src"]

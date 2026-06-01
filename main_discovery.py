@@ -3,8 +3,8 @@ import json
 import logging
 import os
 import sys
-from src.taxotreeset.io.registry import NCBIRegistry
-from src.taxotreeset.core.orchestrator import DiscoveryOrchestrator
+from taxotreeset.io.registry import NCBIRegistry
+from taxotreeset.core.orchestrator import DiscoveryOrchestrator
 
 
 def setup_logging():

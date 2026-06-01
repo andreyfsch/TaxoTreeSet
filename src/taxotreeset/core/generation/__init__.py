@@ -1,21 +1,21 @@
 """Generation algorithms decomposed by responsibility."""
 
-from src.taxotreeset.core.generation.balancing import (
+from taxotreeset.core.generation.balancing import (
     compute_balanced_extraction_plan,
 )
-from src.taxotreeset.core.generation.capacity import compute_node_capacity
-from src.taxotreeset.core.generation.distribution import (
+from taxotreeset.core.generation.capacity import compute_node_capacity
+from taxotreeset.core.generation.distribution import (
     distribute_n_per_class_across_leaves,
 )
-from src.taxotreeset.core.generation.low_capacity_bucket import (
+from taxotreeset.core.generation.low_capacity_bucket import (
     make_low_capacity_bucket_node,
     make_rare_taxa_bucket_node,
     register_virtual_bucket,
 )
-from src.taxotreeset.core.generation.rank_bucketing import (
+from taxotreeset.core.generation.rank_bucketing import (
     classify_children_by_rank,
 )
-from src.taxotreeset.core.generation.virtual_id import make_virtual_id
+from taxotreeset.core.generation.virtual_id import make_virtual_id
 
 __all__ = [
     "classify_children_by_rank",

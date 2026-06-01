@@ -25,8 +25,8 @@ The downloader uses three design choices to keep transfers efficient:
 
 Typical usage::
 
-    from src.taxotreeset.io.registry import NCBIRegistry
-    from src.taxotreeset.io.downloader import NCBIDownloader
+    from taxotreeset.io.registry import NCBIRegistry
+    from taxotreeset.io.downloader import NCBIDownloader
 
     registry = NCBIRegistry(registry_path="data/registry.json")
     downloader = NCBIDownloader(registry=registry, vault_path="data/vault")

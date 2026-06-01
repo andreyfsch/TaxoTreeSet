@@ -32,10 +32,10 @@ passthrough, cascade terminator).
 
 Typical usage::
 
-    from src.taxotreeset.core.generation_orchestrator import (
+    from taxotreeset.core.generation_orchestrator import (
         GenerationOrchestrator,
     )
-    from src.taxotreeset.io.registry import NCBIRegistry
+    from taxotreeset.io.registry import NCBIRegistry
 
     registry = NCBIRegistry(registry_path="data/registry.json")
     pipeline = GenerationOrchestrator(
@@ -58,7 +58,7 @@ from typing import Any
 
 from bigtree import Node
 
-from src.taxotreeset.core.generation import (
+from taxotreeset.core.generation import (
     classify_children_by_rank,
     compute_balanced_extraction_plan,
     distribute_n_per_class_across_leaves,
@@ -66,7 +66,7 @@ from src.taxotreeset.core.generation import (
     make_rare_taxa_bucket_node,
     register_virtual_bucket,
 )
-from src.taxotreeset.core.generation.constants import (
+from taxotreeset.core.generation.constants import (
     DEFAULT_CUTOFF_PERCENTAGE,
     DEFAULT_MAX_N_PER_CLASS,
     DEFAULT_MIN_LEAVES_PER_CLASS,
@@ -75,9 +75,9 @@ from src.taxotreeset.core.generation.constants import (
     DEFAULT_USE_EXACT_CAPACITY,
     is_recursion_terminator,
 )
-from src.taxotreeset.dataset.builder import DatasetBuilder
-from src.taxotreeset.dataset.tree_builder import generate_seqs_by_taxon_tree
-from src.taxotreeset.io.downloader import NCBIDownloader
+from taxotreeset.dataset.builder import DatasetBuilder
+from taxotreeset.dataset.tree_builder import generate_seqs_by_taxon_tree
+from taxotreeset.io.downloader import NCBIDownloader
 
 # Force single-threaded execution in BLAS/MKL backends. Multi-threaded
 # C libraries can deadlock or segfault under the spawn-based worker

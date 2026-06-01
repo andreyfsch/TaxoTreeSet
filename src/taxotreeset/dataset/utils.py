@@ -27,7 +27,7 @@ Key design considerations:
 
 Typical usage::
 
-    from src.taxotreeset.dataset.utils import _read_single_sequence
+    from taxotreeset.dataset.utils import _read_single_sequence
 
     sequence = _read_single_sequence(
         lmdb_path="data/vault/sequences.lmdb",
@@ -68,7 +68,7 @@ def _pool_worker_initializer() -> None:
     workers; spawned workers start with empty module state anyway and
     are unaffected.
     """
-    from src.taxotreeset.dataset import utils
+    from taxotreeset.dataset import utils
 
     utils._LMDB_ENV_CACHE = {}
     utils._LMDB_CACHE_PID = None

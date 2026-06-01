@@ -43,7 +43,7 @@ recently accessed sequences. The cache is bounded by
 
 Typical usage::
 
-    from src.taxotreeset.core.generation.capacity import compute_node_capacity
+    from taxotreeset.core.generation.capacity import compute_node_capacity
 
     capacity = compute_node_capacity(
         node=some_node,
@@ -57,11 +57,11 @@ Typical usage::
 import logging
 import math
 
-from src.taxotreeset.core.generation.constants import (
+from taxotreeset.core.generation.constants import (
     BLOOM_EXPECTED_INSERTIONS,
     BLOOM_FALSE_POSITIVE_RATE,
 )
-from src.taxotreeset.dataset.utils import _read_single_sequence
+from taxotreeset.dataset.utils import _read_single_sequence
 
 logger = logging.getLogger("TaxoTreeSet.Core.Generation.Capacity")
 
@@ -335,7 +335,14 @@ def _encode_windows_2bit(windows, min_len: int):
     return keys, pure_mask
 
 
-def _capacity_exact(
+# noqa rationale: intrinsic complexity from the adaptive design --
+# in-memory np.unique for mid-size clades vs. prefix-bucketed on-disk
+# deduplication for supernodes, plus two disjoint encoding paths
+# (pure-ACGT 2-bit packing and an exact string set for IUPAC-ambiguous
+# windows). Validated bit-exact against the former string-set
+# implementation. Refactoring is deferred until an automated test suite
+# guarantees behavioral equivalence; see docs/TODOs/complexity_refactor.md.
+def _capacity_exact(  # noqa: C901
     seq_leaves: list,
     min_len: int,
     max_useful: int | None = None,

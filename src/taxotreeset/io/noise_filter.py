@@ -22,7 +22,7 @@ documented in ``configs/noise_patterns.schema.json``.
 
 Typical usage::
 
-    from src.taxotreeset.io.noise_filter import NoiseFilter
+    from taxotreeset.io.noise_filter import NoiseFilter
 
     noise_filter = NoiseFilter()
     if noise_filter.is_noise("unclassified Caudoviricetes", rank="no_rank"):

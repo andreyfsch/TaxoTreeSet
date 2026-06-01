@@ -26,7 +26,7 @@ class indices and split fractions.
 
 Typical usage::
 
-    from src.taxotreeset.core.generation.distribution import (
+    from taxotreeset.core.generation.distribution import (
         distribute_n_per_class_across_leaves,
     )
 
@@ -41,7 +41,7 @@ Typical usage::
 
 import logging
 
-from src.taxotreeset.core.generation.capacity import _read_sequence_cached
+from taxotreeset.core.generation.capacity import _read_sequence_cached
 
 logger = logging.getLogger("TaxoTreeSet.Core.Generation.Distribution")
 

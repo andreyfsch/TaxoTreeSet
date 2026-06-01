@@ -37,7 +37,7 @@ per head.
 
 Typical usage::
 
-    from src.taxotreeset.dataset.builder import DatasetBuilder
+    from taxotreeset.dataset.builder import DatasetBuilder
 
     builder = DatasetBuilder(
         output_dir="data/datasets",
@@ -61,8 +61,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from tqdm import tqdm
 
-from src.taxotreeset.dataset.sequence_utils import extract_subseqs
-from src.taxotreeset.dataset.utils import (
+from taxotreeset.dataset.sequence_utils import extract_subseqs
+from taxotreeset.dataset.utils import (
     _pool_worker_initializer,
     _read_single_sequence,
 )

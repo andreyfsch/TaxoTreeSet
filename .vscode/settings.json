@@ -1,0 +1,30 @@
+{
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll.ruff": "explicit",
+      "source.organizeImports.ruff": "explicit"
+    },
+    "editor.rulers": [
+      100
+    ]
+  },
+  "ruff.lint.enable": true,
+  "ruff.importStrategy": "fromEnvironment",
+  "ruff.nativeServer": "on",
+  "json.schemas": [
+    {
+      "fileMatch": [
+        "configs/mapping.json"
+      ],
+      "url": "./configs/mapping.schema.json"
+    },
+    {
+      "fileMatch": [
+        "configs/noise_patterns.json"
+      ],
+      "url": "./configs/noise_patterns.schema.json"
+    }
+  ]
+}

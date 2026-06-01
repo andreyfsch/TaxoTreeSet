@@ -33,7 +33,7 @@ distributing samples across each child's sequence leaves.
 
 Typical usage::
 
-    from src.taxotreeset.core.generation.balancing import (
+    from taxotreeset.core.generation.balancing import (
         compute_balanced_extraction_plan,
     )
 
@@ -53,8 +53,8 @@ Typical usage::
 
 import logging
 
-from src.taxotreeset.core.generation.capacity import compute_node_capacity
-from src.taxotreeset.core.generation.constants import (
+from taxotreeset.core.generation.capacity import compute_node_capacity
+from taxotreeset.core.generation.constants import (
     DEFAULT_CUTOFF_PERCENTAGE,
     DEFAULT_MAX_N_PER_CLASS,
     DEFAULT_MIN_NUM_SEQS,

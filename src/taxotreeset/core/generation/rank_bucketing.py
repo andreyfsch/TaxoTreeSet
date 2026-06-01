@@ -37,7 +37,7 @@ parent produces the same result.
 
 Typical usage::
 
-    from src.taxotreeset.core.generation.rank_bucketing import (
+    from taxotreeset.core.generation.rank_bucketing import (
         classify_children_by_rank,
     )
 
@@ -53,11 +53,11 @@ from collections import Counter, defaultdict
 
 from bigtree import Node
 
-from src.taxotreeset.core.generation.constants import is_protected_rank
-from src.taxotreeset.core.generation.low_capacity_bucket import (
+from taxotreeset.core.generation.constants import is_protected_rank
+from taxotreeset.core.generation.low_capacity_bucket import (
     _make_virtual_bucket_node,
 )
-from src.taxotreeset.core.generation.virtual_id import make_virtual_id
+from taxotreeset.core.generation.virtual_id import make_virtual_id
 
 logger = logging.getLogger("TaxoTreeSet.Core.Generation.RankBucketing")
 

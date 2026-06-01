@@ -34,8 +34,8 @@ genome content into the LMDB vault.
 
 Typical usage::
 
-    from src.taxotreeset.core.orchestrator import DiscoveryOrchestrator
-    from src.taxotreeset.io.registry import NCBIRegistry
+    from taxotreeset.core.orchestrator import DiscoveryOrchestrator
+    from taxotreeset.io.registry import NCBIRegistry
 
     registry = NCBIRegistry(registry_path="data/registry.json")
     orchestrator = DiscoveryOrchestrator(

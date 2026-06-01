@@ -1,7 +1,7 @@
 import logging
 import hashlib
 from bigtree import Node, find_attrs
-from src.taxotreeset.dataset.utils import _read_single_sequence
+from taxotreeset.dataset.utils import _read_single_sequence
 
 # Local module logger setup
 logger = logging.getLogger("TaxoTreeSet.Dataset.Analyzer")
@@ -20,11 +20,13 @@ class TaxonDiversityAnalyzer:
         
         Uses in-memory mapping of 128-bit integers (MD5 bignums) to guarantee
         zero statistical collisions (0%) even within large sequence windows (e.g., 2000bp),
-        effectively eliminating bias introduced by genomic repetitive regions (transposons, satellites).
+        effectively eliminating bias introduced by genomic repetitive
+        regions (transposons, satellites).
         
         Complexity:
             Memory: O(U) where U is the number of unique subsequences under the node.
-            Time: O(N * L) where N is the total number of genomes and L is the average sequence length.
+            Time: O(N * L) where N is the total number of genomes and
+            L is the average sequence length.
         """
         sequence_nodes = find_attrs(node, "rank", "sequence")
         unique_hashes = set()

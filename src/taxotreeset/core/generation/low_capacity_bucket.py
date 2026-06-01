@@ -24,7 +24,7 @@ mechanism created them.
 
 Typical usage::
 
-    from src.taxotreeset.core.generation.low_capacity_bucket import (
+    from taxotreeset.core.generation.low_capacity_bucket import (
         make_low_capacity_bucket_node,
     )
 
@@ -38,7 +38,7 @@ import logging
 
 from bigtree import Node
 
-from src.taxotreeset.core.generation.virtual_id import make_virtual_id
+from taxotreeset.core.generation.virtual_id import make_virtual_id
 
 logger = logging.getLogger("TaxoTreeSet.Core.Generation.LowCapacityBucket")
 
