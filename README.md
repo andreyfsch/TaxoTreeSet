@@ -43,12 +43,12 @@ TaxoTreeSet runs in two stages, each with its own entry point.
 
 ### Stage 1: Discovery
 
-`main_discovery.py` queries NCBI from a biological root TaxID, applies the
+`taxotreeset discover` queries NCBI from a biological root TaxID, applies the
 configured scope mapping, and writes an inventory (`registry.json`) plus the
 downloaded sequences into the LMDB vault.
 
 ```
-python main_discovery.py --taxon-id 10239 --mapping configs/mapping.json --registry data/registry.json
+python3 -m taxotreeset discover --taxon-id 10239
 ```
 
 Key options:
@@ -57,17 +57,17 @@ Key options:
 |-------------------|-----------------------|--------------------------------------------------|
 | `--taxon-id, -t`  | 10239 (Viruses)       | NCBI TaxID of the biological root                |
 | `--mapping, -m`   | configs/mapping.json  | Scope and fallback redirection rules             |
-| `--registry, -r`  | data/registry.json    | Destination inventory file                       |
+| `--registry, -r`  | XDG data dir          | Destination inventory file                       |
 | `--reset, -f`     | off                   | Delete the old registry before a fresh discovery |
 
 ### Stage 2: Generation
 
-`main_generation.py` builds the taxonomic tree from the registry, runs the
+`taxotreeset generate` builds the taxonomic tree from the registry, runs the
 decision-point cascade to decide heads, buckets, and passthroughs, and writes
 the balanced Parquet shards plus the sidecar manifests.
 
 ```
-python main_generation.py --rank viruses --output data/datasets --approximate-capacity
+python3 -m taxotreeset generate --rank viruses
 ```
 
 Key options:

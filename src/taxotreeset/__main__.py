@@ -1,0 +1,64 @@
+"""Entry point for ``python -m taxotreeset``.
+
+Builds the top-level argument parser with the ``discover`` and
+``generate`` subcommands and dispatches to the selected one.
+"""
+import argparse
+import sys
+
+from taxotreeset.cli import discover, generate
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the top-level parser with all subcommands.
+
+    Returns:
+        The configured argument parser.
+    """
+    parser = argparse.ArgumentParser(
+        prog="taxotreeset",
+        description="TaxoTreeSet - balanced hierarchical genomic datasets "
+        "from NCBI RefSeq for cascaded fine-tuning.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(
+        dest="command",
+        metavar="{discover,generate}",
+        help="Subcommand to run.",
+    )
+
+    discover_parser = subparsers.add_parser(
+        "discover",
+        help="Scan NCBI taxonomy and build the inventory registry.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    discover.add_arguments(discover_parser)
+    discover_parser.set_defaults(_run=discover.run)
+
+    generate_parser = subparsers.add_parser(
+        "generate",
+        help="Produce the cascaded training dataset from the registry.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    generate.add_arguments(generate_parser)
+    generate_parser.set_defaults(_run=generate.run)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Parse arguments and dispatch to the selected subcommand.
+
+    Args:
+        argv: Argument list (defaults to ``sys.argv[1:]`` when None).
+    """
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not getattr(args, "command", None):
+        parser.print_help()
+        sys.exit(1)
+    args._run(args)
+
+
+if __name__ == "__main__":
+    main()

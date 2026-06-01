@@ -7,7 +7,7 @@ still holds valid sequences (the 39GB parquet dataset was generated
 from those sequences).
 
 ## Resolution paths
-1. Run main_discovery.py --reset + main_generation.py to re-fetch
+1. Run 'taxotreeset discover --reset' + 'taxotreeset generate' to re-fetch
    everything (1-3h, but guarantees consistency).
 2. Write a one-shot script that iterates the LMDB keys, parses them
    into per-accession header lists, and writes them back to the
