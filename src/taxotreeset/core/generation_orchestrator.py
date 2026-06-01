@@ -138,9 +138,9 @@ class GenerationOrchestrator:
     def __init__(
         self,
         registry: Any,
+        vault_path: str,
+        output_dir: str,
         config_path: str = "configs/mapping.json",
-        vault_path: str = "data/vault",
-        output_dir: str = "data/datasets",
         max_subseq_len: int = 2000,
         seed: int = 42,
         output_format: str = "parquet",
@@ -156,9 +156,9 @@ class GenerationOrchestrator:
 
         Args:
             registry: NCBIRegistry from the discovery phase.
-            config_path: Path to the scope mapping JSON.
             vault_path: Directory hosting the LMDB sequence vault.
             output_dir: Where Parquet shards are written.
+            config_path: Path to the scope mapping JSON.
             max_subseq_len: Upper bound on subseq length, in bp.
             seed: Random seed for reproducible splits and sampling.
             output_format: 'parquet' or 'csv'.

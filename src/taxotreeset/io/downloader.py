@@ -73,13 +73,12 @@ class NCBIDownloader:
         lmdb_path: Full path to the LMDB environment within vault_path.
     """
 
-    _DEFAULT_VAULT_PATH = "data/vault"
     _DEFAULT_CHUNK_SIZE = 100
 
     def __init__(
         self,
         registry: Any,
-        vault_path: str = _DEFAULT_VAULT_PATH,
+        vault_path: str,
         chunk_size: int = _DEFAULT_CHUNK_SIZE,
     ) -> None:
         """Initialize the downloader without opening the LMDB environment.

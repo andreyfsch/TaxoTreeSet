@@ -5,6 +5,7 @@ import os
 import sys
 from taxotreeset.io.registry import NCBIRegistry
 from taxotreeset.core.orchestrator import DiscoveryOrchestrator
+from taxotreeset import paths
 
 
 def setup_logging():
@@ -13,7 +14,9 @@ def setup_logging():
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler("discovery.log", encoding="utf-8"),
+            logging.FileHandler(
+                paths.log_path("discovery.log"), encoding="utf-8",
+            ),
             logging.StreamHandler(sys.stdout)
         ]
     )
@@ -33,7 +36,8 @@ def main():
         "--taxon-id", "-t",
         type=int,
         default=10239,
-        help="NCBI TaxID of the biological root to start mapping from (e.g. 10239 for Viruses, 2 for Bacteria)"
+        help="NCBI TaxID of the biological root to start mapping from "
+        "(e.g. 10239 for Viruses, 2 for Bacteria)"
     )
     parser.add_argument(
         "--mapping", "-m",
@@ -44,7 +48,7 @@ def main():
     parser.add_argument(
         "--registry", "-r",
         type=str,
-        default="data/registry.json",
+        default=str(paths.default_registry_path()),
         help="Destination path for the inventory/registry file"
     )
     parser.add_argument(

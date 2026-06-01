@@ -57,7 +57,6 @@ from taxotreeset.io.noise_filter import NoiseFilter
 
 logger = logging.getLogger("TaxoTreeSet.Dataset.TreeBuilder")
 
-_DEFAULT_VAULT_PATH = "data/vault"
 _DEFAULT_MAPPING_PATH = "configs/mapping.json"
 _DEFAULT_NOISE_PATTERNS_PATH = "configs/noise_patterns.json"
 _LMDB_FILE_NAME = "sequences.lmdb"
@@ -67,7 +66,7 @@ _UNKNOWN_RANK_LABEL = "unknown"
 
 def generate_seqs_by_taxon_tree(
     registry_path: str,
-    vault_path: str = _DEFAULT_VAULT_PATH,
+    vault_path: str,
     domain_taxid: str | None = None,
     mapping_path: str = _DEFAULT_MAPPING_PATH,
     noise_patterns_path: str = _DEFAULT_NOISE_PATTERNS_PATH,

@@ -75,13 +75,12 @@ class NCBIRegistry:
     """
 
     _DEFAULT_CONFIG_PATH = "configs/mapping.json"
-    _DEFAULT_REGISTRY_PATH = "data/registry.json"
     _REFERENCE_ASSEMBLY_LEVELS = frozenset({"Complete Genome", "Chromosome"})
 
     def __init__(
         self,
+        registry_path: str,
         config_path: str = _DEFAULT_CONFIG_PATH,
-        registry_path: str = _DEFAULT_REGISTRY_PATH,
     ) -> None:
         """Initialize the registry by loading existing state and configuration.
 

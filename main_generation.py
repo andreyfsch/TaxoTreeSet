@@ -4,6 +4,7 @@ import sys
 import os
 from taxotreeset.io.registry import NCBIRegistry
 from taxotreeset.core.generation_orchestrator import GenerationOrchestrator
+from taxotreeset import paths
 
 
 def setup_logging(level=logging.INFO):
@@ -12,7 +13,10 @@ def setup_logging(level=logging.INFO):
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             # mode='w' zera o log a cada run
-            logging.FileHandler("generation.log", encoding="utf-8", mode="w"),
+            logging.FileHandler(
+                paths.log_path("generation.log"),
+                encoding="utf-8", mode="w",
+            ),
             logging.StreamHandler(sys.stdout)
         ]
     )
@@ -34,7 +38,7 @@ def main():
     parser.add_argument(
         "--vault", "-v",
         type=str,
-        default="data/vault",
+        default=str(paths.default_vault_path()),
         help="Path to LMDB vault storing genome sequences"
     )
 
@@ -105,14 +109,14 @@ def main():
     parser.add_argument(
         "--registry", "-r",
         type=str,
-        default="data/registry.json",
+        default=str(paths.default_registry_path()),
         help="Path to the compiled inventory registry manifest input"
     )
 
     parser.add_argument(
         "--output", "-o",
         type=str,
-        default="data/datasets",
+        default="taxotreeset-datasets",
         help="Target directory to dump the completed training shards and sidecar manifests"
     )
 
@@ -170,7 +174,8 @@ def main():
 
     if not os.path.exists(args.registry):
         logger.error(
-            f"Missing inventory blueprint at {args.registry}. Please execute 'main_discovery.py' first.")
+            f"Missing inventory blueprint at {args.registry}. "
+            "Please execute 'main_discovery.py' first.")
         sys.exit(1)
 
     try:
@@ -196,7 +201,8 @@ def main():
         )
 
         logger.info(
-            f"Executing downstream generation matrix targets for domain group: '{args.rank}' down to Genus")
+            f"Executing downstream generation matrix targets for "
+            f"domain group: '{args.rank}' down to Genus")
         pipeline.run_pipeline(
             target_group=args.rank,
             abundance_threshold=args.min_abundance
