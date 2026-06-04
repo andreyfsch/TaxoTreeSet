@@ -82,6 +82,7 @@ def compute_balanced_extraction_plan(
     max_n_per_class: int = DEFAULT_MAX_N_PER_CLASS,
     min_leaves_per_class: int = DEFAULT_MIN_LEAVES_PER_CLASS,
     rare_taxa_strategy: str = DEFAULT_RARE_TAXA_STRATEGY,
+    progress_callback=None,
 ) -> dict:
     """Build a per-class extraction plan that balances training subseqs.
 
@@ -151,6 +152,7 @@ def compute_balanced_extraction_plan(
         leaf_cache=leaf_cache,
         capacity_mode=capacity_mode,
         max_n_per_class=max_n_per_class,
+        progress_callback=progress_callback,
     )
     if not capacities:
         plan = _empty_extraction_plan()
@@ -249,6 +251,7 @@ def _compute_children_capacities(
     leaf_cache: dict,
     capacity_mode: str,
     max_n_per_class: int,
+    progress_callback=None,
 ) -> dict[str, int]:
     """Compute the capacity of every child and return as a dict.
 
@@ -272,6 +275,8 @@ def _compute_children_capacities(
             mode=capacity_mode,
             max_useful=max_n_per_class,
         )
+        if progress_callback is not None:
+            progress_callback()
     return capacities
 
 

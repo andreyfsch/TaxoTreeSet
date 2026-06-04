@@ -27,8 +27,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Subcommand to run.",
     )
 
+    # Arguments shared by every subcommand, attached via parents=[...].
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Verbosity written to the log file. The terminal always "
+        "shows only warnings, errors, and progress.",
+    )
+
     discover_parser = subparsers.add_parser(
         "discover",
+        parents=[common],
         help="Scan NCBI taxonomy and build the inventory registry.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -37,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     generate_parser = subparsers.add_parser(
         "generate",
+        parents=[common],
         help="Produce the cascaded training dataset from the registry.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )

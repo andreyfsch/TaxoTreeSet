@@ -77,6 +77,9 @@ from taxotreeset.core.generation.constants import (
 )
 from taxotreeset.dataset.builder import DatasetBuilder
 from taxotreeset.dataset.tree_builder import generate_seqs_by_taxon_tree
+from tqdm import tqdm
+
+from taxotreeset.logging_utils import get_ui_logger
 from taxotreeset.io.downloader import NCBIDownloader
 
 # Force single-threaded execution in BLAS/MKL backends. Multi-threaded
@@ -92,6 +95,7 @@ os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 logger = logging.getLogger("TaxoTreeSet.Core.GenerationOrchestrator")
+ui_logger = get_ui_logger()
 
 _DOMAIN_GROUP_TO_TAXID: dict[str, str] = {
     "viruses": "10239",
@@ -193,6 +197,7 @@ class GenerationOrchestrator:
         self.use_exact_capacity: bool = use_exact_capacity
         self.min_leaves_per_class: int = min_leaves_per_class
         self.rare_taxa_strategy: str = rare_taxa_strategy
+        self._schedule_pbar = None
 
         self.downloader: NCBIDownloader = NCBIDownloader(
             registry=self.registry,
@@ -227,10 +232,10 @@ class GenerationOrchestrator:
         """
         _ = min_num_seqs, percentage, max_budget  # legacy CLI params
 
-        logger.info("Stage 1/4: Downloading pending accessions.")
+        ui_logger.info("Stage 1/4: Downloading pending accessions.")
         self.downloader.download_all_pending()
 
-        logger.info("Stage 2/4: Building taxonomic tree.")
+        ui_logger.info("Stage 2/4: Building taxonomic tree.")
         domain_taxid = self._resolve_domain_taxid(target_group)
         tree_root = self._build_target_tree(domain_taxid)
 
@@ -238,7 +243,7 @@ class GenerationOrchestrator:
             logger.error("Tree construction returned no children. Aborting.")
             return
 
-        logger.info("Stage 3/4: Scheduling extraction jobs.")
+        ui_logger.info("Stage 3/4: Scheduling extraction jobs.")
         scheduling_artifacts = self._schedule_pipeline_jobs(
             tree_root=tree_root,
             domain_taxid=domain_taxid,
@@ -250,10 +255,10 @@ class GenerationOrchestrator:
             scheduling_artifacts=scheduling_artifacts,
         )
 
-        logger.info("Stage 4/4: Dispatching parallel disk extraction.")
+        ui_logger.info("Stage 4/4: Dispatching parallel disk extraction.")
         self._execute_extraction(scheduling_artifacts["extraction_jobs"])
 
-        logger.info("Pipeline finished successfully.")
+        ui_logger.info("Pipeline finished successfully.")
 
     @staticmethod
     def _resolve_domain_taxid(target_group: str) -> str:
@@ -330,17 +335,24 @@ class GenerationOrchestrator:
             }
 
         children_list = self._collect_real_children(domain_node)
-        self._schedule_decision_point(
-            current_node=domain_node,
-            children_list=children_list,
-            accumulated_path=domain_taxid,
-            abundance_threshold=abundance_threshold,
-            extraction_jobs=extraction_jobs,
-            master_manifest=master_manifest,
-            passthrough_map=passthrough_map,
-            virtual_id_registry=virtual_id_registry,
-            leaf_cache=leaf_cache,
+        self._schedule_pbar = tqdm(
+            desc="Computing node capacities", unit=" nodes"
         )
+        try:
+            self._schedule_decision_point(
+                current_node=domain_node,
+                children_list=children_list,
+                accumulated_path=domain_taxid,
+                abundance_threshold=abundance_threshold,
+                extraction_jobs=extraction_jobs,
+                master_manifest=master_manifest,
+                passthrough_map=passthrough_map,
+                virtual_id_registry=virtual_id_registry,
+                leaf_cache=leaf_cache,
+            )
+        finally:
+            self._schedule_pbar.close()
+            self._schedule_pbar = None
 
         return {
             "extraction_jobs": extraction_jobs,
@@ -532,6 +544,11 @@ class GenerationOrchestrator:
             splits["test"].append((leaf, 0.85, 1.0))
         return splits
 
+    def _on_capacity_computed(self) -> None:
+        """Advance the scheduling progress bar by one capacity computation."""
+        if self._schedule_pbar is not None:
+            self._schedule_pbar.update(1)
+
     def _schedule_decision_point(
         self,
         current_node: Node,
@@ -606,6 +623,7 @@ class GenerationOrchestrator:
             max_n_per_class=self.max_n_per_class,
             min_leaves_per_class=self.min_leaves_per_class,
             rare_taxa_strategy=self.rare_taxa_strategy,
+            progress_callback=self._on_capacity_computed,
         )
 
         retained_children = self._handle_low_capacity_bucket(

@@ -10,7 +10,7 @@ import os
 import sys
 
 from taxotreeset import paths
-from taxotreeset.cli.logging_setup import setup_logging
+from taxotreeset.logging_utils import setup_logging
 from taxotreeset.core.orchestrator import DiscoveryOrchestrator
 from taxotreeset.io.registry import NCBIRegistry
 
@@ -55,7 +55,7 @@ def run(args: argparse.Namespace) -> None:
     Args:
         args: Parsed CLI arguments for the discover subcommand.
     """
-    setup_logging("discovery.log")
+    setup_logging("discovery.log", level=getattr(logging, args.log_level))
     logger = logging.getLogger("TaxoTreeSet.Discover.CLI")
 
     # Idempotency: handle the existing registry file.

@@ -9,7 +9,7 @@ import os
 import sys
 
 from taxotreeset import paths
-from taxotreeset.cli.logging_setup import setup_logging
+from taxotreeset.logging_utils import setup_logging
 from taxotreeset.core.generation_orchestrator import GenerationOrchestrator
 from taxotreeset.io.registry import NCBIRegistry
 
@@ -64,11 +64,6 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "exactly via 2-bit-packed deduplication, which is memory-bounded "
         "(spilling supernodes to disk) and runs on modest hardware. Use "
         "this flag to trade exactness for speed on very large runs.",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable DEBUG-level logging for diagnostics",
     )
     parser.add_argument(
         "--rank", "-g",
@@ -159,7 +154,7 @@ def run(args: argparse.Namespace) -> None:
     """
     setup_logging(
         "generation.log",
-        level=logging.DEBUG if args.debug else logging.INFO,
+        level=getattr(logging, args.log_level),
     )
     logger = logging.getLogger("TaxoTreeSet.Generation.CLI")
 
