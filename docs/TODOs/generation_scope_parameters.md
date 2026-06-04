@@ -103,3 +103,21 @@ This is the change that the user considers leaves the code "done" with no
 substantial changes afterward, so it precedes the test-coverage effort.
 The "all" target group and arbitrary-root handling (scope parameters
 above) should be resolved together with this work, not as separate items.
+
+## Observed inefficiency: tree build enumerates the whole registry
+
+Concrete instance of the download-everything-then-filter problem, seen
+while validating arbitrary roots. Generating from Caudoviricetes (1208
+children) still runs "Resolving Lineage Vectors" over all 15042 vault
+accessions: _enumerate_accession_tasks flattens the entire registry, and
+_process_accession decides per-accession whether each falls under the
+chosen domain_taxid, discarding the rest only after resolving its
+lineage. The result is correct (the tree is anchored at the chosen root)
+but the whole scope is walked to keep a fraction.
+
+Tolerable for viruses (~6s), prohibitive for bacteria/eukaryota where the
+registry holds far more. The selective-download / volume pre-check work
+should also prune the tree-build input to the chosen root's subtree
+before resolving lineages, not after. The registry's taxon hierarchy
+already records parent links, so the subtree under a root TaxID can be
+selected up front.

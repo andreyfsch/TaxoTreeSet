@@ -80,6 +80,7 @@ from taxotreeset.dataset.tree_builder import generate_seqs_by_taxon_tree
 from tqdm import tqdm
 
 from taxotreeset.logging_utils import get_ui_logger
+from taxotreeset.taxonomy import resolve_to_taxid
 from taxotreeset.core.orchestrator import DiscoveryOrchestrator
 from taxotreeset.io.downloader import NCBIDownloader
 
@@ -222,7 +223,7 @@ class GenerationOrchestrator:
         Args:
             target_group: Domain identifier to synchronize.
         """
-        domain_taxid = self._resolve_domain_taxid(target_group)
+        domain_taxid = self._resolve_root_taxid(target_group)
         with open(self.config_path, encoding="utf-8") as handle:
             mapping_config = json.load(handle)
         discovery = DiscoveryOrchestrator(
@@ -266,7 +267,7 @@ class GenerationOrchestrator:
         self.downloader.download_all_pending()
 
         ui_logger.info("Stage 2/4: Building taxonomic tree.")
-        domain_taxid = self._resolve_domain_taxid(target_group)
+        domain_taxid = self._resolve_root_taxid(target_group)
         tree_root = self._build_target_tree(domain_taxid)
 
         if tree_root is None or not tree_root.children:
@@ -291,26 +292,27 @@ class GenerationOrchestrator:
         ui_logger.info("Pipeline finished successfully.")
 
     @staticmethod
-    def _resolve_domain_taxid(target_group: str) -> str:
-        """Map a CLI-friendly group name to an NCBI domain TaxID.
+    def _resolve_root_taxid(target_root: str) -> str:
+        """Resolve the generation root to an NCBI TaxID string.
+
+        Accepts a domain shortcut (viruses, bacteria, archaea,
+        eukaryotes), a numeric TaxID, or a clade scientific name. The
+        shortcuts are convenience aliases for the four superkingdom
+        TaxIDs; anything else is resolved via taxoniq with an NCBI
+        fallback.
 
         Args:
-            target_group: One of 'viruses', 'bacteria', 'archaea',
-                'eukaryotes'.
+            target_root: Domain shortcut, numeric TaxID, or clade name.
 
         Returns:
-            The corresponding NCBI superkingdom TaxID as a string.
+            The resolved NCBI TaxID as a string.
 
         Raises:
-            ValueError: If the target group is not recognized.
+            ValueError: If the reference cannot be resolved.
         """
-        if target_group not in _DOMAIN_GROUP_TO_TAXID:
-            raise ValueError(
-                f"Unknown target group: {target_group!r} "
-                f"(expected one of {list(_DOMAIN_GROUP_TO_TAXID.keys())})."
-            )
-        return _DOMAIN_GROUP_TO_TAXID[target_group]
-
+        if target_root in _DOMAIN_GROUP_TO_TAXID:
+            return _DOMAIN_GROUP_TO_TAXID[target_root]
+        return resolve_to_taxid(target_root)
     def _build_target_tree(self, domain_taxid: str) -> Node | None:
         """Construct the taxonomic tree anchored at the domain TaxID.
 

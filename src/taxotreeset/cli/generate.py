@@ -66,12 +66,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "this flag to trade exactness for speed on very large runs.",
     )
     parser.add_argument(
-        "--rank", "-g",
+        "--root", "-g",
         type=str,
         default="viruses",
-        choices=["viruses", "bacteria", "archaea", "eukaryotes", "all"],
-        help="Target biological domain scope to isolate and compile the "
-        "cascaded hierarchy for",
+        help="Root of the taxonomy to generate from: a domain shortcut "
+        "(viruses, bacteria, archaea, eukaryotes), a numeric NCBI TaxID, "
+        "or a clade scientific name (e.g. Caudoviricetes).",
     )
     parser.add_argument(
         "--output-format", "-f",
@@ -196,19 +196,17 @@ def run(args: argparse.Namespace) -> None:
         )
 
         logger.info(
-            "Generating cascaded hierarchy for domain group '%s' "
-            "down to Genus", args.rank,
+            "Generating cascaded hierarchy from root '%s'", args.root,
         )
         pipeline.run_pipeline(
-            target_group=args.rank,
+            target_group=args.root,
             abundance_threshold=args.min_abundance,
             sync=not args.no_sync,
         )
 
         print("\n" + "=" * 60)
         print("   CASCADED DATASET PRODUCTION SUCCEEDED")
-        print(f"   Target Domain Group: {args.rank.upper()}")
-        print("   Depth Boundary     : GENUS (Fixed Floor)")
+        print(f"   Generation Root    : {args.root}")
         print(f"   Output Encoding    : {args.output_format.upper()}")
         print(f"   Destination        : {args.output}")
         print("=" * 60 + "\n")

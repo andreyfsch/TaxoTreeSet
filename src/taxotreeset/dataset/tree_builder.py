@@ -206,10 +206,11 @@ def _resolve_scope_config(
     group_config = scopes.get(str(domain_taxid), {})
 
     if not group_config and domain_taxid:
-        logger.warning(
-            f"No scope configuration found for domain TaxID "
-            f"'{domain_taxid}' in mapping.json. Redirections and "
-            "fallback routing will not be applied for this domain."
+        logger.info(
+            f"No dedicated scope for root TaxID '{domain_taxid}' in "
+            "mapping.json; using neutral routing (no redirections or "
+            "fallback). Expected for arbitrary roots outside the "
+            "configured domains."
         )
 
     return {
