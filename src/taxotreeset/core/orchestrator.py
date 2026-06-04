@@ -53,6 +53,8 @@ from typing import Any, NamedTuple
 
 import taxoniq
 from bigtree import Node, add_path_to_tree
+
+from taxotreeset.ranks import CANONICAL_RANKS_SPECIES_TO_ROOT
 from tqdm import tqdm
 
 logger = logging.getLogger("TaxoTreeSet.Core.Orchestrator")
@@ -60,19 +62,6 @@ logger = logging.getLogger("TaxoTreeSet.Core.Orchestrator")
 _DEFAULT_ASSEMBLY_LEVELS = "complete,chromosome"
 _DEFAULT_CHECKPOINT_INTERVAL = 500
 
-# Canonical ranks taxoniq exposes in ranked_lineage, ordered species to
-# root. The NCBI-CLI lineage fallback mirrors this exact set and order so
-# that entries it resolves yield tree paths consistent with taxoniq ones.
-_CANONICAL_RANKS_SPECIES_TO_ROOT: tuple[str, ...] = (
-    "species",
-    "genus",
-    "family",
-    "order",
-    "class",
-    "phylum",
-    "kingdom",
-    "superkingdom",
-)
 # NCBI Datasets labels the viral top rank "acellular_root"; taxoniq calls
 # it superkingdom. Accept either as the lineage's root rank.
 _DATASETS_SUPERKINGDOM_KEYS: tuple[str, ...] = (
@@ -456,7 +445,7 @@ class DiscoveryOrchestrator:
             return []
 
         lineage: list[_Ancestor] = []
-        for rank in _CANONICAL_RANKS_SPECIES_TO_ROOT:
+        for rank in CANONICAL_RANKS_SPECIES_TO_ROOT:
             node = self._classification_node_for_rank(classification, rank)
             if node is not None:
                 lineage.append(
