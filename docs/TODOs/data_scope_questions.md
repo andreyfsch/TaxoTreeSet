@@ -40,3 +40,9 @@ Viruses, Bacteria, Archaea, and Eukaryotes (and Viroids) to use as a
 universal root. The "all" target group therefore cannot map to one taxid;
 it must iterate the known top-level groups. Relevant to how sync and
 generation handle target_group="all".
+
+Note: target_group="all" is currently a latent bug. The generate --rank
+choices include "all", but _resolve_domain_taxid has no "all" entry and
+raises ValueError, so the pipeline cannot actually run it today. Fixing
+this (iterating the four groups, or introducing a sentinel) belongs with
+the generation-scope parameters work; until then "all" fails fast.

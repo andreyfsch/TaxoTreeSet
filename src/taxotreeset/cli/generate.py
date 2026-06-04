@@ -144,6 +144,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "child as its own class regardless of leaf count "
         "(default: fallback).",
     )
+    parser.add_argument(
+        "--no-sync",
+        action="store_true",
+        help="Skip the NCBI sync step and use the existing vault as-is "
+        "(faster iteration on an already-populated vault).",
+    )
 
 
 def run(args: argparse.Namespace) -> None:
@@ -158,10 +164,11 @@ def run(args: argparse.Namespace) -> None:
     )
     logger = logging.getLogger("TaxoTreeSet.Generation.CLI")
 
-    if not os.path.exists(args.registry):
+    if not os.path.exists(args.registry) and args.no_sync:
         logger.error(
-            "Missing inventory registry at %s. "
-            "Run 'taxotreeset discover' first.",
+            "Missing inventory registry at %s and --no-sync was given, "
+            "so there is nothing to generate from. Run 'taxotreeset "
+            "discover' first, or drop --no-sync to build it via sync.",
             args.registry,
         )
         sys.exit(1)
@@ -195,6 +202,7 @@ def run(args: argparse.Namespace) -> None:
         pipeline.run_pipeline(
             target_group=args.rank,
             abundance_threshold=args.min_abundance,
+            sync=not args.no_sync,
         )
 
         print("\n" + "=" * 60)

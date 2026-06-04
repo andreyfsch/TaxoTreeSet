@@ -200,6 +200,59 @@ class NCBIDownloader:
             info.pop("headers", None)
         self.registry.save()
 
+    def reconcile_with_vault(self) -> int:
+        """Reset accessions whose recorded headers are missing from LMDB.
+
+        Detects vault degradation (Case 1): for each accession marked
+        downloaded that has recorded headers, verifies every header ID is
+        present as an LMDB key. Accessions with any missing header are
+        reset to pending (downloaded=False, headers and local_path
+        cleared) so the next download re-fetches them.
+
+        Returns:
+            Number of accessions reset to pending.
+        """
+        lmdb_data_file = os.path.join(self.lmdb_path, LMDB_DATA_FILE_NAME)
+        if not os.path.exists(lmdb_data_file):
+            return 0
+
+        accessions = self.registry.registry.get("accessions", {})
+        reset_count = 0
+        env = lmdb.open(
+            self.lmdb_path,
+            map_size=LMDB_MAP_SIZE_BYTES,
+            max_dbs=0,
+            readonly=True,
+            lock=False,
+        )
+        try:
+            with env.begin() as txn:
+                for accession, info in accessions.items():
+                    if not info.get("downloaded"):
+                        continue
+                    headers = info.get("headers")
+                    if not headers:
+                        continue
+                    missing = any(
+                        txn.get(header["id"].encode("utf-8")) is None
+                        for header in headers
+                    )
+                    if missing:
+                        info["downloaded"] = False
+                        info["local_path"] = None
+                        info.pop("headers", None)
+                        reset_count += 1
+        finally:
+            env.close()
+
+        if reset_count:
+            logger.warning(
+                "Vault reconciliation reset %d accession(s) to pending "
+                "(headers missing from LMDB).", reset_count
+            )
+            self.registry.save()
+        return reset_count
+
     def _collect_pending_accessions(self) -> list[str]:
         """Return the list of accession IDs that still need downloading.
 

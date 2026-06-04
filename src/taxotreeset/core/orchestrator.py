@@ -49,7 +49,7 @@ import json
 import logging
 import os
 import subprocess
-from typing import Any
+from typing import Any, NamedTuple
 
 import taxoniq
 from bigtree import Node, add_path_to_tree
@@ -59,6 +59,33 @@ logger = logging.getLogger("TaxoTreeSet.Core.Orchestrator")
 
 _DEFAULT_ASSEMBLY_LEVELS = "complete,chromosome"
 _DEFAULT_CHECKPOINT_INTERVAL = 500
+
+# Canonical ranks taxoniq exposes in ranked_lineage, ordered species to
+# root. The NCBI-CLI lineage fallback mirrors this exact set and order so
+# that entries it resolves yield tree paths consistent with taxoniq ones.
+_CANONICAL_RANKS_SPECIES_TO_ROOT: tuple[str, ...] = (
+    "species",
+    "genus",
+    "family",
+    "order",
+    "class",
+    "phylum",
+    "kingdom",
+    "superkingdom",
+)
+# NCBI Datasets labels the viral top rank "acellular_root"; taxoniq calls
+# it superkingdom. Accept either as the lineage's root rank.
+_DATASETS_SUPERKINGDOM_KEYS: tuple[str, ...] = (
+    "superkingdom",
+    "acellular_root",
+)
+
+
+class _Ancestor(NamedTuple):
+    """Minimal lineage node: the fields _resolve_mapped_path consumes."""
+
+    tax_id: int
+    scientific_name: str
 _NCBI_API_KEY_ENV_VAR = "NCBI_API_KEY"
 
 
@@ -283,7 +310,8 @@ class DiscoveryOrchestrator:
         """Build the in-memory tree and register accessions, with checkpoints.
 
         For each unique species TaxID:
-            1. Resolves its lineage via taxoniq.
+            1. Resolves its lineage via taxoniq, falling back to the
+               NCBI taxonomy CLI for TaxIDs newer than the snapshot.
             2. Applies the mapping's redirection rules to the path.
             3. Adds the path to the in-memory tree skeleton.
             4. Registers each accession into the persistent registry.
@@ -334,11 +362,11 @@ class DiscoveryOrchestrator:
 
         Raises:
             ValueError: If the TaxID cannot be parsed as an integer.
-            Various exceptions from taxoniq if the TaxID is not in
-            the local cache.
+            RuntimeError: If the lineage cannot be resolved by either
+                taxoniq or the NCBI taxonomy fallback.
         """
-        species_taxon = taxoniq.Taxon(int(taxid_str))
-        path_parts = self._resolve_mapped_path(species_taxon, root_id_str)
+        lineage = self._resolve_lineage(int(taxid_str))
+        path_parts = self._resolve_mapped_path(lineage, root_id_str)
         full_path = "root/" + "/".join(path_parts)
 
         for report in reports:
@@ -350,13 +378,147 @@ class DiscoveryOrchestrator:
             node_attrs={
                 "taxid": taxid_str,
                 "rank": "species",
-                "scientific_name": species_taxon.scientific_name,
+                "scientific_name": lineage[0].scientific_name,
             },
         )
 
+    def _resolve_lineage(self, taxid: int) -> list[_Ancestor]:
+        """Resolve a species' canonical lineage, species to root.
+
+        Tries the local taxoniq cache first; on a cache miss (a TaxID
+        newer than taxoniq's snapshot) falls back to a live NCBI Datasets
+        CLI taxonomy lookup. Both paths yield the same canonical rank set
+        and order so downstream tree paths stay consistent.
+
+        Args:
+            taxid: Species TaxID to resolve.
+
+        Returns:
+            Ancestors from species to root.
+
+        Raises:
+            RuntimeError: If neither taxoniq nor the NCBI fallback can
+                resolve the TaxID.
+        """
+        try:
+            species_taxon = taxoniq.Taxon(taxid)
+            return [
+                _Ancestor(int(a.tax_id), a.scientific_name)
+                for a in species_taxon.ranked_lineage
+            ]
+        except KeyError:
+            lineage = self._fetch_lineage_via_ncbi(taxid)
+            if not lineage:
+                raise RuntimeError(
+                    f"Could not resolve lineage for TaxID {taxid} via "
+                    "taxoniq or the NCBI taxonomy fallback."
+                )
+            return lineage
+
+    def _fetch_lineage_via_ncbi(self, taxid: int) -> list[_Ancestor]:
+        """Fetch a species' canonical lineage from the NCBI Datasets CLI.
+
+        Used as a fallback when taxoniq's static snapshot does not know a
+        recently classified TaxID. Parses the CLI's taxonomy
+        classification into the same canonical rank set and order taxoniq
+        produces (species to root).
+
+        Args:
+            taxid: Species TaxID to resolve.
+
+        Returns:
+            Ancestors from species to root, or an empty list if the CLI
+            returns no usable classification.
+        """
+        command = [
+            "datasets",
+            "summary",
+            "taxonomy",
+            "taxon",
+            str(taxid),
+            "--as-json-lines",
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except (subprocess.CalledProcessError, OSError) as exc:
+            logger.debug(
+                "NCBI taxonomy fallback failed for TaxID %s: %s", taxid, exc
+            )
+            return []
+
+        classification = self._parse_taxonomy_classification(completed.stdout)
+        if not classification:
+            return []
+
+        lineage: list[_Ancestor] = []
+        for rank in _CANONICAL_RANKS_SPECIES_TO_ROOT:
+            node = self._classification_node_for_rank(classification, rank)
+            if node is not None:
+                lineage.append(
+                    _Ancestor(int(node["id"]), str(node["name"]))
+                )
+        return lineage
+
+    @staticmethod
+    def _parse_taxonomy_classification(stdout: str) -> dict[str, Any] | None:
+        """Extract the classification dict from a taxonomy JSON-lines reply.
+
+        Args:
+            stdout: Raw stdout from the datasets taxonomy command.
+
+        Returns:
+            The classification mapping (rank name to {id, name}), or None
+            if the reply has no parsable report.
+        """
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            # With --as-json-lines each line is a report itself, with
+            # taxonomy at the top level (no enclosing "reports" array).
+            taxonomy = payload.get("taxonomy", {})
+            classification = taxonomy.get("classification")
+            if classification:
+                return classification
+        return None
+
+    @staticmethod
+    def _classification_node_for_rank(
+        classification: dict[str, Any],
+        rank: str,
+    ) -> dict[str, Any] | None:
+        """Return the {id, name} node for a canonical rank, if present.
+
+        Handles the viral top rank, which the CLI labels
+        ``acellular_root`` where taxoniq uses ``superkingdom``.
+
+        Args:
+            classification: Rank-to-node mapping from the CLI.
+            rank: Canonical rank name to look up.
+
+        Returns:
+            The rank's node, or None if absent.
+        """
+        if rank == "superkingdom":
+            for key in _DATASETS_SUPERKINGDOM_KEYS:
+                node = classification.get(key)
+                if node is not None:
+                    return node
+            return None
+        return classification.get(rank)
+
     def _resolve_mapped_path(
         self,
-        species_taxon: taxoniq.Taxon,
+        lineage: list[_Ancestor],
         root_id_str: str,
     ) -> list[str]:
         """Resolve a species' lineage applying scope redirections.
@@ -367,7 +529,8 @@ class DiscoveryOrchestrator:
         compatibility).
 
         Args:
-            species_taxon: taxoniq.Taxon instance for the species.
+            lineage: Ancestors from species to root, as produced by
+                taxoniq or by the NCBI-CLI fallback.
             root_id_str: Root TaxID as string for scope lookup.
 
         Returns:
@@ -379,8 +542,8 @@ class DiscoveryOrchestrator:
         virtual_labels = scope.get("virtual_id_labels", {})
 
         path_parts: list[str] = []
-        for ancestor_taxon in species_taxon.ranked_lineage:
-            ancestor_id = str(ancestor_taxon.tax_id)
+        for ancestor in lineage:
+            ancestor_id = str(ancestor.tax_id)
             if ancestor_id in redirections:
                 target_id = redirections[ancestor_id]["target_id"]
                 name = virtual_labels.get(
@@ -388,7 +551,7 @@ class DiscoveryOrchestrator:
                     redirections[ancestor_id]["label"],
                 )
             else:
-                name = self._sanitize_path_component(ancestor_taxon.scientific_name)
+                name = self._sanitize_path_component(ancestor.scientific_name)
             path_parts.append(name)
 
         return path_parts

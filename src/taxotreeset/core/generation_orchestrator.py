@@ -80,6 +80,7 @@ from taxotreeset.dataset.tree_builder import generate_seqs_by_taxon_tree
 from tqdm import tqdm
 
 from taxotreeset.logging_utils import get_ui_logger
+from taxotreeset.core.orchestrator import DiscoveryOrchestrator
 from taxotreeset.io.downloader import NCBIDownloader
 
 # Force single-threaded execution in BLAS/MKL backends. Multi-threaded
@@ -210,6 +211,31 @@ class GenerationOrchestrator:
             output_format=self.output_format,
         )
 
+    def _sync_with_ncbi(self, target_group: str) -> None:
+        """Reconcile the registry and vault with NCBI for a scope.
+
+        Re-runs discovery for the target group's domain so that new NCBI
+        accessions enter the registry as pending, then reconciles the
+        vault: accessions marked downloaded whose recorded headers are
+        missing from the LMDB are reset to pending for re-download.
+
+        Args:
+            target_group: Domain identifier to synchronize.
+        """
+        domain_taxid = self._resolve_domain_taxid(target_group)
+        with open(self.config_path, encoding="utf-8") as handle:
+            mapping_config = json.load(handle)
+        discovery = DiscoveryOrchestrator(
+            registry=self.registry,
+            mapping_config=mapping_config,
+        )
+        discovery.discover_from_root(int(domain_taxid))
+        self._reconcile_vault_against_registry()
+
+    def _reconcile_vault_against_registry(self) -> None:
+        """Reconcile the vault against the registry (delegates to downloader)."""
+        self.downloader.reconcile_with_vault()
+
     def run_pipeline(
         self,
         target_group: str,
@@ -217,6 +243,7 @@ class GenerationOrchestrator:
         percentage: int = 10,
         abundance_threshold: int = 2,
         max_budget: int = 50_000,
+        sync: bool = True,
     ) -> None:
         """Execute the full generation pipeline for a target group.
 
@@ -231,6 +258,9 @@ class GenerationOrchestrator:
             max_budget: Legacy upper bound on total extraction budget.
         """
         _ = min_num_seqs, percentage, max_budget  # legacy CLI params
+        if sync:
+            ui_logger.info("Syncing registry and vault with NCBI.")
+            self._sync_with_ncbi(target_group)
 
         ui_logger.info("Stage 1/4: Downloading pending accessions.")
         self.downloader.download_all_pending()
