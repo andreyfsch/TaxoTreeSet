@@ -39,7 +39,7 @@ When a head's per-class capacity falls below `min_num_seqs`:
 
 Configured via `--min-num-seqs` and `--cutoff-percentage` CLI arguments.
 
-Previously called "Op_B" or "Opção B" during development.
+Previously called "Op_B" during development.
 
 ### Rare-Taxa Bucketing
 Mechanism that handles taxonomic heads where some child classes have too few

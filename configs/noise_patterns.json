@@ -1,57 +1,57 @@
 {
   "_meta": {
-    "description": "Padrões regex (case-insensitive) que identificam contêineres administrativos do NCBI Taxonomy a serem ignorados na construção da árvore taxonômica. Nós cujo scientific_name casa com qualquer padrão são pulados; suas sequências escalam para o próximo ancestor válido.",
-    "policy": "Adicione padrões aqui à medida que identificá-los no census do registry. Comente o porquê de cada padrão no campo 'description' do bloco correspondente.",
+    "description": "Case-insensitive regex patterns identifying NCBI Taxonomy administrative containers to skip during taxonomic tree construction. Nodes whose scientific_name matches any pattern are skipped; their sequences escalate to the next valid ancestor.",
+    "policy": "Add patterns here as they are identified in the registry census. Document the rationale for each pattern in the 'description' field of its block.",
     "last_updated": "2026-05-21"
   },
   "patterns": [
     {
       "regex": "^unclassified\\b",
-      "description": "Contêineres 'unclassified X' do NCBI - posição taxonômica não resolvida. Cobre 'unclassified Caudoviricetes', 'unclassified Begomovirus', 'unclassified viruses', etc."
+      "description": "NCBI 'unclassified X' containers - unresolved taxonomic position. Covers 'unclassified Caudoviricetes', 'unclassified Begomovirus', 'unclassified viruses', etc."
     },
     {
       "regex": "\\bincertae sedis\\b",
-      "description": "Variante latina formal de 'unclassified'. Cobre 'Caudoviricetes incertae sedis', 'Viruses incertae sedis', etc. Usado pelo ICTV para clados sem posição filogenética definida."
+      "description": "Formal Latin variant of 'unclassified'. Covers 'Caudoviricetes incertae sedis', 'Viruses incertae sedis', etc. Used by the ICTV for clades without a defined phylogenetic position."
     },
     {
       "regex": "^environmental samples\\b",
-      "description": "Amostras ambientais/metagenômicas sem isolado caracterizado. Geralmente são folhas únicas por accession."
+      "description": "Environmental/metagenomic samples with no characterized isolate. Usually single leaves per accession."
     },
     {
       "regex": "^uncultured ",
-      "description": "Organismos detectados via sequenciamento mas nunca cultivados. Tipicamente metagenoma."
+      "description": "Organisms detected via sequencing but never cultured. Typically metagenomic."
     },
     {
       "regex": "^unidentified",
-      "description": "Submissões NCBI sem identificação. Raro em vírus, comum em outros domínios."
+      "description": "NCBI submissions without identification. Rare in viruses, common in other domains."
     },
     {
       "regex": "\\bShiM-\\d{4}\\b",
-      "description": "Depósito de descobertas do paper Shi et al. - viroma de invertebrados. ShiM-2016 sozinho tem 883 espécies sob 'unclassified RNA viruses ShiM-2016'. Outros papers podem ter padrões similares - adicionar conforme identificados."
+      "description": "Deposit of findings from Shi et al. - invertebrate virome. ShiM-2016 alone has 883 species under 'unclassified RNA viruses ShiM-2016'. Other papers may have similar patterns - add as identified."
     },
     {
       "regex": " isolates?$",
-      "description": "Contêineres de isolates clínicos/de surto. Ex.: 'Norovirus isolates', 'Sapovirus isolates'. São agrupamentos abaixo de espécie, não classes taxonômicas."
+      "description": "Containers of clinical/outbreak isolates. E.g. 'Norovirus isolates', 'Sapovirus isolates'. These are below-species groupings, not taxonomic classes."
     },
     {
       "regex": " genogroup \\d",
-      "description": "Subgrupos sorológicos de norovirus e similares. 'Norovirus genogroup 1 isolates' etc."
+      "description": "Serological subgroups of norovirus and similar. 'Norovirus genogroup 1 isolates', etc."
     },
     {
       "regex": "^HIV-\\d+ M:CRF",
-      "description": "Formas recombinantes circulantes de HIV-1. Subdivisão clínica, não taxonômica."
+      "description": "Circulating recombinant forms of HIV-1. Clinical subdivision, not taxonomic."
     },
     {
       "regex": " with incomplete names?$",
-      "description": "Bolso para entradas com nomes mal-formados. Ex.: 'Influenza A virus with incomplete names'."
+      "description": "Catch-all for entries with malformed names. E.g. 'Influenza A virus with incomplete names'."
     },
     {
       "regex": "^mixed subtypes?$",
-      "description": "Contêiner literal 'mixed subtypes' do NCBI para Influenza."
+      "description": "Literal NCBI 'mixed subtypes' container for Influenza."
     }
   ],
   "rank_blacklist": {
-    "description": "Ranks taxonômicos administrativos que indicam subdivisão abaixo de espécie (sorologia clínica, não biologia). Nós com esses ranks são pulados independente do nome.",
+    "description": "Administrative taxonomic ranks indicating below-species subdivision (clinical serology, not biology). Nodes with these ranks are skipped regardless of name.",
     "ranks": ["serotype", "serogroup", "subtype", "isolate", "strain", "genotype"]
   }
 }
