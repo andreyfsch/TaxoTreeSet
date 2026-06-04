@@ -65,3 +65,41 @@ Implementation notes:
 
 These should land before the full test-coverage effort, since they change
 the generation interface and would otherwise force test rewrites.
+
+## Volume pre-check and selective download (the structural change)
+
+Distinct from the scope parameters above, and the most substantial change
+of this stage. The current pipeline downloads the entire scope first
+(Stage 1), then builds the tree and runs balancing (Stage 3), which is
+where the number of sequences actually needed per class is decided. That
+order assumes the whole scope fits on disk: fine for viruses (~184MB) and
+bacteria (~27GB), impossible for eukaryota (~3TB of reference genomes).
+
+For large scopes the pipeline order must invert: discover structure ->
+estimate/plan what balancing will need -> download only that subset ->
+extract. The structure-without-download half already exists: incremental
+sync's discover_from_root populates the registry with metadata only. What
+is missing is using that registry to bound the download to what balancing
+will actually consume, instead of download_all_pending fetching the whole
+scope.
+
+Open design question: balancing decides via capacity (unique k-mers),
+which needs the sequence in hand. Two candidate approaches:
+- Estimate capacity from genome size (NCBI metadata exposes assembly
+  length) without downloading, to choose what to fetch, then refine with
+  the real sequence.
+- Demand-driven download: fetch per class incrementally until n_per_class
+  is met, stopping once sufficient.
+Either interacts with the capacity modes (exact vs bloom) and
+max_n_per_class.
+
+Two separable layers, do not conflate:
+(a) download only the needed ACCESSIONS (a subset of genomes) -- this
+    stage's structural change.
+(b) download only PART of each huge genome (intra-genome sampling) -- a
+    deeper, later layer needed for eukaryota's multi-GB genomes.
+
+This is the change that the user considers leaves the code "done" with no
+substantial changes afterward, so it precedes the test-coverage effort.
+The "all" target group and arbitrary-root handling (scope parameters
+above) should be resolved together with this work, not as separate items.
