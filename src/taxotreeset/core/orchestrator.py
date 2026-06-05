@@ -356,6 +356,13 @@ class DiscoveryOrchestrator:
                 taxoniq or the NCBI taxonomy fallback.
         """
         lineage = self._resolve_lineage(int(taxid_str))
+        # Record the leaf taxon itself when it is non-canonical (e.g. a
+        # no_rank strain) and thus absent from its own ranked lineage, so
+        # tree building can label that node instead of leaving it unknown.
+        if not lineage or str(lineage[0].tax_id) != taxid_str:
+            self_node = self._resolve_self_node(int(taxid_str))
+            if self_node is not None and str(self_node.tax_id) == taxid_str:
+                lineage = [self_node, *lineage]
         path_parts = self._resolve_mapped_path(lineage, root_id_str)
         full_path = "root/" + "/".join(path_parts)
 
@@ -419,6 +426,68 @@ class DiscoveryOrchestrator:
                     "taxoniq or the NCBI taxonomy fallback."
                 )
             return lineage
+
+    def _resolve_self_node(self, taxid: int) -> _Ancestor | None:
+        """Resolve a taxon's own name and rank (not its ancestors).
+
+        Used to record the leaf taxon itself in its stored lineage when
+        it is non-canonical (e.g. a no_rank strain below species), which
+        ranked_lineage omits. Lets tree building label that node from the
+        registry instead of leaving it unknown.
+
+        Args:
+            taxid: TaxID to resolve.
+
+        Returns:
+            The taxon as an _Ancestor, or None if it cannot be resolved.
+        """
+        try:
+            taxon = taxoniq.Taxon(taxid)
+            return _Ancestor(int(taxon.tax_id), taxon.rank.name, taxon.scientific_name)
+        except Exception:
+            return self._fetch_self_node_via_ncbi(taxid)
+
+    def _fetch_self_node_via_ncbi(self, taxid: int) -> _Ancestor | None:
+        """Resolve a taxon's own name and rank via the NCBI Datasets CLI.
+
+        Args:
+            taxid: TaxID to resolve.
+
+        Returns:
+            The taxon as an _Ancestor, or None if the lookup yields
+            nothing usable.
+        """
+        command = [
+            "datasets",
+            "summary",
+            "taxonomy",
+            "taxon",
+            str(taxid),
+            "--as-json-lines",
+        ]
+        try:
+            completed = subprocess.run(
+                command, capture_output=True, text=True, check=True
+            )
+        except (subprocess.CalledProcessError, OSError) as exc:
+            logger.debug("NCBI self-node lookup failed for %s: %s", taxid, exc)
+            return None
+        for line in completed.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            taxonomy = payload.get("taxonomy", {})
+            current = taxonomy.get("current_scientific_name", {})
+            name = current.get("name")
+            rank = taxonomy.get("rank") or "no_rank"
+            resolved_id = taxonomy.get("tax_id")
+            if name and resolved_id is not None:
+                return _Ancestor(int(resolved_id), str(rank).lower(), str(name))
+        return None
 
     def _fetch_lineage_via_ncbi(self, taxid: int) -> list[_Ancestor]:
         """Fetch a species' canonical lineage from the NCBI Datasets CLI.
