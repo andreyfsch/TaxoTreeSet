@@ -153,6 +153,7 @@ class GenerationOrchestrator:
         output_dir: str,
         config_path: str = "configs/mapping.json",
         max_subseq_len: int = 2000,
+        min_subseq_len: int = 100,
         seed: int = 42,
         output_format: str = "parquet",
         min_subclades_per_bucket: int = 5,
@@ -171,6 +172,8 @@ class GenerationOrchestrator:
             output_dir: Where Parquet shards are written.
             config_path: Path to the scope mapping JSON.
             max_subseq_len: Upper bound on subseq length, in bp.
+            min_subseq_len: Lower bound on subseq length and the
+                sliding-window size for capacity measurement, in bp.
             seed: Random seed for reproducible splits and sampling.
             output_format: 'parquet' or 'csv'.
             min_subclades_per_bucket: Minimum subclade count for a
@@ -195,6 +198,12 @@ class GenerationOrchestrator:
         self.vault_path: str = vault_path
         self.output_dir: str = output_dir
         self.max_subseq_len: int = max_subseq_len
+        if min_subseq_len > max_subseq_len:
+            raise ValueError(
+                f"min_subseq_len ({min_subseq_len}) cannot exceed "
+                f"max_subseq_len ({max_subseq_len})."
+            )
+        self.min_subseq_len: int = min_subseq_len
         self.seed: int = seed
         self.output_format: str = output_format
         self.min_subclades_per_bucket: int = min_subclades_per_bucket
@@ -692,6 +701,7 @@ class GenerationOrchestrator:
             parent_node=current_node,
             children=effective_children,
             leaf_cache=leaf_cache,
+            min_len=self.min_subseq_len,
             min_num_seqs=self.min_num_seqs,
             cutoff_percentage=self.cutoff_percentage,
             use_exact_capacity=self.use_exact_capacity,

@@ -103,6 +103,14 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Sliding window context size (bp) extracted for tokenization",
     )
     parser.add_argument(
+        "--min-subseq-len", "-W",
+        type=int,
+        default=100,
+        help="Minimum subsequence length (bp); also the sliding-window size "
+        "used to measure each taxon's capacity (count of unique subseqs). "
+        "Changing it invalidates any cached capacities.",
+    )
+    parser.add_argument(
         "--registry", "-r",
         type=str,
         default=str(paths.default_registry_path()),
@@ -200,6 +208,7 @@ def run(args: argparse.Namespace) -> None:
             output_dir=args.output,
             config_path=args.mapping,
             max_subseq_len=args.max_subseq_len,
+            min_subseq_len=args.min_subseq_len,
             seed=args.seed,
             output_format=args.output_format,
             min_subclades_per_bucket=args.min_subclades_per_bucket,
