@@ -80,6 +80,11 @@ from taxotreeset.dataset.tree_builder import generate_seqs_by_taxon_tree
 from tqdm import tqdm
 
 from taxotreeset.logging_utils import get_ui_logger
+from taxotreeset.ranks import (
+    CANONICAL_RANKS_ROOT_TO_SPECIES,
+    is_below_boundary,
+    is_canonical_rank,
+)
 from taxotreeset.taxonomy import resolve_to_taxid
 from taxotreeset.core.orchestrator import DiscoveryOrchestrator
 from taxotreeset.io.downloader import NCBIDownloader
@@ -200,6 +205,8 @@ class GenerationOrchestrator:
         self.min_leaves_per_class: int = min_leaves_per_class
         self.rare_taxa_strategy: str = rare_taxa_strategy
         self._schedule_pbar = None
+        self._depth_boundary: str | None = None
+        self._single_level: bool = False
 
         self.downloader: NCBIDownloader = NCBIDownloader(
             registry=self.registry,
@@ -245,6 +252,8 @@ class GenerationOrchestrator:
         abundance_threshold: int = 2,
         max_budget: int = 50_000,
         sync: bool = True,
+        stop_at: str | None = None,
+        single_level: bool = False,
     ) -> None:
         """Execute the full generation pipeline for a target group.
 
@@ -257,8 +266,30 @@ class GenerationOrchestrator:
             abundance_threshold: Minimum sequence abundance to avoid
                 fallback redirection during tree construction.
             max_budget: Legacy upper bound on total extraction budget.
+            stop_at: Canonical rank at which the cascade stops creating
+                heads (e.g. 'family'). Nodes at or below this rank
+                become training labels but not heads of their own.
+                None descends to the deepest available rank.
+            single_level: When True, generate only the root's head (its
+                direct children become labels) with no further
+                recursion. Mutually exclusive with stop_at.
+
+        Raises:
+            ValueError: If stop_at is not a canonical rank, or if both
+                stop_at and single_level are given.
         """
         _ = min_num_seqs, percentage, max_budget  # legacy CLI params
+        if single_level and stop_at is not None:
+            raise ValueError(
+                "stop_at and single_level are mutually exclusive."
+            )
+        if stop_at is not None and not is_canonical_rank(stop_at):
+            raise ValueError(
+                f"stop_at must be a canonical rank, got {stop_at!r}. "
+                f"Valid ranks: {list(CANONICAL_RANKS_ROOT_TO_SPECIES)}."
+            )
+        self._depth_boundary = stop_at
+        self._single_level = single_level
         if sync:
             ui_logger.info("Syncing registry and vault with NCBI.")
             self._sync_with_ncbi(target_group)
@@ -1109,9 +1140,15 @@ class GenerationOrchestrator:
             virtual_id_registry: Virtual IDs (mutated).
             leaf_cache: Leaf cache (mutated).
         """
+        if self._single_level:
+            return
         for child in retained_children:
             child_rank = getattr(child, "rank", "")
             if is_recursion_terminator(child_rank):
+                continue
+            if self._depth_boundary is not None and is_below_boundary(
+                child_rank, self._depth_boundary
+            ):
                 continue
 
             grand_children = self._collect_real_children(child)

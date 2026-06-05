@@ -74,6 +74,22 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "or a clade scientific name (e.g. Caudoviricetes).",
     )
     parser.add_argument(
+        "--stop-at",
+        type=str,
+        default=None,
+        help="Canonical rank where the cascade stops creating heads "
+        "(species, genus, family, order, class, phylum, kingdom, "
+        "superkingdom). Nodes deeper than this become training labels "
+        "but not heads of their own. Defaults to the deepest rank.",
+    )
+    parser.add_argument(
+        "--single-level",
+        action="store_true",
+        help="Generate only the root's head: its direct children become "
+        "training labels with no further recursion. Cannot be combined "
+        "with --stop-at.",
+    )
+    parser.add_argument(
         "--output-format", "-f",
         type=str,
         default="parquet",
@@ -202,11 +218,20 @@ def run(args: argparse.Namespace) -> None:
             target_group=args.root,
             abundance_threshold=args.min_abundance,
             sync=not args.no_sync,
+            stop_at=args.stop_at,
+            single_level=args.single_level,
         )
 
         print("\n" + "=" * 60)
         print("   CASCADED DATASET PRODUCTION SUCCEEDED")
         print(f"   Generation Root    : {args.root}")
+        if args.single_level:
+            depth_desc = "single level (root head only)"
+        elif args.stop_at:
+            depth_desc = f"stop at {args.stop_at}"
+        else:
+            depth_desc = "full depth (to species)"
+        print(f"   Depth Boundary     : {depth_desc}")
         print(f"   Output Encoding    : {args.output_format.upper()}")
         print(f"   Destination        : {args.output}")
         print("=" * 60 + "\n")

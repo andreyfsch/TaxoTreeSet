@@ -95,3 +95,34 @@ def is_at_or_below_boundary(rank: str, boundary: str) -> bool:
     if node_depth is None:
         return False
     return node_depth >= boundary_depth
+
+
+def is_below_boundary(rank: str, boundary: str) -> bool:
+    """Return True if ``rank`` is strictly deeper than ``boundary``.
+
+    Used to stop a cascade: a node strictly below the boundary becomes a
+    training label rather than a head of its own, so recursion must not
+    descend into it. A node exactly at the boundary is NOT below it (it
+    still becomes a head). Non-canonical ranks return False.
+
+    Args:
+        rank: The node's rank.
+        boundary: The chosen depth-boundary rank.
+
+    Returns:
+        True when ``rank`` is canonical and strictly deeper than
+        ``boundary``.
+
+    Raises:
+        ValueError: If ``boundary`` is not a canonical rank.
+    """
+    boundary_depth = _RANK_DEPTH.get(boundary)
+    if boundary_depth is None:
+        raise ValueError(
+            f"Boundary must be a canonical rank, got {boundary!r}. "
+            f"Valid: {list(CANONICAL_RANKS_ROOT_TO_SPECIES)}."
+        )
+    node_depth = _RANK_DEPTH.get(rank)
+    if node_depth is None:
+        return False
+    return node_depth > boundary_depth
