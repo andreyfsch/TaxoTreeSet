@@ -122,6 +122,163 @@ def _read_sequence_cached(fasta_path: str, header_id: str) -> str:
     return sequence
 
 
+class _NodeCapacityKeys:
+    """Accumulator of a node's unique capacity keys, held in memory.
+
+    A node's capacity is the number of unique fixed-length subsequences
+    found across all sequence leaves beneath it. This class accumulates
+    those subsequences as deduplicated keys so that a parent node can be
+    resolved by merging its children's accumulators, instead of rescanning
+    every descendant leaf from scratch.
+
+    Pure-ACGT subsequences are stored as packed 2-bit keys; subsequences
+    containing IUPAC ambiguity codes are kept as exact strings. The two
+    groups are disjoint by construction, so their counts add up without
+    double counting.
+
+    This in-memory representation suits clades whose key count fits in
+    RAM. Larger clades will spill to disk in a later change.
+    """
+
+    def __init__(self, pure_keys, ambiguous_subseqs: set):
+        """Store the deduplicated key groups.
+
+        Args:
+            pure_keys: A deduplicated numpy array of packed 2-bit keys.
+            ambiguous_subseqs: A set of exact ambiguous subsequences.
+        """
+        self._pure_keys = pure_keys
+        self._ambiguous_subseqs = ambiguous_subseqs
+
+    @classmethod
+    def from_sequence_leaf(cls, leaf, min_len: int, void_dtype):
+        """Build an accumulator from a single sequence leaf.
+
+        Reads the leaf's sequence, enumerates its sliding windows, and
+        deduplicates them into the two key groups.
+
+        Args:
+            leaf: A sequence-rank leaf node with ``fasta_path`` and
+                ``header_id`` attributes.
+            min_len: Sliding window size in base pairs.
+            void_dtype: The numpy void dtype sized to one packed key.
+
+        Returns:
+            A populated accumulator, empty when the leaf has no readable
+            sequence or one shorter than ``min_len``.
+        """
+        import numpy as np
+        from numpy.lib.stride_tricks import sliding_window_view
+
+        empty = np.empty((0,), dtype=void_dtype)
+        fasta_path = getattr(leaf, "fasta_path", "")
+        header_id = getattr(leaf, "header_id", "")
+        if not fasta_path or not header_id:
+            return cls(empty, set())
+        sequence = _read_sequence_cached(fasta_path, header_id)
+        if not sequence or len(sequence) < min_len:
+            return cls(empty, set())
+        seq_arr = np.frombuffer(sequence.encode("ascii"), dtype=np.uint8)
+        windows = sliding_window_view(seq_arr, min_len)
+        keys, pure_mask = _encode_windows_2bit(windows, min_len)
+        pure_keys = np.unique(keys) if keys.shape[0] else empty
+        ambiguous: set = set()
+        if not pure_mask.all():
+            ambiguous = {
+                sequence[i : i + min_len]
+                for i in np.flatnonzero(~pure_mask).tolist()
+            }
+        return cls(pure_keys, ambiguous)
+
+    @classmethod
+    def merge(cls, parts: list, void_dtype):
+        """Merge several accumulators into one, deduplicating across them.
+
+        The union is exact: concatenated pure keys are reduced with
+        ``np.unique`` and ambiguous subsequences are unioned as sets. This
+        captures subsequences shared between siblings (conserved regions),
+        so a parent's count is the size of the union, never the naive sum.
+
+        Args:
+            parts: Accumulators to merge (typically a node's children).
+            void_dtype: The numpy void dtype sized to one packed key.
+
+        Returns:
+            A single accumulator holding the deduplicated union.
+        """
+        import numpy as np
+
+        pure_arrays = [
+            part._pure_keys for part in parts if part._pure_keys.shape[0]
+        ]
+        if pure_arrays:
+            pure_keys = np.unique(np.concatenate(pure_arrays))
+        else:
+            pure_keys = np.empty((0,), dtype=void_dtype)
+        ambiguous: set = set()
+        for part in parts:
+            ambiguous |= part._ambiguous_subseqs
+        return cls(pure_keys, ambiguous)
+
+    def cardinality(self) -> int:
+        """Return the number of unique subsequences accumulated.
+
+        Returns:
+            The count of unique pure keys plus unique ambiguous
+            subsequences.
+        """
+        return int(self._pure_keys.shape[0]) + len(self._ambiguous_subseqs)
+
+    def release(self) -> None:
+        """Drop the accumulated keys to free memory once no longer needed."""
+        self._pure_keys = None
+        self._ambiguous_subseqs = None
+
+
+def compute_all_capacities(tree_root, min_len: int) -> dict:
+    """Compute every node's capacity in one bottom-up pass.
+
+    Walks the tree in post-order: each sequence leaf is scanned once to
+    build its set of unique subsequence keys, and each internal node is
+    resolved by merging its children's sets rather than rescanning their
+    leaves. A node's capacity is the size of the merged set, which
+    deduplicates subsequences shared between siblings.
+
+    This replaces resolving capacities top-down and independently per node,
+    where every leaf was rescanned once for each of its ancestors. The
+    bottom-up pass scans each leaf exactly once.
+
+    Args:
+        tree_root: Root node of the taxonomic tree to resolve.
+        min_len: Sliding window size in base pairs. Also the minimum
+            subsequence length, so changing it changes every capacity.
+
+    Returns:
+        Dictionary mapping each node's name (TaxID string) to its capacity.
+    """
+    import numpy as np
+
+    key_bytes = (min_len + _BASES_PER_BYTE - 1) // _BASES_PER_BYTE
+    void_dtype = np.dtype((np.void, key_bytes))
+    capacities: dict[str, int] = {}
+
+    def _resolve(node) -> _NodeCapacityKeys:
+        if getattr(node, "rank", "") == "sequence":
+            return _NodeCapacityKeys.from_sequence_leaf(
+                node, min_len, void_dtype
+            )
+        child_sets = [_resolve(child) for child in node.children]
+        merged = _NodeCapacityKeys.merge(child_sets, void_dtype)
+        for child_set in child_sets:
+            child_set.release()
+        capacities[str(node.name)] = merged.cardinality()
+        return merged
+
+    root_set = _resolve(tree_root)
+    root_set.release()
+    return capacities
+
+
 def compute_node_capacity(
     node,
     min_len: int,
