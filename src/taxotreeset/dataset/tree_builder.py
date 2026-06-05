@@ -12,7 +12,7 @@ The construction process integrates four sources of information:
 1. **The accession registry** (data/registry.json), which lists all
    downloaded accessions and their headers.
 
-2. **The NCBI Taxonomy** (via the taxoniq library), used to resolve
+2. **The registry's cached lineages**, used to resolve
    the full lineage of each accession from its TaxID up to the root.
 
 3. **The scope mapping configuration** (configs/mapping.json), which
@@ -49,7 +49,6 @@ import logging
 import os
 from typing import Any
 
-import taxoniq
 from bigtree import Node
 from tqdm import tqdm
 
@@ -115,7 +114,7 @@ def generate_seqs_by_taxon_tree(
     scope_config = _resolve_scope_config(mapping_data, domain_taxid)
 
     root = Node("root", rank="root")
-    accession_tasks = _enumerate_accession_tasks(registry_data)
+    accession_tasks = _enumerate_accession_tasks(registry_data, domain_taxid)
 
     logger.info(
         f"Spawning phylogenetic tree workers for {len(accession_tasks)} "
@@ -123,6 +122,7 @@ def generate_seqs_by_taxon_tree(
     )
 
     accessions_dict = registry_data.get("accessions", {})
+    lineages = registry_data.get("lineages", {})
 
     for taxid_str, accession_id in tqdm(
         accession_tasks, desc="Resolving Lineage Vectors"
@@ -140,6 +140,7 @@ def generate_seqs_by_taxon_tree(
             scope_config=scope_config,
             noise_filter=noise_filter,
             vault_path=vault_path,
+            lineages=lineages,
         )
 
     _log_noise_filter_summary(noise_filter)
@@ -222,62 +223,74 @@ def _resolve_scope_config(
 
 def _enumerate_accession_tasks(
     registry_data: dict[str, Any],
+    domain_taxid: str | None,
 ) -> list[tuple[str, str]]:
     """Flatten the taxon-to-accessions map into a sequential task list.
 
+    When ``domain_taxid`` is given, only taxa whose cached lineage
+    contains that TaxID are included, so generation processes just the
+    requested root's subtree instead of the whole registry. Taxa with no
+    cached lineage are excluded (they cannot be placed in the tree).
+
     Args:
         registry_data: Full registry dictionary loaded from disk.
+        domain_taxid: Root TaxID to restrict to, or None for everything.
 
     Returns:
-        List of (taxid, accession_id) tuples enumerating every accession
-        in the registry exactly once per taxon it belongs to.
+        List of (taxid, accession_id) tuples enumerating every in-scope
+        accession exactly once per taxon it belongs to.
     """
     taxons_dict = registry_data.get("taxons", {})
+    lineages = registry_data.get("lineages", {})
+
+    def _in_scope(taxid: str) -> bool:
+        if domain_taxid is None:
+            return True
+        stored = lineages.get(taxid)
+        if not stored:
+            return False
+        return any(
+            ancestor["taxid"] == str(domain_taxid) for ancestor in stored
+        )
+
     return [
         (taxid, accession_id)
         for taxid, accessions in taxons_dict.items()
+        if _in_scope(taxid)
         for accession_id in accessions
     ]
-
-
 def _maybe_append_target_taxid(
     filtered_lineage: list[str],
     target_taxid: str | int,
     noise_filter: NoiseFilter,
+    taxon_info: dict[str, tuple[str, str]],
 ) -> None:
     """Conditionally append the accession's target_taxid to its lineage.
 
-    The accession's target_taxid is appended ONLY when it survives
-    the noise filter. Otherwise the lineage remains anchored to its
-    nearest valid ancestor (typically the species rank), and the
-    accession's sequences will be attached there.
+    The accession's target_taxid is appended ONLY when it survives the
+    noise filter. Otherwise the lineage remains anchored to its nearest
+    valid ancestor (typically the species rank), and the accession's
+    sequences will be attached there.
 
     This guards against creating administrative nodes (serotype,
     isolate, etc.) under species, which would inflate the tree with
     spurious heads when species ancestors gain multiple children.
 
-    TaxIDs that cannot be resolved are appended defensively (we
-    cannot prove they are noise, so we keep them).
+    TaxIDs absent from the index are appended defensively (we cannot
+    prove they are noise, so we keep them).
 
     Args:
         filtered_lineage: Noise-filtered lineage to append into (mutated).
         target_taxid: The accession's target TaxID.
         noise_filter: Configured NoiseFilter instance.
+        taxon_info: Map of TaxID to (name, rank) for this lineage.
     """
     target_str = str(target_taxid)
-    try:
-        target_taxon = taxoniq.Taxon(int(target_taxid))
-        target_name = target_taxon.scientific_name
-        target_rank_obj = target_taxon.rank
-        target_rank = (
-            target_rank_obj.name
-            if hasattr(target_rank_obj, "name")
-            else str(target_rank_obj)
-        )
-    except Exception:
+    info = taxon_info.get(target_str)
+    if info is None:
         filtered_lineage.append(target_str)
         return
-
+    target_name, target_rank = info
     if noise_filter.is_noise(target_name, target_rank):
         logger.debug(
             f"[NOISE-SKIP-TARGET] target_taxid={target_str} "
@@ -285,7 +298,6 @@ def _maybe_append_target_taxid(
             "filtered out, accession anchored to nearest ancestor."
         )
         return
-
     filtered_lineage.append(target_str)
 
 
@@ -298,6 +310,7 @@ def _process_accession(
     scope_config: dict[str, Any],
     noise_filter: NoiseFilter,
     vault_path: str,
+    lineages: dict[str, list[dict[str, str]]],
 ) -> None:
     """Stitch a single accession into the tree at the correct lineage path.
 
@@ -315,10 +328,27 @@ def _process_accession(
         scope_config: Resolved scope configuration dict.
         noise_filter: Configured NoiseFilter instance.
         vault_path: LMDB vault directory.
+        lineages: The registry's ``lineages`` map (taxid to ancestry).
     """
     target_taxid = accession_info.get("taxid") or taxid_str
-    raw_lineage = _resolve_lineage_ids(target_taxid)
-    filtered_lineage = _apply_noise_filter_to_lineage(raw_lineage, noise_filter)
+    stored_lineage = lineages.get(str(target_taxid))
+    if not stored_lineage:
+        logger.debug(
+            f"[NO-LINEAGE] acc={accession_id} taxid={target_taxid} has no "
+            "cached lineage; skipping."
+        )
+        return
+    # taxid -> (name, rank) for every ancestor on this accession's path,
+    # so noise filtering and node labeling read names and ranks from the
+    # registry instead of re-resolving them.
+    taxon_info: dict[str, tuple[str, str]] = {
+        ancestor["taxid"]: (ancestor["name"], ancestor["rank"])
+        for ancestor in stored_lineage
+    }
+    raw_lineage = _lineage_ids_from_registry(target_taxid, lineages)
+    filtered_lineage = _apply_noise_filter_to_lineage(
+        raw_lineage, noise_filter, taxon_info
+    )
 
     if not filtered_lineage:
         logger.debug(f"[NOISE-ORPHAN] acc={accession_id} entire lineage filtered out.")
@@ -326,7 +356,9 @@ def _process_accession(
 
     target_str = str(target_taxid)
     if target_str not in filtered_lineage:
-        _maybe_append_target_taxid(filtered_lineage, target_taxid, noise_filter)
+        _maybe_append_target_taxid(
+            filtered_lineage, target_taxid, noise_filter, taxon_info
+        )
 
     anchored_lineage = _anchor_lineage_to_domain(filtered_lineage, domain_taxid)
     final_lineage = _apply_scope_redirections(
@@ -337,6 +369,7 @@ def _process_accession(
         root=root,
         lineage_ids=final_lineage,
         virtual_labels=scope_config["virtual_labels"],
+        taxon_info=taxon_info,
     )
 
     _attach_sequence_leaves(
@@ -346,60 +379,61 @@ def _process_accession(
     )
 
 
-def _resolve_lineage_ids(target_taxid: str | int) -> list[str]:
-    """Resolve a taxon's full lineage from NCBI Taxonomy.
+def _lineage_ids_from_registry(
+    target_taxid: str | int,
+    lineages: dict[str, list[dict[str, str]]],
+) -> list[str]:
+    """Read a taxon's cached lineage from the registry, root to leaf.
 
-    The lineage is returned in root-to-leaf order, suitable for tree
-    construction. Returns an empty list if the TaxID cannot be resolved
-    (typically because the TaxID is no longer present in the local
-    taxoniq cache, or the input is malformed).
+    The registry stores each lineage species-to-root as dicts resolved
+    during discovery (taxoniq with an NCBI fallback). Tree construction
+    wants TaxID strings root-to-leaf, so the stored order is reversed.
 
     Args:
-        target_taxid: TaxID to resolve. Accepts int or str.
+        target_taxid: TaxID whose lineage to read.
+        lineages: The registry's ``lineages`` map.
 
     Returns:
-        List of TaxID strings from root to leaf, or empty list on
-        resolution failure.
+        List of TaxID strings from root to leaf, or empty list when the
+        TaxID has no cached lineage.
     """
-    try:
-        taxon = taxoniq.Taxon(int(target_taxid))
-        return [str(ancestor.tax_id) for ancestor in taxon.ranked_lineage][::-1]
-    except Exception:
+    stored = lineages.get(str(target_taxid))
+    if not stored:
         return []
+    return [ancestor["taxid"] for ancestor in stored][::-1]
 
 
 def _apply_noise_filter_to_lineage(
     lineage_ids: list[str],
     noise_filter: NoiseFilter,
+    taxon_info: dict[str, tuple[str, str]],
 ) -> list[str]:
     """Remove administrative containers from a taxonomic lineage.
 
-    For each TaxID in the lineage, resolves its scientific name and
-    rank, then queries the NoiseFilter. TaxIDs flagged as noise are
-    skipped; the accession effectively "climbs" to the next valid
-    ancestor in its lineage.
+    For each TaxID in the lineage, reads its scientific name and rank
+    from the registry-derived index, then queries the NoiseFilter.
+    TaxIDs flagged as noise are skipped; the accession effectively
+    "climbs" to the next valid ancestor in its lineage.
 
-    TaxIDs that cannot be resolved are kept in the lineage as a
-    defensive default (the absence of metadata is not evidence of
-    administrative status).
+    TaxIDs absent from the index are kept in the lineage as a defensive
+    default (the absence of metadata is not evidence of administrative
+    status).
 
     Args:
         lineage_ids: Root-to-leaf list of TaxID strings.
         noise_filter: Configured NoiseFilter instance.
+        taxon_info: Map of TaxID to (name, rank) for this lineage.
 
     Returns:
         Filtered lineage with administrative TaxIDs removed.
     """
     filtered: list[str] = []
     for taxid in lineage_ids:
-        try:
-            taxon = taxoniq.Taxon(int(taxid))
-            name = taxon.scientific_name
-            rank = taxon.rank.name if hasattr(taxon.rank, "name") else str(taxon.rank)
-        except Exception:
+        info = taxon_info.get(taxid)
+        if info is None:
             filtered.append(taxid)
             continue
-
+        name, rank = info
         if noise_filter.is_noise(name, rank):
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
@@ -408,7 +442,6 @@ def _apply_noise_filter_to_lineage(
                 )
             continue
         filtered.append(taxid)
-
     return filtered
 
 
@@ -508,6 +541,7 @@ def _build_lineage_path(
     root: Node,
     lineage_ids: list[str],
     virtual_labels: dict[str, str],
+    taxon_info: dict[str, tuple[str, str]],
 ) -> Node:
     """Walk the lineage from root creating nodes as needed.
 
@@ -518,14 +552,15 @@ def _build_lineage_path(
     Node metadata (rank and scientific_name) is set based on three
     sources, in order of preference:
         1. Virtual labels from the scope configuration.
-        2. NCBI Taxonomy via taxoniq.
-        3. Defaults (rank='unknown', name=taxid string) on resolution
-           failure.
+        2. The registry-derived (name, rank) index.
+        3. Defaults (rank='unknown', name=taxid string) when the TaxID
+           is absent from the index.
 
     Args:
         root: Tree root.
         lineage_ids: Final lineage to materialize.
         virtual_labels: Map of virtual TaxID to human-readable label.
+        taxon_info: Map of TaxID to (name, rank) for this lineage.
 
     Returns:
         The leaf node of the lineage path.
@@ -536,9 +571,10 @@ def _build_lineage_path(
         if existing_child is not None:
             current = existing_child
             continue
-
         new_node = Node(taxid_str, parent=current)
-        _annotate_node_metadata(new_node, taxid_str, virtual_labels)
+        _annotate_node_metadata(
+            new_node, taxid_str, virtual_labels, taxon_info
+        )
         current = new_node
 
     return current
@@ -564,28 +600,32 @@ def _annotate_node_metadata(
     node: Node,
     taxid_str: str,
     virtual_labels: dict[str, str],
+    taxon_lookup: dict[str, tuple[str, str]],
 ) -> None:
     """Set rank and scientific_name on a freshly created lineage node.
+
+    Reads the node's name and rank from the registry-derived index.
+    Nodes whose TaxID is absent from the index (or is a virtual label)
+    are annotated defensively.
 
     Args:
         node: The newly created Node to annotate.
         taxid_str: The TaxID string this node represents.
         virtual_labels: Map of virtual TaxID to human-readable label.
+        taxon_lookup: Map of TaxID to (name, rank) for this lineage.
     """
     if taxid_str in virtual_labels:
         node.rank = _VIRTUAL_RANK_LABEL
         node.scientific_name = virtual_labels[taxid_str]
         return
-
-    try:
-        taxon_info = taxoniq.Taxon(int(taxid_str))
-        rank_value = taxon_info.rank
-        rank_name = rank_value.name if hasattr(rank_value, "name") else str(rank_value)
-        node.rank = rank_name.lower().strip()
-        node.scientific_name = taxon_info.scientific_name
-    except Exception:
+    info = taxon_lookup.get(taxid_str)
+    if info is None:
         node.rank = _UNKNOWN_RANK_LABEL
         node.scientific_name = taxid_str
+        return
+    name, rank = info
+    node.rank = rank.lower().strip()
+    node.scientific_name = name
 
 
 def _attach_sequence_leaves(

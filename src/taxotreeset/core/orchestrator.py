@@ -71,9 +71,10 @@ _DATASETS_SUPERKINGDOM_KEYS: tuple[str, ...] = (
 
 
 class _Ancestor(NamedTuple):
-    """Minimal lineage node: the fields _resolve_mapped_path consumes."""
+    """A resolved lineage node: TaxID, canonical rank, and name."""
 
     tax_id: int
+    rank: str
     scientific_name: str
 _NCBI_API_KEY_ENV_VAR = "NCBI_API_KEY"
 
@@ -358,6 +359,17 @@ class DiscoveryOrchestrator:
         path_parts = self._resolve_mapped_path(lineage, root_id_str)
         full_path = "root/" + "/".join(path_parts)
 
+        self.registry.store_lineage(
+            taxid_str,
+            [
+                {
+                    "taxid": str(ancestor.tax_id),
+                    "rank": ancestor.rank,
+                    "name": ancestor.scientific_name,
+                }
+                for ancestor in lineage
+            ],
+        )
         for report in reports:
             self.registry._update_taxon_entry(taxid_str, {"reports": [report]})
 
@@ -392,7 +404,11 @@ class DiscoveryOrchestrator:
         try:
             species_taxon = taxoniq.Taxon(taxid)
             return [
-                _Ancestor(int(a.tax_id), a.scientific_name)
+                _Ancestor(
+                    int(a.tax_id),
+                    a.rank.name,
+                    a.scientific_name,
+                )
                 for a in species_taxon.ranked_lineage
             ]
         except KeyError:
@@ -449,7 +465,7 @@ class DiscoveryOrchestrator:
             node = self._classification_node_for_rank(classification, rank)
             if node is not None:
                 lineage.append(
-                    _Ancestor(int(node["id"]), str(node["name"]))
+                    _Ancestor(int(node["id"]), rank, str(node["name"]))
                 )
         return lineage
 

@@ -271,7 +271,19 @@ class GenerationOrchestrator:
         tree_root = self._build_target_tree(domain_taxid)
 
         if tree_root is None or not tree_root.children:
-            logger.error("Tree construction returned no children. Aborting.")
+            if sync:
+                ui_logger.error(
+                    f"No data found for root '{target_group}' "
+                    f"(TaxID {domain_taxid}) after syncing with NCBI. "
+                    "Verify the root exists in NCBI RefSeq."
+                )
+            else:
+                ui_logger.error(
+                    f"No data found for root '{target_group}' "
+                    f"(TaxID {domain_taxid}) in the registry. Re-run "
+                    "without --no-sync to discover and download it "
+                    "from NCBI."
+                )
             return
 
         ui_logger.info("Stage 3/4: Scheduling extraction jobs.")

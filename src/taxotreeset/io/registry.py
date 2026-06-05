@@ -63,8 +63,20 @@ class NCBIRegistry:
                     "downloaded": <bool>,
                     "local_path": "<path_to_lmdb or None>"
                 }
+            },
+            "lineages": {
+                "<taxid>": [
+                    {"taxid": "<id>", "rank": "<rank>", "name": "<name>"},
+                    ...
+                ]
             }
         }
+
+    The ``lineages`` map caches each species TaxID's resolved ancestry
+    (species to root) so generation can scope and place accessions
+    without re-resolving lineages, and so entries resolved via the NCBI
+    fallback (TaxIDs newer than the taxoniq snapshot) survive into
+    generation.
 
     Attributes:
         config_path: Path to the scope mapping configuration JSON file.
@@ -109,7 +121,13 @@ class NCBIRegistry:
         """
         if os.path.exists(self.registry_path):
             with open(self.registry_path, encoding="utf-8") as registry_file:
-                return json.load(registry_file)
+                loaded = json.load(registry_file)
+            # Backfill any sections absent in older on-disk schemas so
+            # callers can rely on every key being present.
+            for key, default in self._empty_registry().items():
+                if key not in loaded:
+                    loaded[key] = default
+            return loaded
         return self._empty_registry()
 
     @staticmethod
@@ -124,6 +142,7 @@ class NCBIRegistry:
             "last_update": None,
             "taxons": {},
             "accessions": {},
+            "lineages": {},
         }
 
     def _load_mapping(self) -> dict[str, Any]:
@@ -191,6 +210,25 @@ class NCBIRegistry:
                 continue
             assembly_data = json.loads(line)
             self._update_taxon_entry(taxon_id, assembly_data)
+
+    def store_lineage(
+        self,
+        taxon_id: TaxonId,
+        lineage: list[dict[str, str]],
+    ) -> None:
+        """Cache a species TaxID's resolved ancestry in the registry.
+
+        Idempotent and overwrite-safe: re-resolving a lineage simply
+        refreshes the cached entry. Storing here lets generation scope
+        and place accessions without re-resolving, and preserves
+        lineages resolved via the NCBI fallback.
+
+        Args:
+            taxon_id: Species TaxID the lineage belongs to.
+            lineage: Ancestors species-to-root, each a dict with
+                ``taxid``, ``rank``, and ``name`` keys.
+        """
+        self.registry["lineages"][str(taxon_id)] = lineage
 
     def _update_taxon_entry(
         self,
