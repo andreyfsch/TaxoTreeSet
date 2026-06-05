@@ -83,6 +83,7 @@ def compute_balanced_extraction_plan(
     min_leaves_per_class: int = DEFAULT_MIN_LEAVES_PER_CLASS,
     rare_taxa_strategy: str = DEFAULT_RARE_TAXA_STRATEGY,
     progress_callback=None,
+    capacity_override: dict[str, int] | None = None,
 ) -> dict:
     """Build a per-class extraction plan that balances training subseqs.
 
@@ -112,6 +113,12 @@ def compute_balanced_extraction_plan(
         max_n_per_class: Hard ceiling on n_per_class to prevent
             dataset explosion on jumbo-genome heads.
 
+        capacity_override: Optional pre-computed {child_name:
+            capacity} map. When given, these capacities are used
+            directly instead of being computed from sequences, which
+            lets the plan be built before any sequence is downloaded
+            (using genome-size estimates). When None, capacities are
+            computed from the sequence leaves as usual.
     Returns:
         Dictionary with keys:
             - 'scenario': one of 'level_all', 'level_all_capped',
@@ -146,14 +153,25 @@ def compute_balanced_extraction_plan(
             f"{len(eligible_children)} eligible remain."
         )
 
-    capacities = _compute_children_capacities(
-        children=eligible_children,
-        min_len=min_len,
-        leaf_cache=leaf_cache,
-        capacity_mode=capacity_mode,
-        max_n_per_class=max_n_per_class,
-        progress_callback=progress_callback,
-    )
+    if capacity_override is not None:
+        # Pre-computed capacities (e.g. genome-size estimates) bypass the
+        # sequence-based computation, enabling balancing before download.
+        capacities = {
+            str(child.name): capacity_override.get(str(child.name), 0)
+            for child in eligible_children
+        }
+        if progress_callback is not None:
+            for _ in eligible_children:
+                progress_callback()
+    else:
+        capacities = _compute_children_capacities(
+            children=eligible_children,
+            min_len=min_len,
+            leaf_cache=leaf_cache,
+            capacity_mode=capacity_mode,
+            max_n_per_class=max_n_per_class,
+            progress_callback=progress_callback,
+        )
     if not capacities:
         plan = _empty_extraction_plan()
         plan["rare_taxa_children"] = rare_taxa_children
