@@ -66,6 +66,7 @@ from taxotreeset.core.generation import (
     make_rare_taxa_bucket_node,
     register_virtual_bucket,
 )
+from taxotreeset.core.generation.capacity import compute_all_capacities
 from taxotreeset.core.generation.constants import (
     DEFAULT_CUTOFF_PERCENTAGE,
     DEFAULT_MAX_N_PER_CLASS,
@@ -216,6 +217,7 @@ class GenerationOrchestrator:
         self._schedule_pbar = None
         self._depth_boundary: str | None = None
         self._single_level: bool = False
+        self._all_capacities: dict[str, int] | None = None
 
         self.downloader: NCBIDownloader = NCBIDownloader(
             registry=self.registry,
@@ -327,11 +329,14 @@ class GenerationOrchestrator:
             return
 
         ui_logger.info("Stage 3/4: Scheduling extraction jobs.")
+        self._all_capacities = self._load_or_compute_capacities(tree_root)
         scheduling_artifacts = self._schedule_pipeline_jobs(
             tree_root=tree_root,
             domain_taxid=domain_taxid,
             abundance_threshold=abundance_threshold,
         )
+        self.registry.store_capacities(self._all_capacities, self.min_subseq_len)
+        self.registry.save()
 
         self._persist_scheduling_artifacts(
             target_group=target_group,
@@ -380,6 +385,47 @@ class GenerationOrchestrator:
             domain_taxid=domain_taxid,
             mapping_path=self.config_path,
         )
+
+    def _load_or_compute_capacities(self, tree_root: Node) -> dict[str, int]:
+        """Return node capacities from the registry cache or by computing them.
+
+        Checks whether the registry already holds a complete capacity entry
+        for every non-sequence node in ``tree_root`` at ``self.min_subseq_len``.
+        A complete hit skips the bottom-up pass entirely. A partial or empty
+        cache triggers a fresh bottom-up computation whose result is ready to
+        be persisted by the caller.
+
+        The cache is considered complete when every non-sequence descendant of
+        ``tree_root`` has a cached value for the requested window size. A
+        partial hit (some nodes cached, some missing) is treated as a miss to
+        avoid mixing stale and fresh values in the same scheduling run.
+
+        Args:
+            tree_root: Root of the taxonomic tree built for this run.
+
+        Returns:
+            Mapping of TaxID string to capacity for every non-sequence node
+            in the tree, sourced from the cache or freshly computed.
+        """
+        min_len = self.min_subseq_len
+        cached = self.registry.load_capacities(min_len)
+        if cached:
+            tree_taxids = {
+                str(node.name)
+                for node in tree_root.descendants
+                if getattr(node, "rank", "") != "sequence"
+            }
+            if tree_taxids.issubset(cached.keys()):
+                ui_logger.info(
+                    f"Loaded {len(cached):,} cached node capacities "
+                    f"(min_len={min_len})."
+                )
+                return cached
+
+        ui_logger.info(
+            f"Computing node capacities via bottom-up pass (min_len={min_len})."
+        )
+        return compute_all_capacities(tree_root, min_len)
 
     def _schedule_pipeline_jobs(
         self,
@@ -709,6 +755,7 @@ class GenerationOrchestrator:
             min_leaves_per_class=self.min_leaves_per_class,
             rare_taxa_strategy=self.rare_taxa_strategy,
             progress_callback=self._on_capacity_computed,
+            capacity_override=self._all_capacities,
         )
 
         retained_children = self._handle_low_capacity_bucket(

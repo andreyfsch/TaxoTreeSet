@@ -144,6 +144,7 @@ class NCBIRegistry:
             "taxons": {},
             "accessions": {},
             "lineages": {},
+            "capacities": {},
         }
 
     def _load_mapping(self) -> dict[str, Any]:
@@ -212,6 +213,71 @@ class NCBIRegistry:
             assembly_data = json.loads(line)
             self._update_taxon_entry(taxon_id, assembly_data)
 
+    def store_capacities(self, capacities: dict[str, int], min_len: int) -> None:
+        """Persist pre-computed node capacities for a given window size.
+
+        Merges the supplied mapping into the registry's capacity cache.
+        Existing entries for other ``min_len`` values are preserved;
+        only the entries for the given ``min_len`` are updated.
+
+        Args:
+            capacities: Mapping of TaxID string to capacity value, as
+                returned by ``compute_all_capacities``.
+            min_len: Sliding-window size used to produce these capacities.
+                Stored as the dict key so multiple window sizes coexist.
+        """
+        min_len_key = str(min_len)
+        cache = self.registry["capacities"]
+        for taxid, value in capacities.items():
+            cache.setdefault(taxid, {})[min_len_key] = value
+
+    def load_capacities(self, min_len: int) -> dict[str, int]:
+        """Return all cached node capacities for a given window size.
+
+        Args:
+            min_len: Sliding-window size to look up.
+
+        Returns:
+            Mapping of TaxID string to capacity. Empty when no entry
+            exists for this ``min_len``.
+        """
+        min_len_key = str(min_len)
+        return {
+            taxid: entries[min_len_key]
+            for taxid, entries in self.registry["capacities"].items()
+            if min_len_key in entries
+        }
+
+    def _invalidate_ancestor_capacities(self, species_taxid: str) -> None:
+        """Remove cached capacities for all ancestors of a species taxon.
+
+        Called when a new accession is added under ``species_taxid`` so
+        that stale capacity values for every ancestor are evicted. The
+        lineage must already be stored in the registry before this method
+        is called (``store_lineage`` must precede ``_update_taxon_entry``
+        in the discovery flow).
+
+        All ``min_len`` entries for each affected ancestor are removed
+        together: adding a new sequence invalidates the capacity for any
+        window size, so partial retention would leave stale values.
+
+        Args:
+            species_taxid: Species-level TaxID whose ancestor capacities
+                should be invalidated.
+        """
+        lineage = self.registry["lineages"].get(species_taxid, [])
+        cache = self.registry["capacities"]
+        for ancestor in lineage:
+            ancestor_taxid = ancestor["taxid"]
+            if ancestor_taxid in cache:
+                del cache[ancestor_taxid]
+                logger.debug(
+                    "Capacity cache invalidated for taxid %s "
+                    "(new accession under %s).",
+                    ancestor_taxid,
+                    species_taxid,
+                )
+
     def store_lineage(
         self,
         taxon_id: TaxonId,
@@ -267,6 +333,7 @@ class NCBIRegistry:
 
             if accession not in self.registry["taxons"][taxon_key]:
                 self.registry["taxons"][taxon_key].append(accession)
+                self._invalidate_ancestor_capacities(taxon_key)
 
             if accession not in self.registry["accessions"]:
                 self.registry["accessions"][accession] = self._build_accession_entry(
