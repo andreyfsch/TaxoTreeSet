@@ -105,6 +105,8 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 logger = logging.getLogger("TaxoTreeSet.Core.GenerationOrchestrator")
 ui_logger = get_ui_logger()
 
+_SELECTIVE_DOWNLOAD_THRESHOLD_BYTES: int = 50 * 1024 ** 3  # 50 GiB
+
 _DOMAIN_GROUP_TO_TAXID: dict[str, str] = {
     "viruses": "10239",
     "bacteria": "2",
@@ -164,6 +166,7 @@ class GenerationOrchestrator:
         use_exact_capacity: bool = DEFAULT_USE_EXACT_CAPACITY,
         min_leaves_per_class: int = DEFAULT_MIN_LEAVES_PER_CLASS,
         rare_taxa_strategy: str = DEFAULT_RARE_TAXA_STRATEGY,
+        selective_download_threshold: int = _SELECTIVE_DOWNLOAD_THRESHOLD_BYTES,
     ) -> None:
         """Initialize the orchestrator and its collaborating components.
 
@@ -193,6 +196,12 @@ class GenerationOrchestrator:
             rare_taxa_strategy: 'fallback' to divert low-leaf children
                 into a virtual_rare_taxa bucket, or 'keep' to retain
                 every child regardless of leaf count.
+            selective_download_threshold: Total pending download volume
+                in bytes above which the selective download selection
+                pass is activated. Below this threshold, all pending
+                accessions are downloaded as usual. Defaults to 50 GiB,
+                which sits above bacteria-scale (~27 GB) and well below
+                eukaryota-scale (~3 TB).
         """
         self.registry: Any = registry
         self.config_path: str = config_path
@@ -214,6 +223,7 @@ class GenerationOrchestrator:
         self.use_exact_capacity: bool = use_exact_capacity
         self.min_leaves_per_class: int = min_leaves_per_class
         self.rare_taxa_strategy: str = rare_taxa_strategy
+        self.selective_download_threshold: int = selective_download_threshold
         self._schedule_pbar = None
         self._depth_boundary: str | None = None
         self._single_level: bool = False
@@ -238,6 +248,11 @@ class GenerationOrchestrator:
         vault: accessions marked downloaded whose recorded headers are
         missing from the LMDB are reset to pending for re-download.
 
+        When the total pending download volume meets or exceeds
+        ``selective_download_threshold``, a selection pass is run to
+        mark low-priority accessions as deferred so Stage 1 only
+        downloads the subset needed to satisfy the balancing targets.
+
         Args:
             target_group: Domain identifier to synchronize.
         """
@@ -250,6 +265,289 @@ class GenerationOrchestrator:
         )
         discovery.discover_from_root(int(domain_taxid))
         self._reconcile_vault_against_registry()
+
+        pending_volume = self.registry.get_pending_volume(domain_taxid)
+        gib = pending_volume / 1024 ** 3
+        threshold_gib = self.selective_download_threshold / 1024 ** 3
+        if pending_volume >= self.selective_download_threshold:
+            ui_logger.info(
+                f"Pending volume {gib:.1f} GiB exceeds the "
+                f"{threshold_gib:.1f} GiB threshold. "
+                "Running selective download selection pass."
+            )
+            self._run_selective_download(domain_taxid)
+        else:
+            ui_logger.info(
+                f"Pending volume {gib:.1f} GiB is below the "
+                f"{threshold_gib:.1f} GiB threshold; "
+                "all pending accessions will be downloaded."
+            )
+
+    def _run_selective_download(self, domain_taxid: str) -> None:
+        """Run the estimation pass and defer accessions not needed for Phase 1.
+
+        Builds an estimation tree from stored lineages (no vault access
+        required), injects total_sequence_length as a capacity proxy,
+        determines per-label n_per_class targets via the standard
+        balancing layer, and marks all pending accessions that are not
+        needed to satisfy those targets as deferred.
+
+        Args:
+            domain_taxid: Root TaxID of the scope being processed.
+        """
+        self.registry.reset_selection_flags(domain_taxid)
+
+        estimation_tree = self._build_target_tree(domain_taxid)
+        if estimation_tree is None or not estimation_tree.children:
+            ui_logger.warning(
+                "Could not build estimation tree for selective download; "
+                "all pending accessions will be downloaded."
+            )
+            return
+
+        estimated_capacities = self._estimate_capacities_from_registry(domain_taxid)
+        downloaded_cap, pending_index = self._build_scope_accession_index(domain_taxid)
+
+        domain_node = self._find_domain_node(estimation_tree, domain_taxid)
+        if domain_node is None:
+            return
+
+        label_targets: dict[str, int] = {}
+        self._collect_label_targets(
+            node=domain_node,
+            children_list=self._collect_real_children(domain_node),
+            estimated_capacities=estimated_capacities,
+            targets=label_targets,
+        )
+
+        selected: set[str] = set()
+        for label_taxid, n_per_class in label_targets.items():
+            already_have = downloaded_cap.get(label_taxid, 0)
+            still_need = max(0, n_per_class - already_have)
+            pending_sorted = sorted(
+                pending_index.get(label_taxid, []),
+                key=lambda x: (not x[1], -x[2]),
+            )
+            cumulative = 0
+            for acc_id, _is_ref, seq_len in pending_sorted:
+                if cumulative >= still_need:
+                    break
+                selected.add(acc_id)
+                cumulative += seq_len
+
+        all_pending = self._collect_scope_pending_accessions(domain_taxid)
+        deferred = all_pending - selected
+        self.registry.mark_accessions_deferred(list(deferred))
+        self.registry.save()
+
+        ui_logger.info(
+            f"Selective download: {len(selected):,} accessions selected, "
+            f"{len(deferred):,} deferred for refinement."
+        )
+
+    def _estimate_capacities_from_registry(
+        self, domain_taxid: str
+    ) -> dict[str, int]:
+        """Estimate node capacities using total_sequence_length metadata.
+
+        For each species in scope, the estimated capacity equals the sum
+        of total_sequence_length across all its accessions. That value is
+        propagated bottom-up to every ancestor via the stored lineages so
+        the balancing layer can consume it as a capacity_override.
+
+        Args:
+            domain_taxid: Root TaxID to restrict the computation to.
+
+        Returns:
+            Mapping of TaxID string to estimated capacity in base pairs.
+        """
+        lineages = self.registry.registry["lineages"]
+        accessions = self.registry.registry["accessions"]
+        taxons = self.registry.registry["taxons"]
+        domain_str = str(domain_taxid)
+
+        result: dict[str, int] = {}
+        for taxid, acc_list in taxons.items():
+            stored = lineages.get(taxid)
+            if not stored or not any(a["taxid"] == domain_str for a in stored):
+                continue
+            species_cap = sum(
+                (accessions.get(acc, {}).get("total_sequence_length") or 0)
+                for acc in acc_list
+            )
+            if species_cap == 0:
+                continue
+            result[taxid] = result.get(taxid, 0) + species_cap
+            for ancestor in stored:
+                anc_id = ancestor["taxid"]
+                result[anc_id] = result.get(anc_id, 0) + species_cap
+        return result
+
+    def _build_scope_accession_index(
+        self, domain_taxid: str
+    ) -> tuple[dict[str, int], dict[str, list[tuple[str, bool, int]]]]:
+        """Build per-label capacity and pending accession lists for selection.
+
+        Iterates every species taxid in scope, then attributes each
+        accession's total_sequence_length to the species itself and all
+        its ancestors (the set of potential labels in any decision point).
+
+        Args:
+            domain_taxid: Root TaxID of the scope.
+
+        Returns:
+            Two-tuple of:
+            - downloaded_cap: label taxid → summed total_sequence_length
+              of already-downloaded accessions, for deducting from the
+              target when selecting pending accessions.
+            - pending_index: label taxid → list of
+              (accession_id, is_reference, total_sequence_length) for
+              pending accessions under that label, unsorted.
+        """
+        lineages = self.registry.registry["lineages"]
+        accessions = self.registry.registry["accessions"]
+        taxons = self.registry.registry["taxons"]
+        domain_str = str(domain_taxid)
+
+        downloaded_cap: dict[str, int] = {}
+        pending_index: dict[str, list[tuple[str, bool, int]]] = {}
+
+        for taxid, acc_list in taxons.items():
+            stored = lineages.get(taxid)
+            if not stored or not any(a["taxid"] == domain_str for a in stored):
+                continue
+            label_taxids = [taxid] + [a["taxid"] for a in stored]
+            for acc_id in acc_list:
+                info = accessions.get(acc_id, {})
+                seq_len = info.get("total_sequence_length") or 0
+                is_ref = bool(info.get("is_reference"))
+                is_downloaded = bool(info.get("downloaded"))
+                for label in label_taxids:
+                    if is_downloaded:
+                        downloaded_cap[label] = downloaded_cap.get(label, 0) + seq_len
+                    else:
+                        pending_index.setdefault(label, []).append(
+                            (acc_id, is_ref, seq_len)
+                        )
+        return downloaded_cap, pending_index
+
+    def _collect_scope_pending_accessions(self, domain_taxid: str) -> set[str]:
+        """Return all pending accession IDs within the given domain scope.
+
+        Args:
+            domain_taxid: Root TaxID of the scope.
+
+        Returns:
+            Set of accession IDs that are not yet downloaded.
+        """
+        lineages = self.registry.registry["lineages"]
+        accessions = self.registry.registry["accessions"]
+        taxons = self.registry.registry["taxons"]
+        domain_str = str(domain_taxid)
+
+        result: set[str] = set()
+        for taxid, acc_list in taxons.items():
+            stored = lineages.get(taxid)
+            if not stored or not any(a["taxid"] == domain_str for a in stored):
+                continue
+            for acc_id in acc_list:
+                info = accessions.get(acc_id, {})
+                if not info.get("downloaded"):
+                    result.add(acc_id)
+        return result
+
+    def _collect_label_targets(
+        self,
+        node: Node,
+        children_list: list,
+        estimated_capacities: dict[str, int],
+        targets: dict[str, int],
+    ) -> None:
+        """Walk the estimation tree and collect per-label n_per_class targets.
+
+        Mirrors ``_schedule_decision_point`` but only runs the balancing
+        layer (no extraction scheduling). Uses ``min_leaves_per_class=0``
+        and ``rare_taxa_strategy='keep'`` so the leaf-count floor does
+        not suppress children that have no sequence leaves in the
+        estimation tree. The estimated ``n_per_class`` is recorded for
+        every child at each decision point; for children that appear in
+        multiple decision points (retained at an ancestor and as a label
+        themselves), the maximum target is kept.
+
+        Args:
+            node: Current decision point.
+            children_list: Direct real children of the node.
+            estimated_capacities: Capacity proxy dict from
+                ``_estimate_capacities_from_registry``, injected via
+                ``capacity_override``.
+            targets: Accumulator mapping label taxid to its n_per_class
+                target (mutated in-place).
+        """
+        if self._is_passthrough_case(children_list):
+            child = children_list[0]
+            self._collect_label_targets(
+                node=child,
+                children_list=self._collect_real_children(child),
+                estimated_capacities=estimated_capacities,
+                targets=targets,
+            )
+            return
+
+        effective_children, _ = classify_children_by_rank(
+            node,
+            children_list,
+            min_subclades_per_bucket=self.min_subclades_per_bucket,
+        )
+        if not effective_children:
+            return
+
+        plan = compute_balanced_extraction_plan(
+            parent_node=node,
+            children=effective_children,
+            leaf_cache={},
+            min_len=self.min_subseq_len,
+            min_num_seqs=self.min_num_seqs,
+            cutoff_percentage=self.cutoff_percentage,
+            use_exact_capacity=self.use_exact_capacity,
+            max_n_per_class=self.max_n_per_class,
+            min_leaves_per_class=0,
+            rare_taxa_strategy="keep",
+            progress_callback=None,
+            capacity_override=estimated_capacities,
+        )
+
+        n_per_class = plan["n_per_class"]
+        if n_per_class == 0:
+            return
+
+        for child in plan["retained_children"]:
+            child_taxid = str(child.name)
+            targets[child_taxid] = max(targets.get(child_taxid, 0), n_per_class)
+
+        for child in plan.get("low_capacity_children", []):
+            child_taxid = str(child.name)
+            child_cap = estimated_capacities.get(child_taxid, 0)
+            targets[child_taxid] = max(targets.get(child_taxid, 0), child_cap)
+
+        if self._single_level:
+            return
+
+        for child in plan["retained_children"]:
+            child_rank = getattr(child, "rank", "")
+            if is_recursion_terminator(child_rank):
+                continue
+            if self._depth_boundary is not None and is_below_boundary(
+                child_rank, self._depth_boundary
+            ):
+                continue
+            grand_children = self._collect_real_children(child)
+            if grand_children:
+                self._collect_label_targets(
+                    node=child,
+                    children_list=grand_children,
+                    estimated_capacities=estimated_capacities,
+                    targets=targets,
+                )
 
     def _reconcile_vault_against_registry(self) -> None:
         """Reconcile the vault against the registry (delegates to downloader)."""

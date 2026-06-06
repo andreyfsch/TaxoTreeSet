@@ -378,8 +378,91 @@ class NCBIRegistry:
             "is_reference": is_reference,
             "total_sequence_length": total_sequence_length,
             "downloaded": False,
+            "download_deferred": False,
             "local_path": None,
         }
+
+    def get_pending_volume(self, domain_taxid: str | None = None) -> int:
+        """Sum total_sequence_length of all pending accessions in scope.
+
+        Counts accessions where ``downloaded`` is False, regardless of
+        whether they are deferred. Used before the selection pass to
+        decide whether selective download is needed.
+
+        Args:
+            domain_taxid: Optional domain anchor. When given, only
+                accessions whose species lineage contains this TaxID
+                are counted. When None, counts across the whole registry.
+
+        Returns:
+            Total estimated download volume in bytes.
+        """
+        lineages = self.registry["lineages"]
+        accessions = self.registry["accessions"]
+        taxons = self.registry["taxons"]
+        domain_str = str(domain_taxid) if domain_taxid else None
+
+        seen: set[str] = set()
+        total = 0
+        for taxid, acc_list in taxons.items():
+            if domain_str is not None:
+                stored = lineages.get(taxid)
+                if not stored or not any(a["taxid"] == domain_str for a in stored):
+                    continue
+            for acc_id in acc_list:
+                if acc_id in seen:
+                    continue
+                seen.add(acc_id)
+                info = accessions.get(acc_id, {})
+                if not info.get("downloaded"):
+                    total += info.get("total_sequence_length") or 0
+        return total
+
+    def mark_accessions_deferred(self, accession_ids: list[str]) -> None:
+        """Set ``download_deferred=True`` for the given accession IDs.
+
+        Called by the selective download selection pass to flag accessions
+        that are not needed for the first download batch. The downloader
+        skips deferred accessions; they remain available for the
+        refinement phase.
+
+        Args:
+            accession_ids: Accession IDs to mark as deferred.
+        """
+        registry_accessions = self.registry["accessions"]
+        for acc_id in accession_ids:
+            if acc_id in registry_accessions:
+                registry_accessions[acc_id]["download_deferred"] = True
+
+    def reset_selection_flags(self, domain_taxid: str | None = None) -> None:
+        """Clear all ``download_deferred`` flags for pending accessions in scope.
+
+        Called before a new selection pass so prior-run deferral decisions
+        do not persist. Only clears flags for accessions that are not yet
+        downloaded; already-downloaded accessions are unaffected.
+
+        Args:
+            domain_taxid: Optional domain anchor to restrict the reset.
+                When None, clears flags across the entire registry.
+        """
+        lineages = self.registry["lineages"]
+        accessions = self.registry["accessions"]
+        taxons = self.registry["taxons"]
+        domain_str = str(domain_taxid) if domain_taxid else None
+
+        seen: set[str] = set()
+        for taxid, acc_list in taxons.items():
+            if domain_str is not None:
+                stored = lineages.get(taxid)
+                if not stored or not any(a["taxid"] == domain_str for a in stored):
+                    continue
+            for acc_id in acc_list:
+                if acc_id in seen:
+                    continue
+                seen.add(acc_id)
+                info = accessions.get(acc_id)
+                if info and info.get("download_deferred"):
+                    info["download_deferred"] = False
 
     def save(self) -> None:
         """Persist the current registry state to disk as formatted JSON.

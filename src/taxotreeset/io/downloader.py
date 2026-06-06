@@ -256,15 +256,19 @@ class NCBIDownloader:
     def _collect_pending_accessions(self) -> list[str]:
         """Return the list of accession IDs that still need downloading.
 
+        Excludes accessions flagged as ``download_deferred=True`` by the
+        selective download selection pass; those are reserved for a later
+        refinement batch and must not enter the current download.
+
         Returns:
-            List of accession strings with downloaded=False in the
-            registry. Order matches the registry's insertion order.
+            List of accession strings eligible for download. Order
+            matches the registry's insertion order.
         """
         accessions = self.registry.registry.get("accessions", {})
         return [
             accession
             for accession, info in accessions.items()
-            if not info.get("downloaded")
+            if not info.get("downloaded") and not info.get("download_deferred")
         ]
 
     def _split_into_chunks(self, accessions: list[str]) -> list[list[str]]:
