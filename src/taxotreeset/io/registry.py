@@ -370,7 +370,8 @@ class NCBIRegistry:
         organism_info = report.get("organism", {})
         organism_name = organism_info.get("organism_name")
         assembly_stats = report.get("assembly_stats", {})
-        total_sequence_length = assembly_stats.get("total_sequence_length")
+        raw_len = assembly_stats.get("total_sequence_length")
+        total_sequence_length = int(raw_len) if raw_len is not None else None
 
         return {
             "taxid": taxon_key,
@@ -415,7 +416,7 @@ class NCBIRegistry:
                 seen.add(acc_id)
                 info = accessions.get(acc_id, {})
                 if not info.get("downloaded"):
-                    total += info.get("total_sequence_length") or 0
+                    total += int(info.get("total_sequence_length") or 0)
         return total
 
     def mark_accessions_deferred(self, accession_ids: list[str]) -> None:

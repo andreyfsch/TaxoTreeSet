@@ -366,7 +366,6 @@ def main() -> None:
         config_path=args.mapping,
         min_subseq_len=args.min_subseq_len,
         max_n_per_class=args.max_n_per_class,
-        stop_at=None,  # handled manually below
         selective_download_threshold=args.threshold,
     )
     orch._depth_boundary = args.stop_at

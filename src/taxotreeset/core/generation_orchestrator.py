@@ -375,7 +375,7 @@ class GenerationOrchestrator:
             if not stored or not any(a["taxid"] == domain_str for a in stored):
                 continue
             species_cap = sum(
-                (accessions.get(acc, {}).get("total_sequence_length") or 0)
+                int(accessions.get(acc, {}).get("total_sequence_length") or 0)
                 for acc in acc_list
             )
             if species_cap == 0:
@@ -422,7 +422,7 @@ class GenerationOrchestrator:
             label_taxids = [taxid] + [a["taxid"] for a in stored]
             for acc_id in acc_list:
                 info = accessions.get(acc_id, {})
-                seq_len = info.get("total_sequence_length") or 0
+                seq_len = int(info.get("total_sequence_length") or 0)
                 is_ref = bool(info.get("is_reference"))
                 is_downloaded = bool(info.get("downloaded"))
                 for label in label_taxids:
@@ -674,7 +674,7 @@ class GenerationOrchestrator:
                 info = accessions.get(acc_id, {})
                 if not info.get("download_deferred"):
                     continue
-                seq_len = info.get("total_sequence_length") or 0
+                seq_len = int(info.get("total_sequence_length") or 0)
                 is_ref = bool(info.get("is_reference"))
                 for label in label_taxids:
                     index.setdefault(label, []).append((acc_id, is_ref, seq_len))
