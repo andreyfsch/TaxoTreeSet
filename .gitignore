@@ -26,3 +26,8 @@ TaxoTreeSet.code-workspace
 
 # Local data scratch dir (real data lives under XDG dirs)
 data/
+
+# Test / coverage artifacts
+.coverage
+coverage.json
+.mutmut-cache

@@ -57,6 +57,13 @@ select = ["E", "F", "C901"]
 # since been removed.) See docs/TODOs/complexity_refactor.md.
 max-complexity = 12
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+markers = [
+    "network: tests that require a live NCBI network connection",
+]
+
 [tool.pyright]
 typeCheckingMode = "basic"
 include = ["src"]

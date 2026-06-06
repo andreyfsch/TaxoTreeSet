@@ -60,6 +60,7 @@ class NCBIRegistry:
                     "taxid": "<taxid>",
                     "organism": "<organism_name>",
                     "is_reference": <bool>,
+                    "total_sequence_length": <int or None>,
                     "downloaded": <bool>,
                     "local_path": "<path_to_lmdb or None>"
                 }
@@ -143,6 +144,7 @@ class NCBIRegistry:
             "taxons": {},
             "accessions": {},
             "lineages": {},
+            "capacities": {},
         }
 
     def _load_mapping(self) -> dict[str, Any]:
@@ -211,6 +213,71 @@ class NCBIRegistry:
             assembly_data = json.loads(line)
             self._update_taxon_entry(taxon_id, assembly_data)
 
+    def store_capacities(self, capacities: dict[str, int], min_len: int) -> None:
+        """Persist pre-computed node capacities for a given window size.
+
+        Merges the supplied mapping into the registry's capacity cache.
+        Existing entries for other ``min_len`` values are preserved;
+        only the entries for the given ``min_len`` are updated.
+
+        Args:
+            capacities: Mapping of TaxID string to capacity value, as
+                returned by ``compute_all_capacities``.
+            min_len: Sliding-window size used to produce these capacities.
+                Stored as the dict key so multiple window sizes coexist.
+        """
+        min_len_key = str(min_len)
+        cache = self.registry["capacities"]
+        for taxid, value in capacities.items():
+            cache.setdefault(taxid, {})[min_len_key] = value
+
+    def load_capacities(self, min_len: int) -> dict[str, int]:
+        """Return all cached node capacities for a given window size.
+
+        Args:
+            min_len: Sliding-window size to look up.
+
+        Returns:
+            Mapping of TaxID string to capacity. Empty when no entry
+            exists for this ``min_len``.
+        """
+        min_len_key = str(min_len)
+        return {
+            taxid: entries[min_len_key]
+            for taxid, entries in self.registry["capacities"].items()
+            if min_len_key in entries
+        }
+
+    def _invalidate_ancestor_capacities(self, species_taxid: str) -> None:
+        """Remove cached capacities for all ancestors of a species taxon.
+
+        Called when a new accession is added under ``species_taxid`` so
+        that stale capacity values for every ancestor are evicted. The
+        lineage must already be stored in the registry before this method
+        is called (``store_lineage`` must precede ``_update_taxon_entry``
+        in the discovery flow).
+
+        All ``min_len`` entries for each affected ancestor are removed
+        together: adding a new sequence invalidates the capacity for any
+        window size, so partial retention would leave stale values.
+
+        Args:
+            species_taxid: Species-level TaxID whose ancestor capacities
+                should be invalidated.
+        """
+        lineage = self.registry["lineages"].get(species_taxid, [])
+        cache = self.registry["capacities"]
+        for ancestor in lineage:
+            ancestor_taxid = ancestor["taxid"]
+            if ancestor_taxid in cache:
+                del cache[ancestor_taxid]
+                logger.debug(
+                    "Capacity cache invalidated for taxid %s "
+                    "(new accession under %s).",
+                    ancestor_taxid,
+                    species_taxid,
+                )
+
     def store_lineage(
         self,
         taxon_id: TaxonId,
@@ -266,6 +333,7 @@ class NCBIRegistry:
 
             if accession not in self.registry["taxons"][taxon_key]:
                 self.registry["taxons"][taxon_key].append(accession)
+                self._invalidate_ancestor_capacities(taxon_key)
 
             if accession not in self.registry["accessions"]:
                 self.registry["accessions"][accession] = self._build_accession_entry(
@@ -301,14 +369,101 @@ class NCBIRegistry:
 
         organism_info = report.get("organism", {})
         organism_name = organism_info.get("organism_name")
+        assembly_stats = report.get("assembly_stats", {})
+        raw_len = assembly_stats.get("total_sequence_length")
+        total_sequence_length = int(raw_len) if raw_len is not None else None
 
         return {
             "taxid": taxon_key,
             "organism": organism_name,
             "is_reference": is_reference,
+            "total_sequence_length": total_sequence_length,
             "downloaded": False,
+            "download_deferred": False,
             "local_path": None,
         }
+
+    def get_pending_volume(self, domain_taxid: str | None = None) -> int:
+        """Sum total_sequence_length of all pending accessions in scope.
+
+        Counts accessions where ``downloaded`` is False, regardless of
+        whether they are deferred. Used before the selection pass to
+        decide whether selective download is needed.
+
+        Args:
+            domain_taxid: Optional domain anchor. When given, only
+                accessions whose species lineage contains this TaxID
+                are counted. When None, counts across the whole registry.
+
+        Returns:
+            Total estimated download volume in bytes.
+        """
+        lineages = self.registry["lineages"]
+        accessions = self.registry["accessions"]
+        taxons = self.registry["taxons"]
+        domain_str = str(domain_taxid) if domain_taxid else None
+
+        seen: set[str] = set()
+        total = 0
+        for taxid, acc_list in taxons.items():
+            if domain_str is not None:
+                stored = lineages.get(taxid)
+                if not stored or not any(a["taxid"] == domain_str for a in stored):
+                    continue
+            for acc_id in acc_list:
+                if acc_id in seen:
+                    continue
+                seen.add(acc_id)
+                info = accessions.get(acc_id, {})
+                if not info.get("downloaded"):
+                    total += int(info.get("total_sequence_length") or 0)
+        return total
+
+    def mark_accessions_deferred(self, accession_ids: list[str]) -> None:
+        """Set ``download_deferred=True`` for the given accession IDs.
+
+        Called by the selective download selection pass to flag accessions
+        that are not needed for the first download batch. The downloader
+        skips deferred accessions; they remain available for the
+        refinement phase.
+
+        Args:
+            accession_ids: Accession IDs to mark as deferred.
+        """
+        registry_accessions = self.registry["accessions"]
+        for acc_id in accession_ids:
+            if acc_id in registry_accessions:
+                registry_accessions[acc_id]["download_deferred"] = True
+
+    def reset_selection_flags(self, domain_taxid: str | None = None) -> None:
+        """Clear all ``download_deferred`` flags for pending accessions in scope.
+
+        Called before a new selection pass so prior-run deferral decisions
+        do not persist. Only clears flags for accessions that are not yet
+        downloaded; already-downloaded accessions are unaffected.
+
+        Args:
+            domain_taxid: Optional domain anchor to restrict the reset.
+                When None, clears flags across the entire registry.
+        """
+        lineages = self.registry["lineages"]
+        accessions = self.registry["accessions"]
+        taxons = self.registry["taxons"]
+        domain_str = str(domain_taxid) if domain_taxid else None
+
+        seen: set[str] = set()
+        for taxid, acc_list in taxons.items():
+            if domain_str is not None:
+                stored = lineages.get(taxid)
+                if not stored or not any(a["taxid"] == domain_str for a in stored):
+                    continue
+            for acc_id in acc_list:
+                if acc_id in seen:
+                    continue
+                seen.add(acc_id)
+                info = accessions.get(acc_id)
+                if info and info.get("download_deferred"):
+                    info["download_deferred"] = False
 
     def save(self) -> None:
         """Persist the current registry state to disk as formatted JSON.

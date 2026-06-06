@@ -66,6 +66,7 @@ from taxotreeset.core.generation import (
     make_rare_taxa_bucket_node,
     register_virtual_bucket,
 )
+from taxotreeset.core.generation.capacity import compute_all_capacities
 from taxotreeset.core.generation.constants import (
     DEFAULT_CUTOFF_PERCENTAGE,
     DEFAULT_MAX_N_PER_CLASS,
@@ -103,6 +104,9 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 logger = logging.getLogger("TaxoTreeSet.Core.GenerationOrchestrator")
 ui_logger = get_ui_logger()
+
+_SELECTIVE_DOWNLOAD_THRESHOLD_BYTES: int = 50 * 1024 ** 3  # 50 GiB
+_MAX_REFINEMENT_ROUNDS: int = 5
 
 _DOMAIN_GROUP_TO_TAXID: dict[str, str] = {
     "viruses": "10239",
@@ -153,6 +157,7 @@ class GenerationOrchestrator:
         output_dir: str,
         config_path: str = "configs/mapping.json",
         max_subseq_len: int = 2000,
+        min_subseq_len: int = 100,
         seed: int = 42,
         output_format: str = "parquet",
         min_subclades_per_bucket: int = 5,
@@ -162,6 +167,7 @@ class GenerationOrchestrator:
         use_exact_capacity: bool = DEFAULT_USE_EXACT_CAPACITY,
         min_leaves_per_class: int = DEFAULT_MIN_LEAVES_PER_CLASS,
         rare_taxa_strategy: str = DEFAULT_RARE_TAXA_STRATEGY,
+        selective_download_threshold: int = _SELECTIVE_DOWNLOAD_THRESHOLD_BYTES,
     ) -> None:
         """Initialize the orchestrator and its collaborating components.
 
@@ -171,6 +177,8 @@ class GenerationOrchestrator:
             output_dir: Where Parquet shards are written.
             config_path: Path to the scope mapping JSON.
             max_subseq_len: Upper bound on subseq length, in bp.
+            min_subseq_len: Lower bound on subseq length and the
+                sliding-window size for capacity measurement, in bp.
             seed: Random seed for reproducible splits and sampling.
             output_format: 'parquet' or 'csv'.
             min_subclades_per_bucket: Minimum subclade count for a
@@ -189,12 +197,24 @@ class GenerationOrchestrator:
             rare_taxa_strategy: 'fallback' to divert low-leaf children
                 into a virtual_rare_taxa bucket, or 'keep' to retain
                 every child regardless of leaf count.
+            selective_download_threshold: Total pending download volume
+                in bytes above which the selective download selection
+                pass is activated. Below this threshold, all pending
+                accessions are downloaded as usual. Defaults to 50 GiB,
+                which sits above bacteria-scale (~27 GB) and well below
+                eukaryota-scale (~3 TB).
         """
         self.registry: Any = registry
         self.config_path: str = config_path
         self.vault_path: str = vault_path
         self.output_dir: str = output_dir
         self.max_subseq_len: int = max_subseq_len
+        if min_subseq_len > max_subseq_len:
+            raise ValueError(
+                f"min_subseq_len ({min_subseq_len}) cannot exceed "
+                f"max_subseq_len ({max_subseq_len})."
+            )
+        self.min_subseq_len: int = min_subseq_len
         self.seed: int = seed
         self.output_format: str = output_format
         self.min_subclades_per_bucket: int = min_subclades_per_bucket
@@ -204,9 +224,12 @@ class GenerationOrchestrator:
         self.use_exact_capacity: bool = use_exact_capacity
         self.min_leaves_per_class: int = min_leaves_per_class
         self.rare_taxa_strategy: str = rare_taxa_strategy
+        self.selective_download_threshold: int = selective_download_threshold
         self._schedule_pbar = None
+        self._selective_download_active: bool = False
         self._depth_boundary: str | None = None
         self._single_level: bool = False
+        self._all_capacities: dict[str, int] | None = None
 
         self.downloader: NCBIDownloader = NCBIDownloader(
             registry=self.registry,
@@ -227,6 +250,11 @@ class GenerationOrchestrator:
         vault: accessions marked downloaded whose recorded headers are
         missing from the LMDB are reset to pending for re-download.
 
+        When the total pending download volume meets or exceeds
+        ``selective_download_threshold``, a selection pass is run to
+        mark low-priority accessions as deferred so Stage 1 only
+        downloads the subset needed to satisfy the balancing targets.
+
         Args:
             target_group: Domain identifier to synchronize.
         """
@@ -239,6 +267,418 @@ class GenerationOrchestrator:
         )
         discovery.discover_from_root(int(domain_taxid))
         self._reconcile_vault_against_registry()
+
+        pending_volume = self.registry.get_pending_volume(domain_taxid)
+        gib = pending_volume / 1024 ** 3
+        threshold_gib = self.selective_download_threshold / 1024 ** 3
+        if pending_volume >= self.selective_download_threshold:
+            ui_logger.info(
+                f"Pending volume {gib:.1f} GiB exceeds the "
+                f"{threshold_gib:.1f} GiB threshold. "
+                "Running selective download selection pass."
+            )
+            self._run_selective_download(domain_taxid)
+        else:
+            ui_logger.info(
+                f"Pending volume {gib:.1f} GiB is below the "
+                f"{threshold_gib:.1f} GiB threshold; "
+                "all pending accessions will be downloaded."
+            )
+
+    def _run_selective_download(self, domain_taxid: str) -> None:
+        """Run the estimation pass and defer accessions not needed for Phase 1.
+
+        Builds an estimation tree from stored lineages (no vault access
+        required), injects total_sequence_length as a capacity proxy,
+        determines per-label n_per_class targets via the standard
+        balancing layer, and marks all pending accessions that are not
+        needed to satisfy those targets as deferred.
+
+        Args:
+            domain_taxid: Root TaxID of the scope being processed.
+        """
+        self._selective_download_active = True
+        self.registry.reset_selection_flags(domain_taxid)
+
+        estimation_tree = self._build_target_tree(domain_taxid)
+        if estimation_tree is None or not estimation_tree.children:
+            ui_logger.warning(
+                "Could not build estimation tree for selective download; "
+                "all pending accessions will be downloaded."
+            )
+            return
+
+        estimated_capacities = self._estimate_capacities_from_registry(domain_taxid)
+        downloaded_cap, pending_index = self._build_scope_accession_index(domain_taxid)
+
+        domain_node = self._find_domain_node(estimation_tree, domain_taxid)
+        if domain_node is None:
+            return
+
+        label_targets: dict[str, int] = {}
+        self._collect_label_targets(
+            node=domain_node,
+            children_list=self._collect_real_children(domain_node),
+            estimated_capacities=estimated_capacities,
+            targets=label_targets,
+        )
+
+        selected: set[str] = set()
+        for label_taxid, n_per_class in label_targets.items():
+            already_have = downloaded_cap.get(label_taxid, 0)
+            still_need = max(0, n_per_class - already_have)
+            pending_sorted = sorted(
+                pending_index.get(label_taxid, []),
+                key=lambda x: (not x[1], -x[2]),
+            )
+            cumulative = 0
+            for acc_id, _is_ref, seq_len in pending_sorted:
+                if cumulative >= still_need:
+                    break
+                selected.add(acc_id)
+                cumulative += seq_len
+
+        all_pending = self._collect_scope_pending_accessions(domain_taxid)
+        deferred = all_pending - selected
+        self.registry.mark_accessions_deferred(list(deferred))
+        self.registry.save()
+
+        ui_logger.info(
+            f"Selective download: {len(selected):,} accessions selected, "
+            f"{len(deferred):,} deferred for refinement."
+        )
+
+    def _estimate_capacities_from_registry(
+        self, domain_taxid: str
+    ) -> dict[str, int]:
+        """Estimate node capacities using total_sequence_length metadata.
+
+        For each species in scope, the estimated capacity equals the sum
+        of total_sequence_length across all its accessions. That value is
+        propagated bottom-up to every ancestor via the stored lineages so
+        the balancing layer can consume it as a capacity_override.
+
+        Args:
+            domain_taxid: Root TaxID to restrict the computation to.
+
+        Returns:
+            Mapping of TaxID string to estimated capacity in base pairs.
+        """
+        lineages = self.registry.registry["lineages"]
+        accessions = self.registry.registry["accessions"]
+        taxons = self.registry.registry["taxons"]
+        domain_str = str(domain_taxid)
+
+        result: dict[str, int] = {}
+        for taxid, acc_list in taxons.items():
+            stored = lineages.get(taxid)
+            if not stored or not any(a["taxid"] == domain_str for a in stored):
+                continue
+            species_cap = sum(
+                int(accessions.get(acc, {}).get("total_sequence_length") or 0)
+                for acc in acc_list
+            )
+            if species_cap == 0:
+                continue
+            result[taxid] = result.get(taxid, 0) + species_cap
+            for ancestor in stored:
+                anc_id = ancestor["taxid"]
+                result[anc_id] = result.get(anc_id, 0) + species_cap
+        return result
+
+    def _build_scope_accession_index(
+        self, domain_taxid: str
+    ) -> tuple[dict[str, int], dict[str, list[tuple[str, bool, int]]]]:
+        """Build per-label capacity and pending accession lists for selection.
+
+        Iterates every species taxid in scope, then attributes each
+        accession's total_sequence_length to the species itself and all
+        its ancestors (the set of potential labels in any decision point).
+
+        Args:
+            domain_taxid: Root TaxID of the scope.
+
+        Returns:
+            Two-tuple of:
+            - downloaded_cap: label taxid → summed total_sequence_length
+              of already-downloaded accessions, for deducting from the
+              target when selecting pending accessions.
+            - pending_index: label taxid → list of
+              (accession_id, is_reference, total_sequence_length) for
+              pending accessions under that label, unsorted.
+        """
+        lineages = self.registry.registry["lineages"]
+        accessions = self.registry.registry["accessions"]
+        taxons = self.registry.registry["taxons"]
+        domain_str = str(domain_taxid)
+
+        downloaded_cap: dict[str, int] = {}
+        pending_index: dict[str, list[tuple[str, bool, int]]] = {}
+
+        for taxid, acc_list in taxons.items():
+            stored = lineages.get(taxid)
+            if not stored or not any(a["taxid"] == domain_str for a in stored):
+                continue
+            label_taxids = [taxid] + [a["taxid"] for a in stored]
+            for acc_id in acc_list:
+                info = accessions.get(acc_id, {})
+                seq_len = int(info.get("total_sequence_length") or 0)
+                is_ref = bool(info.get("is_reference"))
+                is_downloaded = bool(info.get("downloaded"))
+                for label in label_taxids:
+                    if is_downloaded:
+                        downloaded_cap[label] = downloaded_cap.get(label, 0) + seq_len
+                    else:
+                        pending_index.setdefault(label, []).append(
+                            (acc_id, is_ref, seq_len)
+                        )
+        return downloaded_cap, pending_index
+
+    def _collect_scope_pending_accessions(self, domain_taxid: str) -> set[str]:
+        """Return all pending accession IDs within the given domain scope.
+
+        Args:
+            domain_taxid: Root TaxID of the scope.
+
+        Returns:
+            Set of accession IDs that are not yet downloaded.
+        """
+        lineages = self.registry.registry["lineages"]
+        accessions = self.registry.registry["accessions"]
+        taxons = self.registry.registry["taxons"]
+        domain_str = str(domain_taxid)
+
+        result: set[str] = set()
+        for taxid, acc_list in taxons.items():
+            stored = lineages.get(taxid)
+            if not stored or not any(a["taxid"] == domain_str for a in stored):
+                continue
+            for acc_id in acc_list:
+                info = accessions.get(acc_id, {})
+                if not info.get("downloaded"):
+                    result.add(acc_id)
+        return result
+
+    def _collect_label_targets(
+        self,
+        node: Node,
+        children_list: list,
+        estimated_capacities: dict[str, int],
+        targets: dict[str, int],
+    ) -> None:
+        """Walk the estimation tree and collect per-label n_per_class targets.
+
+        Mirrors ``_schedule_decision_point`` but only runs the balancing
+        layer (no extraction scheduling). Uses ``min_leaves_per_class=0``
+        and ``rare_taxa_strategy='keep'`` so the leaf-count floor does
+        not suppress children that have no sequence leaves in the
+        estimation tree. The estimated ``n_per_class`` is recorded for
+        every child at each decision point; for children that appear in
+        multiple decision points (retained at an ancestor and as a label
+        themselves), the maximum target is kept.
+
+        Args:
+            node: Current decision point.
+            children_list: Direct real children of the node.
+            estimated_capacities: Capacity proxy dict from
+                ``_estimate_capacities_from_registry``, injected via
+                ``capacity_override``.
+            targets: Accumulator mapping label taxid to its n_per_class
+                target (mutated in-place).
+        """
+        if self._is_passthrough_case(children_list):
+            child = children_list[0]
+            self._collect_label_targets(
+                node=child,
+                children_list=self._collect_real_children(child),
+                estimated_capacities=estimated_capacities,
+                targets=targets,
+            )
+            return
+
+        effective_children, _ = classify_children_by_rank(
+            node,
+            children_list,
+            min_subclades_per_bucket=self.min_subclades_per_bucket,
+        )
+        if not effective_children:
+            return
+
+        plan = compute_balanced_extraction_plan(
+            parent_node=node,
+            children=effective_children,
+            leaf_cache={},
+            min_len=self.min_subseq_len,
+            min_num_seqs=self.min_num_seqs,
+            cutoff_percentage=self.cutoff_percentage,
+            use_exact_capacity=self.use_exact_capacity,
+            max_n_per_class=self.max_n_per_class,
+            min_leaves_per_class=0,
+            rare_taxa_strategy="keep",
+            progress_callback=None,
+            capacity_override=estimated_capacities,
+        )
+
+        n_per_class = plan["n_per_class"]
+        if n_per_class == 0:
+            return
+
+        for child in plan["retained_children"]:
+            child_taxid = str(child.name)
+            targets[child_taxid] = max(targets.get(child_taxid, 0), n_per_class)
+
+        for child in plan.get("low_capacity_children", []):
+            child_taxid = str(child.name)
+            child_cap = estimated_capacities.get(child_taxid, 0)
+            targets[child_taxid] = max(targets.get(child_taxid, 0), child_cap)
+
+        if self._single_level:
+            return
+
+        for child in plan["retained_children"]:
+            child_rank = getattr(child, "rank", "")
+            if is_recursion_terminator(child_rank):
+                continue
+            if self._depth_boundary is not None and is_below_boundary(
+                child_rank, self._depth_boundary
+            ):
+                continue
+            grand_children = self._collect_real_children(child)
+            if grand_children:
+                self._collect_label_targets(
+                    node=child,
+                    children_list=grand_children,
+                    estimated_capacities=estimated_capacities,
+                    targets=targets,
+                )
+
+    def _run_refinement_pass(
+        self, domain_taxid: str, tree_root: Node
+    ) -> bool:
+        """Check for capacity shortfalls and undefer accessions for the next round.
+
+        Re-derives per-label n_per_class targets using the same
+        estimation pass as Phase 1 (total_sequence_length proxy over all
+        accessions, downloaded or deferred). Compares each label's real
+        capacity from ``self._all_capacities`` against its estimated
+        target. For labels that fell short — meaning the size proxy
+        over-estimated capacity due to repetitive genomic content —
+        additional deferred accessions are undeferred (reference-assembly
+        first, then by decreasing size) until the residual gap is covered
+        or the deferred pool for that label is exhausted.
+
+        Args:
+            domain_taxid: Root TaxID of the scope being processed.
+            tree_root: Taxonomic tree from the current download round.
+                Only the node structure is used; sequence leaves are
+                ignored because capacity comes from ``self._all_capacities``.
+
+        Returns:
+            True if at least one deferred accession was undeferred,
+            indicating another download round is warranted. False when
+            all labels meet their targets or no deferred accessions
+            remain for shortfall labels.
+        """
+        estimated_capacities = self._estimate_capacities_from_registry(domain_taxid)
+        label_targets: dict[str, int] = {}
+        domain_node = self._find_domain_node(tree_root, domain_taxid)
+        if domain_node is None:
+            return False
+
+        self._collect_label_targets(
+            node=domain_node,
+            children_list=self._collect_real_children(domain_node),
+            estimated_capacities=estimated_capacities,
+            targets=label_targets,
+        )
+
+        shortfall: dict[str, int] = {
+            label: target - (self._all_capacities or {}).get(label, 0)
+            for label, target in label_targets.items()
+            if (self._all_capacities or {}).get(label, 0) < target
+        }
+
+        if not shortfall:
+            ui_logger.info("Refinement: all labels met their estimated targets.")
+            return False
+
+        ui_logger.info(
+            f"Refinement: {len(shortfall)} label(s) below estimated target; "
+            "undefering additional accessions."
+        )
+
+        deferred_index = self._build_deferred_accession_index(domain_taxid)
+        newly_undeferred: set[str] = set()
+
+        for label_taxid, still_need in shortfall.items():
+            deferred_sorted = sorted(
+                deferred_index.get(label_taxid, []),
+                key=lambda x: (not x[1], -x[2]),
+            )
+            cumulative = 0
+            for acc_id, _is_ref, seq_len in deferred_sorted:
+                if cumulative >= still_need:
+                    break
+                newly_undeferred.add(acc_id)
+                cumulative += seq_len
+
+        if not newly_undeferred:
+            ui_logger.info(
+                "Refinement: no deferred accessions remain for shortfall labels; "
+                "proceeding with available capacity."
+            )
+            return False
+
+        registry_accessions = self.registry.registry["accessions"]
+        for acc_id in newly_undeferred:
+            if acc_id in registry_accessions:
+                registry_accessions[acc_id]["download_deferred"] = False
+        self.registry.save()
+
+        ui_logger.info(
+            f"Refinement: {len(newly_undeferred):,} accession(s) undeferred "
+            "for next download round."
+        )
+        return True
+
+    def _build_deferred_accession_index(
+        self, domain_taxid: str
+    ) -> dict[str, list[tuple[str, bool, int]]]:
+        """Build per-label deferred accession lists for the refinement pass.
+
+        Same structure as ``_build_scope_accession_index`` but restricted
+        to accessions currently marked ``download_deferred=True``. Used
+        by ``_run_refinement_pass`` to identify which deferred accessions
+        to undefer for each shortfall label.
+
+        Args:
+            domain_taxid: Root TaxID of the scope.
+
+        Returns:
+            Mapping of label taxid → list of
+            (accession_id, is_reference, total_sequence_length) for
+            deferred accessions under that label, unsorted.
+        """
+        lineages = self.registry.registry["lineages"]
+        accessions = self.registry.registry["accessions"]
+        taxons = self.registry.registry["taxons"]
+        domain_str = str(domain_taxid)
+
+        index: dict[str, list[tuple[str, bool, int]]] = {}
+        for taxid, acc_list in taxons.items():
+            stored = lineages.get(taxid)
+            if not stored or not any(a["taxid"] == domain_str for a in stored):
+                continue
+            label_taxids = [taxid] + [a["taxid"] for a in stored]
+            for acc_id in acc_list:
+                info = accessions.get(acc_id, {})
+                if not info.get("download_deferred"):
+                    continue
+                seq_len = int(info.get("total_sequence_length") or 0)
+                is_ref = bool(info.get("is_reference"))
+                for label in label_taxids:
+                    index.setdefault(label, []).append((acc_id, is_ref, seq_len))
+        return index
 
     def _reconcile_vault_against_registry(self) -> None:
         """Reconcile the vault against the registry (delegates to downloader)."""
@@ -290,31 +730,62 @@ class GenerationOrchestrator:
             )
         self._depth_boundary = stop_at
         self._single_level = single_level
+        self._selective_download_active = False
+
         if sync:
             ui_logger.info("Syncing registry and vault with NCBI.")
             self._sync_with_ncbi(target_group)
 
-        ui_logger.info("Stage 1/4: Downloading pending accessions.")
-        self.downloader.download_all_pending()
-
-        ui_logger.info("Stage 2/4: Building taxonomic tree.")
         domain_taxid = self._resolve_root_taxid(target_group)
-        tree_root = self._build_target_tree(domain_taxid)
+        tree_root: Node | None = None
 
-        if tree_root is None or not tree_root.children:
-            if sync:
-                ui_logger.error(
-                    f"No data found for root '{target_group}' "
-                    f"(TaxID {domain_taxid}) after syncing with NCBI. "
-                    "Verify the root exists in NCBI RefSeq."
-                )
+        for round_num in range(_MAX_REFINEMENT_ROUNDS + 1):
+            suffix = f" (refinement round {round_num})" if round_num > 0 else ""
+            ui_logger.info(f"Stage 1/4: Downloading pending accessions{suffix}.")
+            self.downloader.download_all_pending()
+
+            ui_logger.info(f"Stage 2/4: Building taxonomic tree{suffix}.")
+            tree_root = self._build_target_tree(domain_taxid)
+
+            if tree_root is None or not tree_root.children:
+                if sync:
+                    ui_logger.error(
+                        f"No data found for root '{target_group}' "
+                        f"(TaxID {domain_taxid}) after syncing with NCBI. "
+                        "Verify the root exists in NCBI RefSeq."
+                    )
+                else:
+                    ui_logger.error(
+                        f"No data found for root '{target_group}' "
+                        f"(TaxID {domain_taxid}) in the registry. Re-run "
+                        "without --no-sync to discover and download it "
+                        "from NCBI."
+                    )
+                return
+
+            if round_num == 0:
+                self._all_capacities = self._load_or_compute_capacities(tree_root)
             else:
-                ui_logger.error(
-                    f"No data found for root '{target_group}' "
-                    f"(TaxID {domain_taxid}) in the registry. Re-run "
-                    "without --no-sync to discover and download it "
-                    "from NCBI."
+                ui_logger.info(
+                    f"Computing node capacities via bottom-up pass "
+                    f"(min_len={self.min_subseq_len})."
                 )
+                self._all_capacities = compute_all_capacities(
+                    tree_root, self.min_subseq_len
+                )
+
+            if not self._selective_download_active:
+                break
+            if round_num >= _MAX_REFINEMENT_ROUNDS:
+                ui_logger.info(
+                    f"Maximum refinement rounds ({_MAX_REFINEMENT_ROUNDS}) "
+                    "reached; proceeding with current capacities."
+                )
+                break
+            if not self._run_refinement_pass(domain_taxid, tree_root):
+                break
+
+        if tree_root is None:
             return
 
         ui_logger.info("Stage 3/4: Scheduling extraction jobs.")
@@ -323,6 +794,8 @@ class GenerationOrchestrator:
             domain_taxid=domain_taxid,
             abundance_threshold=abundance_threshold,
         )
+        self.registry.store_capacities(self._all_capacities, self.min_subseq_len)
+        self.registry.save()
 
         self._persist_scheduling_artifacts(
             target_group=target_group,
@@ -371,6 +844,47 @@ class GenerationOrchestrator:
             domain_taxid=domain_taxid,
             mapping_path=self.config_path,
         )
+
+    def _load_or_compute_capacities(self, tree_root: Node) -> dict[str, int]:
+        """Return node capacities from the registry cache or by computing them.
+
+        Checks whether the registry already holds a complete capacity entry
+        for every non-sequence node in ``tree_root`` at ``self.min_subseq_len``.
+        A complete hit skips the bottom-up pass entirely. A partial or empty
+        cache triggers a fresh bottom-up computation whose result is ready to
+        be persisted by the caller.
+
+        The cache is considered complete when every non-sequence descendant of
+        ``tree_root`` has a cached value for the requested window size. A
+        partial hit (some nodes cached, some missing) is treated as a miss to
+        avoid mixing stale and fresh values in the same scheduling run.
+
+        Args:
+            tree_root: Root of the taxonomic tree built for this run.
+
+        Returns:
+            Mapping of TaxID string to capacity for every non-sequence node
+            in the tree, sourced from the cache or freshly computed.
+        """
+        min_len = self.min_subseq_len
+        cached = self.registry.load_capacities(min_len)
+        if cached:
+            tree_taxids = {
+                str(node.name)
+                for node in tree_root.descendants
+                if getattr(node, "rank", "") != "sequence"
+            }
+            if tree_taxids.issubset(cached.keys()):
+                ui_logger.info(
+                    f"Loaded {len(cached):,} cached node capacities "
+                    f"(min_len={min_len})."
+                )
+                return cached
+
+        ui_logger.info(
+            f"Computing node capacities via bottom-up pass (min_len={min_len})."
+        )
+        return compute_all_capacities(tree_root, min_len)
 
     def _schedule_pipeline_jobs(
         self,
@@ -692,6 +1206,7 @@ class GenerationOrchestrator:
             parent_node=current_node,
             children=effective_children,
             leaf_cache=leaf_cache,
+            min_len=self.min_subseq_len,
             min_num_seqs=self.min_num_seqs,
             cutoff_percentage=self.cutoff_percentage,
             use_exact_capacity=self.use_exact_capacity,
@@ -699,6 +1214,7 @@ class GenerationOrchestrator:
             min_leaves_per_class=self.min_leaves_per_class,
             rare_taxa_strategy=self.rare_taxa_strategy,
             progress_callback=self._on_capacity_computed,
+            capacity_override=self._all_capacities,
         )
 
         retained_children = self._handle_low_capacity_bucket(
