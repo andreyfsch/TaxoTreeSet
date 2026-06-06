@@ -89,6 +89,46 @@ _HASHED_FLUSH_THRESHOLD: int = 8_000_000
 _HASHED_DISK_THRESHOLD: int = 30_000_000
 _HASHED_PREFIX_BUCKETS: int = 256
 
+# The bottom-up capacity pass keeps several nodes' key sets alive at once
+# (the recursion frontier), unlike the single-node _capacity_exact, so its
+# spill-to-disk threshold is derived from available RAM rather than fixed.
+# The budget is a fraction of available memory, divided by the per-key cost
+# of a merge (the np.unique sort allocates copies) and an estimate of how
+# many limit-size sets coexist on the frontier.
+_BOTTOM_UP_RAM_FRACTION: float = 0.5
+_BOTTOM_UP_MERGE_OVERHEAD: int = 3
+_BOTTOM_UP_LIVE_SETS_ESTIMATE: int = 4
+
+
+def _resolve_bottom_up_threshold(key_bytes: int) -> int:
+    """Derive the in-memory key ceiling for the bottom-up pass from RAM.
+
+    Computes how many packed keys may be held in memory before a node spills
+    to bucket files, sizing the ceiling to a fraction of currently available
+    RAM divided by the per-key merge overhead and the number of limit-size
+    sets expected to coexist on the recursion frontier. Falls back to the
+    fixed supernode threshold when available memory cannot be measured.
+
+    Args:
+        key_bytes: Width of one packed key in bytes.
+
+    Returns:
+        The maximum number of in-memory keys before spilling to disk.
+    """
+    try:
+        import psutil
+
+        available = psutil.virtual_memory().available
+    except Exception:
+        return _HASHED_DISK_THRESHOLD
+    budget = available * _BOTTOM_UP_RAM_FRACTION
+    per_key_cost = (
+        key_bytes * _BOTTOM_UP_MERGE_OVERHEAD * _BOTTOM_UP_LIVE_SETS_ESTIMATE
+    )
+    threshold = int(budget // per_key_cost)
+    return max(threshold, 1)
+
+
 
 def _read_sequence_cached(fasta_path: str, header_id: str) -> str:
     """Read a sequence from LMDB with a per-process in-memory cache.
@@ -123,7 +163,7 @@ def _read_sequence_cached(fasta_path: str, header_id: str) -> str:
 
 
 class _NodeCapacityKeys:
-    """Accumulator of a node's unique capacity keys, held in memory.
+    """Accumulator of a node's unique capacity keys.
 
     A node's capacity is the number of unique fixed-length subsequences
     found across all sequence leaves beneath it. This class accumulates
@@ -136,32 +176,66 @@ class _NodeCapacityKeys:
     groups are disjoint by construction, so their counts add up without
     double counting.
 
-    This in-memory representation suits clades whose key count fits in
-    RAM. Larger clades will spill to disk in a later change.
+    The packed keys are held in one of two interchangeable representations:
+
+    * In memory, as a deduplicated array. This is the fast common path for
+      clades whose keys fit in RAM.
+    * On disk, partitioned into prefix-bucket files by each key's first
+      byte, once a clade's keys would risk exhausting RAM. Keys in
+      different buckets can never be equal, so each bucket is deduplicated
+      independently and the counts summed, bounding peak memory regardless
+      of clade size.
+
+    The ambiguous subsequences, always few, stay in memory in both modes.
     """
 
-    def __init__(self, pure_keys, ambiguous_subseqs: set):
-        """Store the deduplicated key groups.
+    def __init__(
+        self,
+        pure_keys,
+        ambiguous_subseqs: set,
+        key_bytes: int,
+        bucket_paths=None,
+        tmp_dir=None,
+    ):
+        """Store the deduplicated key groups in memory or on disk.
 
         Args:
-            pure_keys: A deduplicated numpy array of packed 2-bit keys.
-            ambiguous_subseqs: A set of exact ambiguous subsequences.
+            pure_keys: Deduplicated array of packed 2-bit keys (memory
+                mode), or None when the keys live on disk.
+            ambiguous_subseqs: Set of exact ambiguous subsequences.
+            key_bytes: Width of one packed key in bytes.
+            bucket_paths: The 256 prefix-bucket file paths (disk mode), or
+                None when the keys live in memory.
+            tmp_dir: Temporary directory holding the bucket files (disk
+                mode), removed on release, or None in memory mode.
         """
         self._pure_keys = pure_keys
         self._ambiguous_subseqs = ambiguous_subseqs
+        self._key_bytes = key_bytes
+        self._bucket_paths = bucket_paths
+        self._tmp_dir = tmp_dir
+
+    @property
+    def _on_disk(self) -> bool:
+        """Return True when the packed keys are stored on disk."""
+        return self._bucket_paths is not None
 
     @classmethod
-    def from_sequence_leaf(cls, leaf, min_len: int, void_dtype):
+    def from_sequence_leaf(cls, leaf, min_len: int, void_dtype, disk_threshold: int):
         """Build an accumulator from a single sequence leaf.
 
         Reads the leaf's sequence, enumerates its sliding windows, and
-        deduplicates them into the two key groups.
+        deduplicates them into the two key groups. A leaf whose unique
+        keys exceed the disk threshold spills to bucket files immediately,
+        which matters for very large single genomes.
 
         Args:
             leaf: A sequence-rank leaf node with ``fasta_path`` and
                 ``header_id`` attributes.
             min_len: Sliding window size in base pairs.
             void_dtype: The numpy void dtype sized to one packed key.
+            disk_threshold: Maximum in-memory keys before spilling the
+                leaf's keys to bucket files.
 
         Returns:
             A populated accumulator, empty when the leaf has no readable
@@ -170,14 +244,15 @@ class _NodeCapacityKeys:
         import numpy as np
         from numpy.lib.stride_tricks import sliding_window_view
 
+        key_bytes = void_dtype.itemsize
         empty = np.empty((0,), dtype=void_dtype)
         fasta_path = getattr(leaf, "fasta_path", "")
         header_id = getattr(leaf, "header_id", "")
         if not fasta_path or not header_id:
-            return cls(empty, set())
+            return cls(empty, set(), key_bytes)
         sequence = _read_sequence_cached(fasta_path, header_id)
         if not sequence or len(sequence) < min_len:
-            return cls(empty, set())
+            return cls(empty, set(), key_bytes)
         seq_arr = np.frombuffer(sequence.encode("ascii"), dtype=np.uint8)
         windows = sliding_window_view(seq_arr, min_len)
         keys, pure_mask = _encode_windows_2bit(windows, min_len)
@@ -188,37 +263,180 @@ class _NodeCapacityKeys:
                 sequence[i : i + min_len]
                 for i in np.flatnonzero(~pure_mask).tolist()
             }
-        return cls(pure_keys, ambiguous)
+        if pure_keys.shape[0] >= disk_threshold:
+            return cls._spilled_from_arrays(
+                [pure_keys], ambiguous, key_bytes
+            )
+        return cls(pure_keys, ambiguous, key_bytes)
 
     @classmethod
-    def merge(cls, parts: list, void_dtype):
+    def _spilled_from_arrays(cls, pure_arrays: list, ambiguous: set, key_bytes: int):
+        """Create a disk-mode accumulator from in-memory key arrays.
+
+        Args:
+            pure_arrays: Arrays of packed keys to write to buckets.
+            ambiguous: Set of ambiguous subsequences to retain.
+            key_bytes: Width of one packed key in bytes.
+
+        Returns:
+            A disk-mode accumulator owning a fresh bucket directory.
+        """
+        import tempfile
+
+        tmp_dir = tempfile.mkdtemp(prefix="tts_capacity_")
+        bucket_paths = _bucket_writer_paths(tmp_dir)
+        bucket_files = [open(p, "wb") for p in bucket_paths]
+        try:
+            for keys in pure_arrays:
+                if keys is not None and keys.shape[0]:
+                    _flush_keys_to_buckets(keys, bucket_files, key_bytes)
+        finally:
+            for handle in bucket_files:
+                handle.close()
+        return cls(None, ambiguous, key_bytes, bucket_paths, tmp_dir)
+
+    @classmethod
+    def merge(cls, parts: list, void_dtype, disk_threshold: int):
         """Merge several accumulators into one, deduplicating across them.
 
-        The union is exact: concatenated pure keys are reduced with
-        ``np.unique`` and ambiguous subsequences are unioned as sets. This
-        captures subsequences shared between siblings (conserved regions),
-        so a parent's count is the size of the union, never the naive sum.
+        The union is exact and captures subsequences shared between
+        siblings (conserved regions), so a parent's count is the size of
+        the union, never the naive sum. When the combined pure keys stay
+        small they are unioned in memory with ``np.unique``; when they
+        would exhaust RAM the merge spills to bucket files, appending each
+        child's keys (already-bucketed children are concatenated bucket by
+        bucket, since the partition is identical).
 
         Args:
             parts: Accumulators to merge (typically a node's children).
             void_dtype: The numpy void dtype sized to one packed key.
+            disk_threshold: Maximum combined in-memory keys before the
+                merge spills to bucket files.
 
         Returns:
             A single accumulator holding the deduplicated union.
         """
         import numpy as np
 
-        pure_arrays = [
-            part._pure_keys for part in parts if part._pure_keys.shape[0]
-        ]
-        if pure_arrays:
-            pure_keys = np.unique(np.concatenate(pure_arrays))
-        else:
-            pure_keys = np.empty((0,), dtype=void_dtype)
+        key_bytes = void_dtype.itemsize
         ambiguous: set = set()
         for part in parts:
             ambiguous |= part._ambiguous_subseqs
-        return cls(pure_keys, ambiguous)
+
+        # A single child (e.g. a passthrough node) needs no reprocessing:
+        # its set already is the union, so adopt it directly rather than
+        # re-deduplicating millions of keys. Ownership of the keys moves
+        # to the new accumulator, leaving the child empty so its later
+        # release does not drop the adopted storage.
+        if len(parts) == 1:
+            return parts[0]._transfer_ownership(ambiguous)
+
+        any_on_disk = any(part._on_disk for part in parts)
+        memory_arrays = [
+            part._pure_keys
+            for part in parts
+            if not part._on_disk and part._pure_keys.shape[0]
+        ]
+        memory_total = sum(arr.shape[0] for arr in memory_arrays)
+
+        if not any_on_disk and memory_total < disk_threshold:
+            if memory_arrays:
+                pure_keys = np.unique(np.concatenate(memory_arrays))
+            else:
+                pure_keys = np.empty((0,), dtype=void_dtype)
+            return cls(pure_keys, ambiguous, key_bytes)
+
+        return cls._spilled_merge(parts, ambiguous, key_bytes)
+
+    @classmethod
+    def _spilled_merge(cls, parts: list, ambiguous: set, key_bytes: int):
+        """Merge accumulators into a fresh disk-mode accumulator.
+
+        In-memory children are flushed into the new buckets; disk-mode
+        children have each of their bucket files appended to the matching
+        new bucket, which is exact because both use the same first-byte
+        partition.
+
+        Args:
+            parts: Accumulators to merge.
+            ambiguous: Already-unioned ambiguous subsequences.
+            key_bytes: Width of one packed key in bytes.
+
+        Returns:
+            A disk-mode accumulator owning a fresh bucket directory.
+        """
+        import os
+        import shutil
+        import tempfile
+
+        import numpy as np
+
+        void_dtype = np.dtype((np.void, key_bytes))
+        tmp_dir = tempfile.mkdtemp(prefix="tts_capacity_")
+        bucket_paths = _bucket_writer_paths(tmp_dir)
+
+        # Write every child's keys into the new buckets one child at a time
+        # (streaming, never holding more than one child in memory), then
+        # deduplicate one bucket at a time. A node thus propagates an
+        # already-unique set so dedup work neither repeats nor accumulates
+        # as sets rise through the tree, while peak memory stays bounded by
+        # a single bucket (~1/256 of the keys) rather than the whole set.
+        bucket_files = [open(p, "ab") for p in bucket_paths]
+        try:
+            for part in parts:
+                if part._on_disk:
+                    for index, child_bucket in enumerate(part._bucket_paths):
+                        if os.path.exists(child_bucket) and os.path.getsize(
+                            child_bucket
+                        ):
+                            with open(child_bucket, "rb") as source:
+                                shutil.copyfileobj(source, bucket_files[index])
+                elif (
+                    part._pure_keys is not None and part._pure_keys.shape[0]
+                ):
+                    _flush_keys_to_buckets(
+                        part._pure_keys, bucket_files, key_bytes
+                    )
+        finally:
+            for handle in bucket_files:
+                handle.close()
+
+        for path in bucket_paths:
+            if not os.path.exists(path) or os.path.getsize(path) == 0:
+                continue
+            raw = np.fromfile(path, dtype=np.uint8)
+            unique_bucket = np.unique(raw.view(void_dtype))
+            unique_bucket.tofile(path)
+        return cls(None, ambiguous, key_bytes, bucket_paths, tmp_dir)
+
+    def _transfer_ownership(self, ambiguous: set):
+        """Move this accumulator's key storage into a new accumulator.
+
+        Used when a parent has a single child: the child's set already is
+        the union, so the parent adopts its in-memory array or its bucket
+        files directly. This object is left empty afterwards so that the
+        traversal's later call to its release does not drop the storage now
+        owned by the returned accumulator.
+
+        Args:
+            ambiguous: The ambiguous subsequences for the new accumulator
+                (the union already computed by the caller).
+
+        Returns:
+            A new accumulator owning this one's pure-key storage.
+        """
+        adopted = _NodeCapacityKeys(
+            self._pure_keys,
+            ambiguous,
+            self._key_bytes,
+            self._bucket_paths,
+            self._tmp_dir,
+        )
+        self._pure_keys = None
+        self._bucket_paths = None
+        self._tmp_dir = None
+        self._ambiguous_subseqs = set()
+        return adopted
 
     def cardinality(self) -> int:
         """Return the number of unique subsequences accumulated.
@@ -227,12 +445,32 @@ class _NodeCapacityKeys:
             The count of unique pure keys plus unique ambiguous
             subsequences.
         """
-        return int(self._pure_keys.shape[0]) + len(self._ambiguous_subseqs)
+        if self._on_disk:
+            pure_count = _count_unique_bucketed_on_disk(
+                self._bucket_paths, self._key_bytes
+            )
+        else:
+            pure_count = int(self._pure_keys.shape[0])
+        return pure_count + len(self._ambiguous_subseqs)
 
     def release(self) -> None:
-        """Drop the accumulated keys to free memory once no longer needed."""
+        """Free the accumulated keys once the node has been resolved.
+
+        Drops the in-memory array, or closes and removes the bucket files
+        and their temporary directory in disk mode.
+        """
+        import os
+
         self._pure_keys = None
         self._ambiguous_subseqs = None
+        if self._bucket_paths is not None:
+            for path in self._bucket_paths:
+                if os.path.exists(path):
+                    os.remove(path)
+            if self._tmp_dir is not None and os.path.isdir(self._tmp_dir):
+                os.rmdir(self._tmp_dir)
+            self._bucket_paths = None
+            self._tmp_dir = None
 
 
 def compute_all_capacities(tree_root, min_len: int) -> dict:
@@ -260,15 +498,16 @@ def compute_all_capacities(tree_root, min_len: int) -> dict:
 
     key_bytes = (min_len + _BASES_PER_BYTE - 1) // _BASES_PER_BYTE
     void_dtype = np.dtype((np.void, key_bytes))
+    disk_threshold = _resolve_bottom_up_threshold(key_bytes)
     capacities: dict[str, int] = {}
 
     def _resolve(node) -> _NodeCapacityKeys:
         if getattr(node, "rank", "") == "sequence":
             return _NodeCapacityKeys.from_sequence_leaf(
-                node, min_len, void_dtype
+                node, min_len, void_dtype, disk_threshold
             )
         child_sets = [_resolve(child) for child in node.children]
-        merged = _NodeCapacityKeys.merge(child_sets, void_dtype)
+        merged = _NodeCapacityKeys.merge(child_sets, void_dtype, disk_threshold)
         for child_set in child_sets:
             child_set.release()
         capacities[str(node.name)] = merged.cardinality()
