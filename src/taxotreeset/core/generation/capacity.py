@@ -54,6 +54,7 @@ Typical usage::
     )
 """
 
+import contextlib
 import logging
 import math
 
@@ -285,14 +286,11 @@ class _NodeCapacityKeys:
 
         tmp_dir = tempfile.mkdtemp(prefix="tts_capacity_")
         bucket_paths = _bucket_writer_paths(tmp_dir)
-        bucket_files = [open(p, "wb") for p in bucket_paths]
-        try:
+        with contextlib.ExitStack() as stack:
+            bucket_files = [stack.enter_context(open(p, "wb")) for p in bucket_paths]
             for keys in pure_arrays:
                 if keys is not None and keys.shape[0]:
                     _flush_keys_to_buckets(keys, bucket_files, key_bytes)
-        finally:
-            for handle in bucket_files:
-                handle.close()
         return cls(None, ambiguous, key_bytes, bucket_paths, tmp_dir)
 
     @classmethod
@@ -381,8 +379,8 @@ class _NodeCapacityKeys:
         # already-unique set so dedup work neither repeats nor accumulates
         # as sets rise through the tree, while peak memory stays bounded by
         # a single bucket (~1/256 of the keys) rather than the whole set.
-        bucket_files = [open(p, "ab") for p in bucket_paths]
-        try:
+        with contextlib.ExitStack() as stack:
+            bucket_files = [stack.enter_context(open(p, "ab")) for p in bucket_paths]
             for part in parts:
                 if part._on_disk:
                     for index, child_bucket in enumerate(part._bucket_paths):
@@ -397,9 +395,6 @@ class _NodeCapacityKeys:
                     _flush_keys_to_buckets(
                         part._pure_keys, bucket_files, key_bytes
                     )
-        finally:
-            for handle in bucket_files:
-                handle.close()
 
         for path in bucket_paths:
             if not os.path.exists(path) or os.path.getsize(path) == 0:
@@ -810,7 +805,15 @@ def _capacity_exact(  # noqa: C901
         nonlocal tmp_dir, bucket_files, bucket_paths
         tmp_dir = tempfile.mkdtemp(prefix="tts_exact_")
         bucket_paths = _bucket_writer_paths(tmp_dir)
-        bucket_files = [open(p, "wb") for p in bucket_paths]
+        opened = []
+        try:
+            for p in bucket_paths:
+                opened.append(open(p, "wb"))
+        except OSError:
+            for handle in opened:
+                handle.close()
+            raise
+        bucket_files = opened
         # Spill whatever is already in memory to the buckets.
         if unique_pure.shape[0]:
             _flush_keys_to_buckets(unique_pure, bucket_files, key_bytes)
