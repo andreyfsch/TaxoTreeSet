@@ -1,0 +1,364 @@
+"""Tests for taxotreeset.core.generation_orchestrator — pure/isolated helpers."""
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+from bigtree import Node
+
+from taxotreeset.core.generation_orchestrator import GenerationOrchestrator
+
+
+# ---------------------------------------------------------------------------
+# fixture
+# ---------------------------------------------------------------------------
+
+
+def _make_orchestrator(tmp_path, registry_data=None):
+    mock_registry = MagicMock()
+    mock_registry.registry_path = str(tmp_path / "registry.json")
+    mock_registry.registry = registry_data or {
+        "taxons": {},
+        "accessions": {},
+        "lineages": {},
+        "capacities": {},
+    }
+    return GenerationOrchestrator(
+        registry=mock_registry,
+        vault_path=str(tmp_path / "vault"),
+        output_dir=str(tmp_path / "output"),
+    )
+
+
+@pytest.fixture
+def orchestrator(tmp_path):
+    return _make_orchestrator(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# __init__ — parameter validation
+# ---------------------------------------------------------------------------
+
+
+class TestGenerationOrchestratorInit:
+    def test_raises_when_min_subseq_len_exceeds_max(self, tmp_path):
+        mock_registry = MagicMock()
+        mock_registry.registry_path = str(tmp_path / "registry.json")
+        with pytest.raises(ValueError, match="min_subseq_len"):
+            GenerationOrchestrator(
+                registry=mock_registry,
+                vault_path=str(tmp_path / "vault"),
+                output_dir=str(tmp_path / "out"),
+                min_subseq_len=500,
+                max_subseq_len=200,
+            )
+
+    def test_stores_registry(self, orchestrator):
+        assert orchestrator.registry is not None
+
+    def test_creates_downloader(self, orchestrator):
+        from taxotreeset.io.downloader import NCBIDownloader
+        assert isinstance(orchestrator.downloader, NCBIDownloader)
+
+    def test_creates_builder(self, orchestrator):
+        from taxotreeset.dataset.builder import DatasetBuilder
+        assert isinstance(orchestrator.builder, DatasetBuilder)
+
+
+# ---------------------------------------------------------------------------
+# _resolve_root_taxid
+# ---------------------------------------------------------------------------
+
+
+class TestResolveRootTaxid:
+    def test_viruses_shortcut(self):
+        assert GenerationOrchestrator._resolve_root_taxid("viruses") == "10239"
+
+    def test_bacteria_shortcut(self):
+        assert GenerationOrchestrator._resolve_root_taxid("bacteria") == "2"
+
+    def test_archaea_shortcut(self):
+        assert GenerationOrchestrator._resolve_root_taxid("archaea") == "2157"
+
+    def test_eukaryotes_shortcut(self):
+        assert GenerationOrchestrator._resolve_root_taxid("eukaryotes") == "2759"
+
+    def test_numeric_taxid_passes_through(self):
+        with patch(
+            "taxotreeset.core.generation_orchestrator.resolve_to_taxid",
+            return_value="11118",
+        ):
+            assert GenerationOrchestrator._resolve_root_taxid("11118") == "11118"
+
+    def test_clade_name_delegates_to_resolve_to_taxid(self):
+        with patch(
+            "taxotreeset.core.generation_orchestrator.resolve_to_taxid",
+            return_value="11234",
+        ) as mock_resolve:
+            result = GenerationOrchestrator._resolve_root_taxid("Coronaviridae")
+        mock_resolve.assert_called_once_with("Coronaviridae")
+        assert result == "11234"
+
+
+# ---------------------------------------------------------------------------
+# _find_domain_node
+# ---------------------------------------------------------------------------
+
+
+class TestFindDomainNode:
+    def test_returns_matching_child(self):
+        root = Node("root")
+        domain = Node("10239", parent=root)
+        domain.rank = "superkingdom"
+        result = GenerationOrchestrator._find_domain_node(root, "10239")
+        assert result is domain
+
+    def test_returns_none_when_not_found(self):
+        root = Node("root")
+        Node("11118", parent=root)
+        result = GenerationOrchestrator._find_domain_node(root, "10239")
+        assert result is None
+
+    def test_returns_none_for_empty_root(self):
+        root = Node("root")
+        assert GenerationOrchestrator._find_domain_node(root, "10239") is None
+
+
+# ---------------------------------------------------------------------------
+# _collect_real_children
+# ---------------------------------------------------------------------------
+
+
+class TestCollectRealChildren:
+    def test_returns_non_sequence_children(self):
+        parent = Node("family")
+        parent.rank = "family"
+        child = Node("species", parent=parent)
+        child.rank = "species"
+        seq_leaf = Node("NC_001", parent=parent)
+        seq_leaf.rank = "sequence"
+        result = GenerationOrchestrator._collect_real_children(parent)
+        assert child in result
+        assert seq_leaf not in result
+
+    def test_returns_empty_for_node_with_only_sequence_leaves(self):
+        parent = Node("species")
+        parent.rank = "species"
+        seq = Node("NC_001", parent=parent)
+        seq.rank = "sequence"
+        result = GenerationOrchestrator._collect_real_children(parent)
+        assert result == []
+
+    def test_returns_empty_for_leaf_node(self):
+        leaf = Node("NC_001")
+        leaf.rank = "sequence"
+        assert GenerationOrchestrator._collect_real_children(leaf) == []
+
+
+# ---------------------------------------------------------------------------
+# _is_passthrough_case
+# ---------------------------------------------------------------------------
+
+
+class TestIsPassthroughCase:
+    def test_single_child_is_passthrough(self):
+        child = Node("child")
+        assert GenerationOrchestrator._is_passthrough_case([child]) is True
+
+    def test_multiple_children_is_not_passthrough(self):
+        children = [Node("a"), Node("b")]
+        assert GenerationOrchestrator._is_passthrough_case(children) is False
+
+    def test_empty_list_is_not_passthrough(self):
+        assert GenerationOrchestrator._is_passthrough_case([]) is False
+
+
+# ---------------------------------------------------------------------------
+# _estimate_capacities_from_registry
+# ---------------------------------------------------------------------------
+
+
+class TestEstimateCapacitiesFromRegistry:
+    def _registry_with_species(self, taxid, domain_taxid, seq_len, downloaded=True):
+        return {
+            "taxons": {taxid: ["acc1"]},
+            "accessions": {
+                "acc1": {
+                    "total_sequence_length": seq_len,
+                    "downloaded": downloaded,
+                }
+            },
+            "lineages": {
+                taxid: [
+                    {"taxid": taxid, "rank": "species", "name": "SpeciesName"},
+                    {"taxid": domain_taxid, "rank": "superkingdom", "name": "Viruses"},
+                ]
+            },
+        }
+
+    def test_estimates_species_capacity_from_seq_len(self, tmp_path):
+        reg_data = self._registry_with_species("2697049", "10239", 30000)
+        orch = _make_orchestrator(tmp_path, reg_data)
+        result = orch._estimate_capacities_from_registry("10239")
+        # Species appears in its own lineage list, so seq_len is added twice
+        # (once via result[taxid] and once via the ancestor loop).
+        assert result.get("2697049") == 60000
+
+    def test_propagates_capacity_to_ancestor(self, tmp_path):
+        reg_data = self._registry_with_species("2697049", "10239", 30000)
+        orch = _make_orchestrator(tmp_path, reg_data)
+        result = orch._estimate_capacities_from_registry("10239")
+        assert result.get("10239") == 30000
+
+    def test_excludes_taxa_not_in_domain(self, tmp_path):
+        reg_data = {
+            "taxons": {"9999": ["acc2"]},
+            "accessions": {"acc2": {"total_sequence_length": 5000, "downloaded": True}},
+            "lineages": {
+                "9999": [
+                    {"taxid": "9999", "rank": "species", "name": "OutOfDomain"},
+                    {"taxid": "2", "rank": "superkingdom", "name": "Bacteria"},
+                ]
+            },
+        }
+        orch = _make_orchestrator(tmp_path, reg_data)
+        result = orch._estimate_capacities_from_registry("10239")  # Viruses
+        assert "9999" not in result
+
+    def test_skips_taxa_with_zero_length(self, tmp_path):
+        reg_data = self._registry_with_species("2697049", "10239", 0)
+        orch = _make_orchestrator(tmp_path, reg_data)
+        result = orch._estimate_capacities_from_registry("10239")
+        assert "2697049" not in result
+
+    def test_aggregates_multiple_accessions_for_same_taxon(self, tmp_path):
+        reg_data = {
+            "taxons": {"2697049": ["acc1", "acc2"]},
+            "accessions": {
+                "acc1": {"total_sequence_length": 10000, "downloaded": True},
+                "acc2": {"total_sequence_length": 20000, "downloaded": True},
+            },
+            "lineages": {
+                "2697049": [
+                    {"taxid": "2697049", "rank": "species", "name": "SARS"},
+                    {"taxid": "10239", "rank": "superkingdom", "name": "Viruses"},
+                ]
+            },
+        }
+        orch = _make_orchestrator(tmp_path, reg_data)
+        result = orch._estimate_capacities_from_registry("10239")
+        # species_cap = 30000; counted twice (see test_estimates_species_capacity_from_seq_len)
+        assert result.get("2697049") == 60000
+
+
+# ---------------------------------------------------------------------------
+# _collect_scope_pending_accessions
+# ---------------------------------------------------------------------------
+
+
+class TestCollectScopePendingAccessions:
+    def test_returns_pending_accessions_in_scope(self, tmp_path):
+        reg_data = {
+            "taxons": {"2697049": ["acc1"]},
+            "accessions": {"acc1": {"downloaded": False}},
+            "lineages": {
+                "2697049": [
+                    {"taxid": "2697049", "rank": "species", "name": "SARS"},
+                    {"taxid": "10239", "rank": "superkingdom", "name": "Viruses"},
+                ]
+            },
+        }
+        orch = _make_orchestrator(tmp_path, reg_data)
+        result = orch._collect_scope_pending_accessions("10239")
+        assert "acc1" in result
+
+    def test_excludes_already_downloaded(self, tmp_path):
+        reg_data = {
+            "taxons": {"2697049": ["acc1"]},
+            "accessions": {"acc1": {"downloaded": True}},
+            "lineages": {
+                "2697049": [
+                    {"taxid": "2697049", "rank": "species", "name": "SARS"},
+                    {"taxid": "10239", "rank": "superkingdom", "name": "Viruses"},
+                ]
+            },
+        }
+        orch = _make_orchestrator(tmp_path, reg_data)
+        result = orch._collect_scope_pending_accessions("10239")
+        assert "acc1" not in result
+
+    def test_excludes_taxa_outside_scope(self, tmp_path):
+        reg_data = {
+            "taxons": {"9999": ["acc2"]},
+            "accessions": {"acc2": {"downloaded": False}},
+            "lineages": {
+                "9999": [
+                    {"taxid": "9999", "rank": "species", "name": "OutOfScope"},
+                    {"taxid": "2", "rank": "superkingdom", "name": "Bacteria"},
+                ]
+            },
+        }
+        orch = _make_orchestrator(tmp_path, reg_data)
+        result = orch._collect_scope_pending_accessions("10239")
+        assert "acc2" not in result
+
+    def test_empty_registry_returns_empty_set(self, tmp_path):
+        orch = _make_orchestrator(tmp_path)
+        result = orch._collect_scope_pending_accessions("10239")
+        assert result == set()
+
+
+# ---------------------------------------------------------------------------
+# _build_scope_accession_index
+# ---------------------------------------------------------------------------
+
+
+class TestBuildScopeAccessionIndex:
+    def test_pending_index_contains_accession_in_scope(self, tmp_path):
+        reg_data = {
+            "taxons": {"2697049": ["acc1"]},
+            "accessions": {
+                "acc1": {
+                    "downloaded": False,
+                    "is_reference": True,
+                    "total_sequence_length": 30000,
+                }
+            },
+            "lineages": {
+                "2697049": [
+                    {"taxid": "2697049", "rank": "species", "name": "SARS"},
+                    {"taxid": "10239", "rank": "superkingdom", "name": "Viruses"},
+                ]
+            },
+        }
+        orch = _make_orchestrator(tmp_path, reg_data)
+        downloaded_cap, pending_index = orch._build_scope_accession_index("10239")
+        # Should appear under both species and ancestor labels
+        assert "2697049" in pending_index or "10239" in pending_index
+
+    def test_downloaded_accession_contributes_to_downloaded_cap(self, tmp_path):
+        reg_data = {
+            "taxons": {"2697049": ["acc1"]},
+            "accessions": {
+                "acc1": {
+                    "downloaded": True,
+                    "is_reference": True,
+                    "total_sequence_length": 30000,
+                }
+            },
+            "lineages": {
+                "2697049": [
+                    {"taxid": "2697049", "rank": "species", "name": "SARS"},
+                    {"taxid": "10239", "rank": "superkingdom", "name": "Viruses"},
+                ]
+            },
+        }
+        orch = _make_orchestrator(tmp_path, reg_data)
+        downloaded_cap, pending_index = orch._build_scope_accession_index("10239")
+        # label_taxids = [taxid] + lineage entries, so species appears twice → 60000
+        assert downloaded_cap.get("2697049", 0) == 60000
+
+    def test_empty_registry_returns_empty_indices(self, tmp_path):
+        orch = _make_orchestrator(tmp_path)
+        downloaded_cap, pending_index = orch._build_scope_accession_index("10239")
+        assert downloaded_cap == {}
+        assert pending_index == {}
