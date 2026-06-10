@@ -54,6 +54,7 @@ import json
 import logging
 import os
 import random
+import time
 from typing import Any
 
 from bigtree import Node
@@ -120,6 +121,14 @@ _STRATIFIED_VAL_RATIO: float = 0.15
 _SPLITS: tuple[str, ...] = ("train", "val", "test")
 
 
+def _fmt_elapsed(secs: float) -> str:
+    if secs < 90:
+        return f"{secs:.0f}s"
+    if secs < 5400:
+        return f"{secs / 60:.0f}min"
+    return f"{secs / 3600:.1f}h"
+
+
 class GenerationOrchestrator:
     """Coordinate the full dataset generation workflow.
 
@@ -168,6 +177,10 @@ class GenerationOrchestrator:
         min_leaves_per_class: int = DEFAULT_MIN_LEAVES_PER_CLASS,
         rare_taxa_strategy: str = DEFAULT_RARE_TAXA_STRATEGY,
         selective_download_threshold: int = _SELECTIVE_DOWNLOAD_THRESHOLD_BYTES,
+        spill_dir: str | None = None,
+        tmp_dir: str | None = None,
+        n_workers: int | None = None,
+        n_gpu_workers: int | None = None,
     ) -> None:
         """Initialize the orchestrator and its collaborating components.
 
@@ -203,6 +216,16 @@ class GenerationOrchestrator:
                 accessions are downloaded as usual. Defaults to 50 GiB,
                 which sits above bacteria-scale (~27 GB) and well below
                 eukaryota-scale (~3 TB).
+            tmp_dir: Directory for temporary download archives. Passed
+                to NCBIDownloader; defaults to the OS temp dir when
+                None. Point to a large drive to keep the system drive
+                from being inflated by transient ZIP extraction.
+            n_workers: CPU worker processes for the parallel leaf phase
+                of the bottom-up capacity pass. Defaults to cpu_count - 1
+                when None. Pass 1 to disable CPU parallelism.
+            n_gpu_workers: GPU worker processes for large leaves (requires
+                CuPy). Defaults to auto-detect (all CUDA devices). Pass 0
+                to disable GPU acceleration.
         """
         self.registry: Any = registry
         self.config_path: str = config_path
@@ -225,6 +248,10 @@ class GenerationOrchestrator:
         self.min_leaves_per_class: int = min_leaves_per_class
         self.rare_taxa_strategy: str = rare_taxa_strategy
         self.selective_download_threshold: int = selective_download_threshold
+        self.spill_dir: str | None = spill_dir
+        self.tmp_dir: str | None = tmp_dir
+        self.n_workers: int | None = n_workers
+        self.n_gpu_workers: int | None = n_gpu_workers
         self._schedule_pbar = None
         self._selective_download_active: bool = False
         self._depth_boundary: str | None = None
@@ -234,6 +261,7 @@ class GenerationOrchestrator:
         self.downloader: NCBIDownloader = NCBIDownloader(
             registry=self.registry,
             vault_path=self.vault_path,
+            tmp_dir=self.tmp_dir,
         )
         self.builder: DatasetBuilder = DatasetBuilder(
             output_dir=self.output_dir,
@@ -731,6 +759,17 @@ class GenerationOrchestrator:
         self._depth_boundary = stop_at
         self._single_level = single_level
         self._selective_download_active = False
+        t_pipeline_start = time.monotonic()
+
+        from taxotreeset.core.preflight import run_preflight
+        run_preflight(
+            registry=self.registry,
+            vault_path=self.vault_path,
+            output_dir=self.output_dir,
+            spill_dir=self.spill_dir,
+            n_gpu_workers=self.n_gpu_workers,
+            sync=sync,
+        )
 
         if sync:
             ui_logger.info("Syncing registry and vault with NCBI.")
@@ -741,10 +780,29 @@ class GenerationOrchestrator:
 
         for round_num in range(_MAX_REFINEMENT_ROUNDS + 1):
             suffix = f" (refinement round {round_num})" if round_num > 0 else ""
-            ui_logger.info(f"Stage 1/4: Downloading pending accessions{suffix}.")
-            self.downloader.download_all_pending()
 
+            # Stage 1 — download
+            n_pending_before = sum(
+                1 for v in self.registry.registry.get("accessions", {}).values()
+                if not v.get("downloaded", False)
+            )
+            ui_logger.info(f"Stage 1/4: Downloading pending accessions{suffix}.")
+            t1 = time.monotonic()
+            self.downloader.download_all_pending()
+            n_pending_after = sum(
+                1 for v in self.registry.registry.get("accessions", {}).values()
+                if not v.get("downloaded", False)
+            )
+            n_downloaded = n_pending_before - n_pending_after
+            ui_logger.info(
+                "✓ Stage 1/4  %s   (%s)",
+                _fmt_elapsed(time.monotonic() - t1),
+                f"{n_downloaded:,} downloaded" if n_downloaded else "nothing to download",
+            )
+
+            # Stage 2 — tree build
             ui_logger.info(f"Stage 2/4: Building taxonomic tree{suffix}.")
+            t2 = time.monotonic()
             tree_root = self._build_target_tree(domain_taxid)
 
             if tree_root is None or not tree_root.children:
@@ -763,6 +821,7 @@ class GenerationOrchestrator:
                     )
                 return
 
+            # Capacity pass (part of Stage 2)
             if round_num == 0:
                 self._all_capacities = self._load_or_compute_capacities(tree_root)
             else:
@@ -771,8 +830,19 @@ class GenerationOrchestrator:
                     f"(min_len={self.min_subseq_len})."
                 )
                 self._all_capacities = compute_all_capacities(
-                    tree_root, self.min_subseq_len
+                    tree_root, self.min_subseq_len,
+                    spill_dir=self.spill_dir, n_workers=self.n_workers,
+                    n_gpu_workers=self.n_gpu_workers,
                 )
+
+            n_taxa = sum(1 for _ in tree_root.descendants)
+            n_cap = len(self._all_capacities)
+            ui_logger.info(
+                "✓ Stage 2/4  %s   (%s taxa in tree, %s nodes with capacity)",
+                _fmt_elapsed(time.monotonic() - t2),
+                f"{n_taxa:,}",
+                f"{n_cap:,}",
+            )
 
             if not self._selective_download_active:
                 break
@@ -788,7 +858,9 @@ class GenerationOrchestrator:
         if tree_root is None:
             return
 
+        # Stage 3 — scheduling
         ui_logger.info("Stage 3/4: Scheduling extraction jobs.")
+        t3 = time.monotonic()
         scheduling_artifacts = self._schedule_pipeline_jobs(
             tree_root=tree_root,
             domain_taxid=domain_taxid,
@@ -801,9 +873,37 @@ class GenerationOrchestrator:
             target_group=target_group,
             scheduling_artifacts=scheduling_artifacts,
         )
+        n_heads = len(scheduling_artifacts["extraction_jobs"])
+        ui_logger.info(
+            "✓ Stage 3/4  %s   (%s heads scheduled)",
+            _fmt_elapsed(time.monotonic() - t3),
+            f"{n_heads:,}",
+        )
 
+        # Stage 4 — extraction
         ui_logger.info("Stage 4/4: Dispatching parallel disk extraction.")
+        t4 = time.monotonic()
         self._execute_extraction(scheduling_artifacts["extraction_jobs"])
+        n_classes = sum(
+            len(v.get("labels", {}))
+            for v in scheduling_artifacts.get("master_manifest", {}).values()
+        )
+        ui_logger.info(
+            "✓ Stage 4/4  %s   (%s heads, %s classes)",
+            _fmt_elapsed(time.monotonic() - t4),
+            f"{n_heads:,}",
+            f"{n_classes:,}",
+        )
+
+        self._write_label_maps(scheduling_artifacts)
+        self._write_run_metadata(
+            target_group=target_group,
+            scheduling_artifacts=scheduling_artifacts,
+            n_taxa=n_taxa,
+            n_cap=n_cap,
+            abundance_threshold=abundance_threshold,
+            t_pipeline_start=t_pipeline_start,
+        )
 
         ui_logger.info("Pipeline finished successfully.")
 
@@ -884,7 +984,10 @@ class GenerationOrchestrator:
         ui_logger.info(
             f"Computing node capacities via bottom-up pass (min_len={min_len})."
         )
-        return compute_all_capacities(tree_root, min_len)
+        return compute_all_capacities(
+            tree_root, min_len,
+            spill_dir=self.spill_dir, n_workers=self.n_workers,
+        )
 
     def _schedule_pipeline_jobs(
         self,
@@ -979,6 +1082,174 @@ class GenerationOrchestrator:
         return [
             child for child in node.children if getattr(child, "rank", "") != "sequence"
         ]
+
+    def _write_label_maps(self, scheduling_artifacts: dict[str, Any]) -> None:
+        """Write label_map.json into every head's output directory.
+
+        Each head directory becomes self-contained: the parquet files
+        carry integer class indices, and label_map.json provides the
+        id2label / label2id mappings in the HuggingFace-standard format
+        so fine-tuning scripts can load the head without touching the
+        root-level manifest.
+
+        Args:
+            scheduling_artifacts: Output of _schedule_pipeline_jobs.
+        """
+        master_manifest = scheduling_artifacts.get("master_manifest", {})
+        n_written = 0
+        for taxid, v in master_manifest.items():
+            head_dir = v.get("directory_path", "")
+            if not head_dir:
+                continue
+            labels = v.get("labels", {})
+            classes = sorted(
+                [
+                    {
+                        "class_idx": lv.get("class_idx", -1),
+                        "taxid": label_taxid,
+                        "name": lv.get("name", label_taxid),
+                        "rank": lv.get("rank", "unknown"),
+                    }
+                    for label_taxid, lv in labels.items()
+                ],
+                key=lambda x: x["class_idx"],
+            )
+            id2label = {str(c["class_idx"]): c["name"] for c in classes}
+            label2id = {c["name"]: c["class_idx"] for c in classes}
+            label_map = {
+                "head_taxid": taxid,
+                "head_name": v.get("scientific_name", taxid),
+                "head_rank": v.get("rank", "unknown"),
+                "id2label": id2label,
+                "label2id": label2id,
+                "classes": classes,
+            }
+            os.makedirs(head_dir, exist_ok=True)
+            label_map_path = os.path.join(head_dir, "label_map.json")
+            with open(label_map_path, "w", encoding="utf-8") as f:
+                json.dump(label_map, f, indent=2)
+            n_written += 1
+        logger.info("Label maps written for %d heads.", n_written)
+
+    def _write_run_metadata(
+        self,
+        target_group: str,
+        scheduling_artifacts: dict[str, Any],
+        n_taxa: int,
+        n_cap: int,
+        abundance_threshold: int,
+        t_pipeline_start: float,
+    ) -> None:
+        """Write run_metadata_{target_group}.json to the output directory.
+
+        The file captures every parameter needed to reproduce the run,
+        a summary of what was generated, and a per-head breakdown with
+        class lists. Downstream tools (training scripts, inference
+        cascade, evaluation harness) can read this file instead of
+        reconstructing parameters from CLI history.
+
+        Args:
+            target_group: Root group name used in the filename.
+            scheduling_artifacts: Output of _schedule_pipeline_jobs.
+            n_taxa: Total descendant taxa in the taxonomic tree.
+            n_cap: Number of nodes with a computed capacity.
+            abundance_threshold: Minimum sequence count per class.
+            t_pipeline_start: monotonic timestamp from pipeline start.
+        """
+        import datetime
+
+        try:
+            from importlib.metadata import version as _pkg_version
+            pkg_version = _pkg_version("taxotreeset")
+        except Exception:
+            pkg_version = "unknown"
+
+        master_manifest = scheduling_artifacts.get("master_manifest", {})
+        n_heads = len(scheduling_artifacts.get("extraction_jobs", []))
+        n_classes_total = sum(len(v.get("labels", {})) for v in master_manifest.values())
+
+        heads = []
+        for taxid, v in master_manifest.items():
+            labels = v.get("labels", {})
+            heads.append({
+                "taxid": taxid,
+                "name": v.get("scientific_name", taxid),
+                "rank": v.get("rank", "unknown"),
+                "directory": v.get("directory_path", ""),
+                "scenario": v.get("scenario", ""),
+                "n_per_class": v.get("n_per_class", 0),
+                "n_leaves": v.get("num_leaves", 0),
+                "n_classes": len(labels),
+                "classes": [
+                    {
+                        "taxid": label_taxid,
+                        "name": lv.get("name", label_taxid),
+                        "rank": lv.get("rank", "unknown"),
+                        "class_idx": lv.get("class_idx", -1),
+                    }
+                    for label_taxid, lv in labels.items()
+                ],
+            })
+
+        # Aggregate per-rank statistics for quick dataset inspection.
+        import statistics as _stats
+        from collections import defaultdict as _dd
+        _by_rank: dict[str, list] = _dd(list)
+        _caps = self._all_capacities or {}
+        for head in heads:
+            _by_rank[head["rank"]].append({
+                "npc": head["n_per_class"],
+                "nc": head["n_classes"],
+                "cap": _caps.get(head["taxid"], 0),
+            })
+        by_rank = {}
+        for rank, items in sorted(_by_rank.items()):
+            npc_vals = [i["npc"] for i in items]
+            cap_vals = [i["cap"] for i in items if i["cap"] > 0]
+            by_rank[rank] = {
+                "n_heads": len(items),
+                "total_classes": sum(i["nc"] for i in items),
+                "median_n_per_class": _stats.median(npc_vals) if npc_vals else 0,
+                "median_capacity": int(_stats.median(cap_vals)) if cap_vals else 0,
+            }
+
+        metadata = {
+            "taxotreeset_version": pkg_version,
+            "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "elapsed_seconds": round(time.monotonic() - t_pipeline_start, 1),
+            "parameters": {
+                "root": target_group,
+                "min_subseq_len": self.min_subseq_len,
+                "max_subseq_len": self.max_subseq_len,
+                "max_n_per_class": self.max_n_per_class,
+                "min_leaves_per_class": self.min_leaves_per_class,
+                "min_num_seqs": self.min_num_seqs,
+                "cutoff_percentage": self.cutoff_percentage,
+                "rare_taxa_strategy": self.rare_taxa_strategy,
+                "seed": self.seed,
+                "abundance_threshold": abundance_threshold,
+                "stop_at": self._depth_boundary,
+                "single_level": self._single_level,
+                "output_format": self.output_format,
+            },
+            "summary": {
+                "n_heads": n_heads,
+                "n_classes_total": n_classes_total,
+                "n_taxa_in_tree": n_taxa,
+                "n_nodes_with_capacity": n_cap,
+                "n_accessions": len(self.registry.registry.get("accessions", {})),
+                "by_rank": by_rank,
+            },
+            "heads": heads,
+        }
+
+        os.makedirs(self.output_dir, exist_ok=True)
+        metadata_path = os.path.join(
+            self.output_dir, f"run_metadata_{target_group}.json"
+        )
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2)
+        logger.info("Run metadata written to %s", metadata_path)
 
     def _persist_scheduling_artifacts(
         self,

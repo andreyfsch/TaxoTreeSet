@@ -5,7 +5,9 @@ capacity computation → balanced extraction plan, using only local
 synthetic data (no network access required).
 """
 
+import json
 import zlib
+from pathlib import Path
 
 import lmdb
 import pytest
@@ -284,3 +286,150 @@ class TestBalancingWithRealCapacities:
         assert plan["n_per_class"] > 0
         for taxid, cap in plan["capacities"].items():
             assert cap > 0, f"Zero capacity for {taxid} without override"
+
+
+# ---------------------------------------------------------------------------
+# 5. Full pipeline output contracts
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def pipeline_output(synthetic_env, tmp_path_factory):
+    """Run the full pipeline end-to-end and return output paths."""
+    from taxotreeset.core.generation_orchestrator import GenerationOrchestrator
+    from taxotreeset.io.registry import NCBIRegistry
+
+    output_dir = str(tmp_path_factory.mktemp("pipeline_out"))
+    registry = NCBIRegistry(registry_path=synthetic_env["registry_path"])
+
+    orch = GenerationOrchestrator(
+        registry=registry,
+        vault_path=synthetic_env["vault_dir"],
+        output_dir=output_dir,
+        config_path=synthetic_env["mapping_path"],
+        min_subseq_len=_MIN_LEN,
+        max_subseq_len=200,  # must be >= builder._DEFAULT_MIN_SUBSEQ_LEN (100)
+        max_n_per_class=100,
+        min_leaves_per_class=1,
+        rare_taxa_strategy="keep",
+        n_gpu_workers=0,
+        n_workers=1,
+    )
+    orch.run_pipeline(target_group="viruses", sync=False, abundance_threshold=1)
+    return {"output_dir": output_dir}
+
+
+class TestFullPipelineOutputContracts:
+    def test_run_metadata_file_exists(self, pipeline_output):
+        path = Path(pipeline_output["output_dir"]) / "run_metadata_viruses.json"
+        assert path.exists(), "run_metadata_viruses.json not written"
+
+    def test_run_metadata_required_keys(self, pipeline_output):
+        path = Path(pipeline_output["output_dir"]) / "run_metadata_viruses.json"
+        meta = json.loads(path.read_text())
+        for key in ("taxotreeset_version", "generated_at", "elapsed_seconds",
+                    "parameters", "summary", "heads"):
+            assert key in meta, f"Missing top-level key: {key}"
+
+    def test_run_metadata_parameters_match_config(self, pipeline_output):
+        path = Path(pipeline_output["output_dir"]) / "run_metadata_viruses.json"
+        meta = json.loads(path.read_text())
+        params = meta["parameters"]
+        assert params["root"] == "viruses"
+        assert params["min_subseq_len"] == _MIN_LEN
+        assert params["max_n_per_class"] == 100
+        assert params["stop_at"] is None
+
+    def test_run_metadata_summary_counts(self, pipeline_output):
+        path = Path(pipeline_output["output_dir"]) / "run_metadata_viruses.json"
+        meta = json.loads(path.read_text())
+        summary = meta["summary"]
+        assert summary["n_heads"] > 0
+        assert summary["n_classes_total"] > 0
+        assert summary["n_taxa_in_tree"] > 0
+        assert summary["n_accessions"] == 3
+
+    def test_run_metadata_by_rank_present(self, pipeline_output):
+        path = Path(pipeline_output["output_dir"]) / "run_metadata_viruses.json"
+        meta = json.loads(path.read_text())
+        by_rank = meta["summary"]["by_rank"]
+        assert isinstance(by_rank, dict)
+        assert len(by_rank) > 0
+        for rank, stats in by_rank.items():
+            assert stats["n_heads"] > 0
+            assert stats["total_classes"] > 0
+            assert stats["median_n_per_class"] >= 0
+            assert stats["median_capacity"] >= 0
+
+    def test_run_metadata_heads_have_class_list(self, pipeline_output):
+        path = Path(pipeline_output["output_dir"]) / "run_metadata_viruses.json"
+        meta = json.loads(path.read_text())
+        for head in meta["heads"]:
+            assert "taxid" in head
+            assert "rank" in head
+            assert "n_classes" in head
+            assert isinstance(head["classes"], list)
+            assert len(head["classes"]) == head["n_classes"]
+
+    def test_parquet_files_exist(self, pipeline_output):
+        parquet_files = list(Path(pipeline_output["output_dir"]).rglob("*.parquet"))
+        assert len(parquet_files) > 0, "No parquet files written"
+
+    def test_parquet_required_columns(self, pipeline_output):
+        import pyarrow.parquet as pq
+        for parquet_file in Path(pipeline_output["output_dir"]).rglob("*.parquet"):
+            schema_names = pq.read_schema(parquet_file).names
+            assert "seq" in schema_names, f"Missing 'seq' column in {parquet_file}"
+            assert "class_idx" in schema_names, f"Missing 'class_idx' column in {parquet_file}"
+
+    def test_label_map_file_exists_in_each_head_dir(self, pipeline_output):
+        output_dir = Path(pipeline_output["output_dir"])
+        manifest_path = output_dir / "manifest_viruses.json"
+        manifest = json.loads(manifest_path.read_text())
+        for v in manifest.values():
+            head_dir = Path(v["directory_path"])
+            label_map_path = head_dir / "label_map.json"
+            assert label_map_path.exists(), f"label_map.json missing in {head_dir}"
+
+    def test_label_map_huggingface_format(self, pipeline_output):
+        output_dir = Path(pipeline_output["output_dir"])
+        manifest_path = output_dir / "manifest_viruses.json"
+        manifest = json.loads(manifest_path.read_text())
+        for taxid, v in manifest.items():
+            head_dir = Path(v["directory_path"])
+            label_map = json.loads((head_dir / "label_map.json").read_text())
+            assert label_map["head_taxid"] == taxid
+            assert "id2label" in label_map
+            assert "label2id" in label_map
+            assert "classes" in label_map
+            # id2label and label2id must be consistent
+            for idx_str, name in label_map["id2label"].items():
+                assert label_map["label2id"][name] == int(idx_str)
+            # classes sorted by class_idx, no gaps
+            idxs = [c["class_idx"] for c in label_map["classes"]]
+            assert idxs == list(range(len(idxs)))
+
+    def test_parquet_class_idx_within_manifest_bounds(self, pipeline_output):
+        import pyarrow.parquet as pq
+        output_dir = Path(pipeline_output["output_dir"])
+        manifest_path = output_dir / "manifest_viruses.json"
+        manifest = json.loads(manifest_path.read_text())
+
+        # Build a map: head directory → valid class_idx set
+        dir_to_valid: dict[str, set[int]] = {}
+        for v in manifest.values():
+            head_dir = str(v["directory_path"])
+            valid = {lv["class_idx"] for lv in v["labels"].values()}
+            dir_to_valid[head_dir] = valid
+
+        for parquet_file in output_dir.rglob("*.parquet"):
+            table = pq.read_table(parquet_file, columns=["class_idx"])
+            # Identify the owning head directory (parent of train/val/test split dir)
+            head_dir = str(parquet_file.parent.parent)
+            valid_idxs = dir_to_valid.get(head_dir, set())
+            if not valid_idxs:
+                continue
+            for idx in table["class_idx"].to_pylist():
+                assert idx in valid_idxs, (
+                    f"class_idx {idx} not in manifest for {head_dir}"
+                )
