@@ -987,6 +987,7 @@ class GenerationOrchestrator:
         return compute_all_capacities(
             tree_root, min_len,
             spill_dir=self.spill_dir, n_workers=self.n_workers,
+            n_gpu_workers=self.n_gpu_workers,
         )
 
     def _schedule_pipeline_jobs(
