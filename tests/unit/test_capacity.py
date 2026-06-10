@@ -326,7 +326,7 @@ class TestNodeCapacityKeysMemoryMode:
             acc = _NodeCapacityKeys.from_sequence_leaf(leaf, 4, vd, _BIG_THRESHOLD)
         acc.release()
         assert acc._pure_keys is None
-        assert acc._ambiguous_subseqs is None
+        assert acc._ambiguous_count == 0
 
     def test_merge_non_overlapping_sums_cardinality(self):
         # "ACGTACGT" → 4 unique; "TTTTCCCC" → 5 unique (TTTT,TTTC,TTCC,TCCC,CCCC)
@@ -385,7 +385,10 @@ class TestNodeCapacityKeysMemoryMode:
         # Both accs have 0 pure keys (all-N sequence), 1 ambiguous each
         merged = _NodeCapacityKeys.merge([acc1, acc2], vd, _BIG_THRESHOLD)
         assert not merged._on_disk
-        assert merged.cardinality() == 1  # same ambiguous string "NNNN" → dedup to 1
+        # _ambiguous_count is summed (not set-unioned) across leaves: 1 + 1 = 2.
+        # Cross-leaf dedup of ambiguous subseqs is intentionally not done; the
+        # strings are never stored after per-leaf counting to avoid unbounded RAM.
+        assert merged.cardinality() == 2
         acc1.release()
         acc2.release()
         merged.release()
@@ -740,10 +743,10 @@ class TestComputeAllCapacities:
         root = self._make_tree({"A": "ACGTACGT"})
         seq_map = {"NC_A": "ACGTACGT"}
         with patch(
-            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            "taxotreeset.core.generation.capacity._read_single_sequence",
             side_effect=lambda path, hid: seq_map[hid],
         ):
-            result = compute_all_capacities(root, min_len=4)
+            result = compute_all_capacities(root, min_len=4, n_gpu_workers=0)
         assert result["root"] == 4
         assert result["A"] == 4
 
@@ -752,10 +755,10 @@ class TestComputeAllCapacities:
         root = self._make_tree({"A": "ACGTACGT", "B": "TTTTCCCC"})
         seq_map = {"NC_A": "ACGTACGT", "NC_B": "TTTTCCCC"}
         with patch(
-            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            "taxotreeset.core.generation.capacity._read_single_sequence",
             side_effect=lambda path, hid: seq_map[hid],
         ):
-            result = compute_all_capacities(root, min_len=4)
+            result = compute_all_capacities(root, min_len=4, n_gpu_workers=0)
         assert result["A"] == 4
         assert result["B"] == 5
         assert result["root"] == 9
@@ -765,10 +768,10 @@ class TestComputeAllCapacities:
         root = self._make_tree({"A": seq, "B": seq})
         seq_map = {"NC_A": seq, "NC_B": seq}
         with patch(
-            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            "taxotreeset.core.generation.capacity._read_single_sequence",
             side_effect=lambda path, hid: seq_map[hid],
         ):
-            result = compute_all_capacities(root, min_len=4)
+            result = compute_all_capacities(root, min_len=4, n_gpu_workers=0)
         assert result["root"] == 4  # union of two identical 4-element sets = 4
 
     def test_sequence_leaves_excluded_from_capacity_dict(self):
@@ -776,10 +779,10 @@ class TestComputeAllCapacities:
         root = self._make_tree({"A": "ACGTACGT"})
         seq_map = {"NC_A": "ACGTACGT"}
         with patch(
-            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            "taxotreeset.core.generation.capacity._read_single_sequence",
             side_effect=lambda path, hid: seq_map[hid],
         ):
-            result = compute_all_capacities(root, min_len=4)
+            result = compute_all_capacities(root, min_len=4, n_gpu_workers=0)
         assert "leaf_A" not in result
 
 

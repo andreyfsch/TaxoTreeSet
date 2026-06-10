@@ -58,6 +58,8 @@ import contextlib
 import logging
 import math
 
+from tqdm import tqdm
+
 from taxotreeset.core.generation.constants import (
     BLOOM_EXPECTED_INSERTIONS,
     BLOOM_FALSE_POSITIVE_RATE,
@@ -99,6 +101,22 @@ _HASHED_PREFIX_BUCKETS: int = 256
 _BOTTOM_UP_RAM_FRACTION: float = 0.5
 _BOTTOM_UP_MERGE_OVERHEAD: int = 3
 _BOTTOM_UP_LIVE_SETS_ESTIMATE: int = 4
+
+# Filename for the leaf-phase checkpoint written to spill_dir after Phase 1
+# completes.  A subsequent run with the same spill_dir detects this file and
+# skips already-computed leaves, making the leaf phase resumable across SLURM
+# job boundaries.
+_LEAF_CHECKPOINT_FNAME: str = "capacity_leaf_checkpoint.json"
+
+# Minimum sequence length (bases) for the GPU path to be profitable.
+# Below this the per-leaf overhead of H2D transfer and CUDA kernel launch
+# exceeds the bandwidth gain.  Chosen conservatively so that even a low-end
+# GPU (GTX 1650, 128 GB/s) breaks even vs a modern Xeon core.
+_GPU_MIN_BASES: int = 500_000
+
+# Process-local CUDA device index, set once by _leaf_pool_initializer when
+# the worker process starts.  -1 means this worker has no GPU assignment.
+_WORKER_GPU_DEVICE_ID: int = -1
 
 
 def _resolve_bottom_up_threshold(key_bytes: int) -> int:
@@ -193,7 +211,7 @@ class _NodeCapacityKeys:
     def __init__(
         self,
         pure_keys,
-        ambiguous_subseqs: set,
+        ambiguous_count: int,
         key_bytes: int,
         bucket_paths=None,
         tmp_dir=None,
@@ -203,7 +221,10 @@ class _NodeCapacityKeys:
         Args:
             pure_keys: Deduplicated array of packed 2-bit keys (memory
                 mode), or None when the keys live on disk.
-            ambiguous_subseqs: Set of exact ambiguous subsequences.
+            ambiguous_count: Count of unique ambiguous subsequences in
+                this accumulator. Stored as an integer — not the strings
+                themselves — so it does not accumulate unbounded memory
+                when propagated up through tens of thousands of leaves.
             key_bytes: Width of one packed key in bytes.
             bucket_paths: The 256 prefix-bucket file paths (disk mode), or
                 None when the keys live in memory.
@@ -211,7 +232,7 @@ class _NodeCapacityKeys:
                 mode), removed on release, or None in memory mode.
         """
         self._pure_keys = pure_keys
-        self._ambiguous_subseqs = ambiguous_subseqs
+        self._ambiguous_count = ambiguous_count
         self._key_bytes = key_bytes
         self._bucket_paths = bucket_paths
         self._tmp_dir = tmp_dir
@@ -222,7 +243,15 @@ class _NodeCapacityKeys:
         return self._bucket_paths is not None
 
     @classmethod
-    def from_sequence_leaf(cls, leaf, min_len: int, void_dtype, disk_threshold: int):
+    def from_sequence_leaf(
+        cls,
+        leaf,
+        min_len: int,
+        void_dtype,
+        disk_threshold: int,
+        use_cache: bool = True,
+        spill_dir: str | None = None,
+    ):
         """Build an accumulator from a single sequence leaf.
 
         Reads the leaf's sequence, enumerates its sliding windows, and
@@ -237,6 +266,9 @@ class _NodeCapacityKeys:
             void_dtype: The numpy void dtype sized to one packed key.
             disk_threshold: Maximum in-memory keys before spilling the
                 leaf's keys to bucket files.
+            use_cache: When False, bypasses the module-level sequence
+                cache. Pass False for the bottom-up pass, where each leaf
+                is read exactly once and caching only inflates RSS.
 
         Returns:
             A populated accumulator, empty when the leaf has no readable
@@ -250,11 +282,32 @@ class _NodeCapacityKeys:
         fasta_path = getattr(leaf, "fasta_path", "")
         header_id = getattr(leaf, "header_id", "")
         if not fasta_path or not header_id:
-            return cls(empty, set(), key_bytes)
-        sequence = _read_sequence_cached(fasta_path, header_id)
+            return cls(empty, 0, key_bytes)
+        if use_cache:
+            sequence = _read_sequence_cached(fasta_path, header_id)
+        else:
+            sequence = _read_single_sequence(fasta_path, header_id) or ""
         if not sequence or len(sequence) < min_len:
-            return cls(empty, set(), key_bytes)
+            return cls(empty, 0, key_bytes)
         seq_arr = np.frombuffer(sequence.encode("ascii"), dtype=np.uint8)
+        n_windows = max(0, seq_arr.shape[0] - min_len + 1)
+        if n_windows == 0:
+            return cls(empty, 0, key_bytes)
+        # _encode_windows_2bit allocates a codes array of shape
+        # (n_windows, min_len) uint8. For large scaffolds this can reach
+        # several GB and OOM before any disk-spillover threshold fires.
+        # Cap individual batches to ~512 MiB of codes.
+        _encode_batch = max(100_000, (512 << 20) // min_len)
+        if n_windows > _encode_batch:
+            # Delete the Python string before entering the chunked path.
+            # seq_arr's backing bytes object (from sequence.encode) is kept
+            # alive by seq_arr.base; only the string itself is freed here,
+            # saving sequence_length bytes for the duration of the call.
+            del sequence
+            return cls._from_chunked_sequence(
+                seq_arr, min_len, _encode_batch, void_dtype, key_bytes,
+                spill_dir=spill_dir,
+            )
         windows = sliding_window_view(seq_arr, min_len)
         keys, pure_mask = _encode_windows_2bit(windows, min_len)
         pure_keys = np.unique(keys) if keys.shape[0] else empty
@@ -266,17 +319,91 @@ class _NodeCapacityKeys:
             }
         if pure_keys.shape[0] >= disk_threshold:
             return cls._spilled_from_arrays(
-                [pure_keys], ambiguous, key_bytes
+                [pure_keys], len(ambiguous), key_bytes, spill_dir=spill_dir,
             )
-        return cls(pure_keys, ambiguous, key_bytes)
+        return cls(pure_keys, len(ambiguous), key_bytes)
 
     @classmethod
-    def _spilled_from_arrays(cls, pure_arrays: list, ambiguous: set, key_bytes: int):
+    def _from_chunked_sequence(
+        cls,
+        seq_arr,
+        min_len: int,
+        chunk_size: int,
+        void_dtype,
+        key_bytes: int,
+        spill_dir: str | None = None,
+    ):
+        """Encode a large sequence in batches to avoid peak-memory OOM.
+
+        ``_encode_windows_2bit`` creates a ``codes`` array of shape
+        ``(n_windows, min_len)`` uint8. For scaffolds larger than ~5 MB
+        (at min_len=100) this intermediate allocation reaches several GB and
+        triggers an OOM before the disk-spillover threshold can react. This
+        method processes the sequence in ``chunk_size``-window batches,
+        flushing each batch's keys into prefix-bucketed disk files and
+        deduplicating bucket-by-bucket at the end.
+
+        Ambiguous windows (containing N or IUPAC codes) are intentionally
+        not tracked here. Building a per-sequence set of ambiguous strings
+        across all chunks allocates O(n_ambiguous × min_len) bytes for a
+        single scaffold, which can reach several GiB for large chromosomes
+        with many N-runs. Because ambiguous subsequences are filtered out
+        during dataset generation, omitting them from the capacity count
+        does not affect the usable training-sample estimate.
+
+        Args:
+            seq_arr: The full sequence encoded as a uint8 numpy array.
+                The caller must ensure ``seq_arr``'s backing buffer remains
+                alive for the duration of this call.
+            min_len: Sliding window size in bases.
+            chunk_size: Number of windows to encode per batch.
+            void_dtype: Numpy void dtype sized to one packed key.
+            key_bytes: Width of one packed key in bytes.
+
+        Returns:
+            A disk-mode accumulator owning a fresh bucket directory.
+        """
+        import os
+        import tempfile
+
+        import numpy as np
+        from numpy.lib.stride_tricks import sliding_window_view
+
+        tmp_dir = tempfile.mkdtemp(prefix="tts_capacity_", dir=spill_dir)
+        bucket_paths = _bucket_writer_paths(tmp_dir)
+        n_windows = seq_arr.shape[0] - min_len + 1
+
+        with contextlib.ExitStack() as stack:
+            bucket_files = [stack.enter_context(open(p, "ab")) for p in bucket_paths]
+            for chunk_start in range(0, n_windows, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, n_windows)
+                # Include the trailing bases needed to form complete windows.
+                sub = seq_arr[chunk_start: chunk_end + min_len - 1]
+                windows_chunk = sliding_window_view(sub, min_len)
+                keys, pure_mask = _encode_windows_2bit(windows_chunk, min_len)
+                if keys.shape[0]:
+                    _flush_keys_to_buckets(keys, bucket_files, key_bytes)
+                # Ambiguous windows are intentionally skipped — see docstring.
+
+        for path in bucket_paths:
+            if not os.path.exists(path) or os.path.getsize(path) == 0:
+                continue
+            raw = np.fromfile(path, dtype=np.uint8)
+            unique_bucket = np.unique(raw.view(void_dtype))
+            unique_bucket.tofile(path)
+
+        return cls(None, 0, key_bytes, bucket_paths, tmp_dir)
+
+    @classmethod
+    def _spilled_from_arrays(
+        cls, pure_arrays: list, ambiguous_count: int, key_bytes: int,
+        spill_dir: str | None = None,
+    ):
         """Create a disk-mode accumulator from in-memory key arrays.
 
         Args:
             pure_arrays: Arrays of packed keys to write to buckets.
-            ambiguous: Set of ambiguous subsequences to retain.
+            ambiguous_count: Count of unique ambiguous subsequences.
             key_bytes: Width of one packed key in bytes.
 
         Returns:
@@ -284,14 +411,14 @@ class _NodeCapacityKeys:
         """
         import tempfile
 
-        tmp_dir = tempfile.mkdtemp(prefix="tts_capacity_")
+        tmp_dir = tempfile.mkdtemp(prefix="tts_capacity_", dir=spill_dir)
         bucket_paths = _bucket_writer_paths(tmp_dir)
         with contextlib.ExitStack() as stack:
             bucket_files = [stack.enter_context(open(p, "wb")) for p in bucket_paths]
             for keys in pure_arrays:
                 if keys is not None and keys.shape[0]:
                     _flush_keys_to_buckets(keys, bucket_files, key_bytes)
-        return cls(None, ambiguous, key_bytes, bucket_paths, tmp_dir)
+        return cls(None, ambiguous_count, key_bytes, bucket_paths, tmp_dir)
 
     @classmethod
     def merge(cls, parts: list, void_dtype, disk_threshold: int):
@@ -317,9 +444,7 @@ class _NodeCapacityKeys:
         import numpy as np
 
         key_bytes = void_dtype.itemsize
-        ambiguous: set = set()
-        for part in parts:
-            ambiguous |= part._ambiguous_subseqs
+        ambiguous_count = sum(p._ambiguous_count for p in parts)
 
         # A single child (e.g. a passthrough node) needs no reprocessing:
         # its set already is the union, so adopt it directly rather than
@@ -327,7 +452,7 @@ class _NodeCapacityKeys:
         # to the new accumulator, leaving the child empty so its later
         # release does not drop the adopted storage.
         if len(parts) == 1:
-            return parts[0]._transfer_ownership(ambiguous)
+            return parts[0]._transfer_ownership(ambiguous_count)
 
         any_on_disk = any(part._on_disk for part in parts)
         memory_arrays = [
@@ -342,12 +467,15 @@ class _NodeCapacityKeys:
                 pure_keys = np.unique(np.concatenate(memory_arrays))
             else:
                 pure_keys = np.empty((0,), dtype=void_dtype)
-            return cls(pure_keys, ambiguous, key_bytes)
+            return cls(pure_keys, ambiguous_count, key_bytes)
 
-        return cls._spilled_merge(parts, ambiguous, key_bytes)
+        return cls._spilled_merge(parts, ambiguous_count, key_bytes)
 
     @classmethod
-    def _spilled_merge(cls, parts: list, ambiguous: set, key_bytes: int):
+    def _spilled_merge(
+        cls, parts: list, ambiguous_count: int, key_bytes: int,
+        spill_dir: str | None = None,
+    ):
         """Merge accumulators into a fresh disk-mode accumulator.
 
         In-memory children are flushed into the new buckets; disk-mode
@@ -357,7 +485,7 @@ class _NodeCapacityKeys:
 
         Args:
             parts: Accumulators to merge.
-            ambiguous: Already-unioned ambiguous subsequences.
+            ambiguous_count: Sum of per-part ambiguous counts.
             key_bytes: Width of one packed key in bytes.
 
         Returns:
@@ -370,7 +498,7 @@ class _NodeCapacityKeys:
         import numpy as np
 
         void_dtype = np.dtype((np.void, key_bytes))
-        tmp_dir = tempfile.mkdtemp(prefix="tts_capacity_")
+        tmp_dir = tempfile.mkdtemp(prefix="tts_capacity_", dir=spill_dir)
         bucket_paths = _bucket_writer_paths(tmp_dir)
 
         # Write every child's keys into the new buckets one child at a time
@@ -402,9 +530,40 @@ class _NodeCapacityKeys:
             raw = np.fromfile(path, dtype=np.uint8)
             unique_bucket = np.unique(raw.view(void_dtype))
             unique_bucket.tofile(path)
-        return cls(None, ambiguous, key_bytes, bucket_paths, tmp_dir)
+        return cls(None, ambiguous_count, key_bytes, bucket_paths, tmp_dir)
 
-    def _transfer_ownership(self, ambiguous: set):
+    def _inplace_extend(self, child: "_NodeCapacityKeys", key_bytes: int) -> None:
+        """Append a child's keys directly into this accumulator's bucket files.
+
+        Requires self to be in disk mode. The child is not modified or
+        released by this call. This avoids the O(self) copy that
+        ``_spilled_merge`` would incur when updating a growing accumulator
+        one child at a time: only the child's data is written, not a copy
+        of the existing accumulator.
+
+        Args:
+            child: Accumulator whose keys are appended to self's buckets.
+            key_bytes: Width of one packed key in bytes.
+        """
+        import os
+        import shutil
+
+        assert self._on_disk, "_inplace_extend requires a disk-mode accumulator"
+
+        self._ambiguous_count += child._ambiguous_count
+        with contextlib.ExitStack() as stack:
+            bucket_files = [
+                stack.enter_context(open(p, "ab")) for p in self._bucket_paths
+            ]
+            if child._on_disk:
+                for index, child_bucket in enumerate(child._bucket_paths):
+                    if os.path.exists(child_bucket) and os.path.getsize(child_bucket):
+                        with open(child_bucket, "rb") as source:
+                            shutil.copyfileobj(source, bucket_files[index])
+            elif child._pure_keys is not None and child._pure_keys.shape[0]:
+                _flush_keys_to_buckets(child._pure_keys, bucket_files, key_bytes)
+
+    def _transfer_ownership(self, ambiguous_count: int):
         """Move this accumulator's key storage into a new accumulator.
 
         Used when a parent has a single child: the child's set already is
@@ -414,15 +573,15 @@ class _NodeCapacityKeys:
         owned by the returned accumulator.
 
         Args:
-            ambiguous: The ambiguous subsequences for the new accumulator
-                (the union already computed by the caller).
+            ambiguous_count: Ambiguous subsequence count for the new
+                accumulator (already summed by the caller).
 
         Returns:
             A new accumulator owning this one's pure-key storage.
         """
         adopted = _NodeCapacityKeys(
             self._pure_keys,
-            ambiguous,
+            ambiguous_count,
             self._key_bytes,
             self._bucket_paths,
             self._tmp_dir,
@@ -430,7 +589,7 @@ class _NodeCapacityKeys:
         self._pure_keys = None
         self._bucket_paths = None
         self._tmp_dir = None
-        self._ambiguous_subseqs = set()
+        self._ambiguous_count = 0
         return adopted
 
     def cardinality(self) -> int:
@@ -446,7 +605,7 @@ class _NodeCapacityKeys:
             )
         else:
             pure_count = int(self._pure_keys.shape[0])
-        return pure_count + len(self._ambiguous_subseqs)
+        return pure_count + self._ambiguous_count
 
     def release(self) -> None:
         """Free the accumulated keys once the node has been resolved.
@@ -457,7 +616,7 @@ class _NodeCapacityKeys:
         import os
 
         self._pure_keys = None
-        self._ambiguous_subseqs = None
+        self._ambiguous_count = 0
         if self._bucket_paths is not None:
             for path in self._bucket_paths:
                 if os.path.exists(path):
@@ -468,48 +627,505 @@ class _NodeCapacityKeys:
             self._tmp_dir = None
 
 
-def compute_all_capacities(tree_root, min_len: int) -> dict:
-    """Compute every node's capacity in one bottom-up pass.
+def _save_leaf_checkpoint(
+    leaf_accumulators: dict,
+    spill_dir: str,
+    min_len: int,
+    void_dtype,
+) -> None:
+    """Persist leaf accumulators to disk so a resumed run can skip Phase 1.
 
-    Walks the tree in post-order: each sequence leaf is scanned once to
-    build its set of unique subsequence keys, and each internal node is
-    resolved by merging its children's sets rather than rescanning their
-    leaves. A node's capacity is the size of the merged set, which
-    deduplicates subsequences shared between siblings.
-
-    This replaces resolving capacities top-down and independently per node,
-    where every leaf was rescanned once for each of its ancestors. The
-    bottom-up pass scans each leaf exactly once.
+    Disk-mode accumulators already live in spill_dir as bucket files; only
+    their paths need to be recorded.  Memory-mode accumulators are serialised
+    to ``capacity_leaf_{i}.bin`` files in spill_dir so they survive the
+    process boundary.
 
     Args:
-        tree_root: Root node of the taxonomic tree to resolve.
-        min_len: Sliding window size in base pairs. Also the minimum
-            subsequence length, so changing it changes every capacity.
+        leaf_accumulators: Mapping of str(leaf_name) to accumulator.
+        spill_dir: Directory where checkpoint and auxiliary files are written.
+        min_len: Window size used to produce the accumulators; stored in the
+            checkpoint so a resume with a different min_len is detected and
+            rejected.
+        void_dtype: Numpy void dtype for packed keys.
+    """
+    import json
+    import os
+
+    checkpoint: dict = {"min_len": min_len, "leaves": {}}
+    for idx, (name, acc) in enumerate(leaf_accumulators.items()):
+        if acc._on_disk:
+            checkpoint["leaves"][name] = {
+                "mode": "disk",
+                "buckets": acc._bucket_paths,
+                "tmp_dir": acc._tmp_dir,
+                "amb": acc._ambiguous_count,
+                "kb": acc._key_bytes,
+            }
+        else:
+            fpath = os.path.join(spill_dir, f"capacity_leaf_{idx}.bin")
+            if acc._pure_keys is not None and acc._pure_keys.shape[0]:
+                acc._pure_keys.tofile(fpath)
+            else:
+                open(fpath, "wb").close()
+            checkpoint["leaves"][name] = {
+                "mode": "memory",
+                "file": fpath,
+                "amb": acc._ambiguous_count,
+                "kb": acc._key_bytes,
+            }
+
+    checkpoint_path = os.path.join(spill_dir, _LEAF_CHECKPOINT_FNAME)
+    with open(checkpoint_path, "w", encoding="utf-8") as fh:
+        json.dump(checkpoint, fh)
+
+
+def _load_leaf_checkpoint(
+    spill_dir: str,
+    min_len: int,
+    void_dtype,
+) -> dict | None:
+    """Load a previously saved leaf checkpoint if valid.
+
+    Returns None when no checkpoint exists, the checkpoint was produced
+    with a different min_len, or any referenced file is missing (which
+    indicates the spill_dir was partially cleaned between runs).
+
+    Args:
+        spill_dir: Directory that may contain the checkpoint file.
+        min_len: Window size expected in the checkpoint.
+        void_dtype: Numpy void dtype for packed keys.
 
     Returns:
-        Dictionary mapping each node's name (TaxID string) to its capacity.
+        Dict mapping str(leaf_name) to a reconstructed _NodeCapacityKeys,
+        or None when the checkpoint cannot be used.
+    """
+    import json
+    import os
+
+    import numpy as np
+
+    checkpoint_path = os.path.join(spill_dir, _LEAF_CHECKPOINT_FNAME)
+    if not os.path.exists(checkpoint_path):
+        return None
+
+    with open(checkpoint_path, encoding="utf-8") as fh:
+        checkpoint = json.load(fh)
+
+    if checkpoint.get("min_len") != min_len:
+        return None
+
+    result: dict = {}
+    for name, info in checkpoint["leaves"].items():
+        kb = info["kb"]
+        amb = info["amb"]
+        if info["mode"] == "disk":
+            buckets = info["buckets"]
+            tmp_dir = info["tmp_dir"]
+            if not all(os.path.exists(b) for b in buckets):
+                return None
+            result[name] = _NodeCapacityKeys(None, amb, kb, buckets, tmp_dir)
+        else:
+            fpath = info["file"]
+            if not os.path.exists(fpath):
+                return None
+            raw = np.fromfile(fpath, dtype=void_dtype)
+            result[name] = _NodeCapacityKeys(raw.copy() if raw.size else np.empty((0,), dtype=void_dtype), amb, kb)
+
+    return result or None
+
+
+def _delete_leaf_checkpoint(spill_dir: str) -> None:
+    """Remove the leaf checkpoint and its auxiliary bin files.
+
+    Called after a successful Phase 2 so stale checkpoints do not
+    interfere with future runs in the same spill_dir.
+    """
+    import os
+
+    checkpoint_path = os.path.join(spill_dir, _LEAF_CHECKPOINT_FNAME)
+    if not os.path.exists(checkpoint_path):
+        return
+
+    try:
+        import json
+        with open(checkpoint_path, encoding="utf-8") as fh:
+            checkpoint = json.load(fh)
+        for info in checkpoint.get("leaves", {}).values():
+            if info.get("mode") == "memory":
+                fpath = info.get("file", "")
+                if fpath and os.path.exists(fpath):
+                    os.remove(fpath)
+        os.remove(checkpoint_path)
+    except Exception:
+        pass
+
+
+def _leaf_worker_task(
+    fasta_path: str,
+    header_id: str,
+    leaf_name,
+    min_len: int,
+    key_bytes: int,
+    disk_threshold: int,
+    spill_dir: str | None,
+) -> tuple:
+    """Process one sequence leaf and return a serialisable result tuple.
+
+    Top-level (non-nested) so the multiprocessing machinery can pickle it
+    for both fork and spawn start methods.  Returns:
+        (leaf_name, on_disk, data, ambiguous_count, key_bytes, tmp_dir)
+    where ``data`` is a list of bucket paths when ``on_disk`` is True, or
+    the raw bytes of the packed-key array when False.
     """
     import numpy as np
+
+    void_dtype = np.dtype((np.void, key_bytes))
+
+    class _LeafProxy:
+        rank = "sequence"
+
+    proxy = _LeafProxy()
+    proxy.fasta_path = fasta_path
+    proxy.header_id = header_id
+    proxy.name = leaf_name
+
+    acc = _NodeCapacityKeys.from_sequence_leaf(
+        proxy, min_len, void_dtype, disk_threshold,
+        use_cache=False, spill_dir=spill_dir,
+    )
+
+    if acc._on_disk:
+        bucket_paths = acc._bucket_paths
+        tmp_dir = acc._tmp_dir
+        amb = acc._ambiguous_count
+        # Null storage refs so the accumulator's release() won't delete the
+        # spill files when the worker process exits.
+        acc._bucket_paths = None
+        acc._tmp_dir = None
+        return (leaf_name, True, bucket_paths, amb, key_bytes, tmp_dir)
+
+    raw = (
+        acc._pure_keys.tobytes()
+        if acc._pure_keys is not None and acc._pure_keys.shape[0]
+        else b""
+    )
+    return (leaf_name, False, raw, acc._ambiguous_count, key_bytes, None)
+
+
+def compute_all_capacities(
+    tree_root,
+    min_len: int,
+    spill_dir: str | None = None,
+    n_workers: int | None = None,
+    n_gpu_workers: int | None = None,
+) -> dict:
+    """Compute every node's capacity in one bottom-up pass.
+
+    The pass has two phases:
+
+    1. **Parallel leaf phase**: every sequence leaf is processed
+       concurrently by a pool of worker processes.  Workers read from
+       LMDB (safe for concurrent readers), enumerate sliding-window
+       k-mers, and write packed-key spill files.  On an n-core host the
+       wall time of this phase approaches max(leaf_time) instead of
+       sum(leaf_times).
+
+    2. **Sequential merge phase**: the pre-computed leaf accumulators
+       are merged bottom-up.  Each internal node folds its children's
+       key sets via set-union (``np.unique`` in memory or bucket-file
+       append on disk), so shared subsequences — including conserved
+       regions such as telomeric repeats — are counted once at every
+       ancestor level.
+
+    Args:
+        tree_root: Root of the taxonomic tree.
+        min_len: Sliding-window size in base pairs.
+        spill_dir: Directory for temporary bucket files.  Defaults to
+            the OS temp dir when None.  Set to a path on a large drive
+            to avoid inflating the system-disk VHDX.
+        n_workers: CPU worker processes for the leaf phase.  Defaults to
+            ``os.cpu_count() - 1`` when None.  Pass 1 to disable CPU
+            parallelism (useful for debugging or single-core hosts).
+        n_gpu_workers: GPU worker processes for large leaves.  Each
+            worker is pinned to one CUDA device (round-robin).  Defaults
+            to auto-detect: uses all available CUDA devices when CuPy is
+            installed, or 0 when CuPy is absent.  Pass 0 to disable GPU.
+
+    Returns:
+        Dictionary mapping each node's name (TaxID string) to its
+        capacity (count of unique subseqs of length ``min_len``).
+    """
+    import logging
+    import multiprocessing
+    import os
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    import numpy as np
+    import psutil
+
+    _logger = logging.getLogger("TaxoTreeSet.Core.Generation.Capacity")
+
+    if n_workers is None:
+        n_workers = max(1, (os.cpu_count() or 1) - 1)
+
+    if n_gpu_workers is None:
+        n_gpu_workers = _detect_cuda_device_count()
+    n_gpu_workers = max(0, n_gpu_workers)
 
     key_bytes = (min_len + _BASES_PER_BYTE - 1) // _BASES_PER_BYTE
     void_dtype = np.dtype((np.void, key_bytes))
     disk_threshold = _resolve_bottom_up_threshold(key_bytes)
     capacities: dict[str, int] = {}
 
+    all_leaves = [
+        n for n in tree_root.leaves if getattr(n, "rank", "") == "sequence"
+    ]
+    total_leaves = len(all_leaves)
+
+    gpu_info = (
+        f", gpu_workers={n_gpu_workers}"
+        f" (devices 0-{n_gpu_workers - 1})"
+        if n_gpu_workers > 0
+        else " (CPU-only)"
+    )
+    _logger.info(
+        "[bottom-up] Starting: %d sequence leaves, disk_threshold=%s keys "
+        "(%.2f GiB), sys_avail=%.2f GiB, cpu_workers=%d%s",
+        total_leaves,
+        f"{disk_threshold:,}",
+        disk_threshold * key_bytes / 2**30,
+        psutil.virtual_memory().available / 2**30,
+        n_workers,
+        gpu_info,
+    )
+
+    # ── Phase 1: parallel leaf processing ────────────────────────────────
+    # Attempt to resume from a previous interrupted run.  If the checkpoint
+    # is present and valid (same min_len, all bucket files intact) the
+    # already-computed leaves are loaded and skipped in the worker pool.
+    leaf_accumulators: dict[str, _NodeCapacityKeys] = {}
+    if spill_dir:
+        restored = _load_leaf_checkpoint(spill_dir, min_len, void_dtype)
+        if restored:
+            leaf_accumulators.update(restored)
+            _logger.info(
+                "[bottom-up] Resuming from checkpoint: %d/%d leaves already computed.",
+                len(restored), total_leaves,
+            )
+
+    def _reconstruct(result: tuple) -> _NodeCapacityKeys:
+        """Rebuild a _NodeCapacityKeys from a _leaf_worker_task result."""
+        _, on_disk, data, amb, kb, tmp_dir = result
+        if on_disk:
+            return _NodeCapacityKeys(None, amb, kb, data, tmp_dir)
+        arr = (
+            np.frombuffer(data, dtype=void_dtype).copy()
+            if data
+            else np.empty((0,), dtype=void_dtype)
+        )
+        return _NodeCapacityKeys(arr, amb, kb)
+
+    def _empty_acc() -> _NodeCapacityKeys:
+        return _NodeCapacityKeys(np.empty((0,), dtype=void_dtype), 0, key_bytes)
+
+    leaves_done = [len(leaf_accumulators)]
+
+    # Progress bar visible on any TTY or file stream (nohup included).
+    # Dynamic miniters keeps the bar from flooding the log on fast datasets
+    # while still updating at least every 60 seconds on slow ones.
+    _pbar = tqdm(
+        total=total_leaves,
+        initial=leaves_done[0],
+        desc="Unique k-mer analysis",
+        unit="leaf",
+        dynamic_ncols=True,
+        miniters=1,
+        smoothing=0.05,
+    )
+
+    def _record(result: tuple) -> None:
+        leaf_name = result[0]
+        acc = _reconstruct(result)
+        leaf_accumulators[str(leaf_name)] = acc
+        leaves_done[0] += 1
+        _pbar.update(1)
+        if leaves_done[0] % 50 == 0 or leaves_done[0] == total_leaves:
+            avail = psutil.virtual_memory().available / 2**30
+            _logger.info(
+                "[bottom-up] leaves %d/%d  sys_avail=%.2f GiB  leaf=%s  keys=%s%s",
+                leaves_done[0], total_leaves, avail,
+                leaf_name,
+                f"{acc.cardinality():,}",
+                "  [on-disk]" if acc._on_disk else "",
+            )
+
+    for leaf in all_leaves:
+        if not getattr(leaf, "fasta_path", "") or not getattr(leaf, "header_id", ""):
+            leaf_accumulators[str(leaf.name)] = _empty_acc()
+
+    # Exclude leaves whose accumulators were restored from the checkpoint.
+    valid_leaves = [
+        l for l in all_leaves
+        if getattr(l, "fasta_path", "") and getattr(l, "header_id", "")
+        and str(l.name) not in leaf_accumulators
+    ]
+
+    total_pool = n_workers + n_gpu_workers
+    task_fn = _leaf_worker_task_auto if n_gpu_workers > 0 else _leaf_worker_task
+
+    if total_pool > 1 and valid_leaves:
+        # When GPU workers are present we must use the spawn start method so
+        # each worker process initialises its own CUDA context from scratch.
+        # Forking a process that has already touched CUDA state is undefined
+        # behaviour in the CUDA driver.  The spawn overhead (~300 ms per
+        # worker) is negligible compared to leaf processing times.
+        pool_kwargs: dict = {"max_workers": total_pool}
+        if n_gpu_workers > 0:
+            spawn_ctx = multiprocessing.get_context("spawn")
+            pool_kwargs["mp_context"] = spawn_ctx
+            # Value and Lock must be created in the same spawn context so
+            # they can be safely passed as initializer args to spawn workers.
+            gpu_counter = spawn_ctx.Value("i", 0)
+            gpu_lock = spawn_ctx.Lock()
+            pool_kwargs["initializer"] = _leaf_pool_initializer
+            pool_kwargs["initargs"] = (gpu_counter, gpu_lock, n_gpu_workers)
+
+        with ProcessPoolExecutor(**pool_kwargs) as executor:
+            future_map = {
+                executor.submit(
+                    task_fn,
+                    leaf.fasta_path, leaf.header_id, leaf.name,
+                    min_len, key_bytes, disk_threshold, spill_dir,
+                ): leaf.name
+                for leaf in valid_leaves
+            }
+            for future in as_completed(future_map):
+                try:
+                    _record(future.result())
+                except Exception as exc:
+                    leaf_name = future_map[future]
+                    _logger.error(
+                        "[bottom-up] leaf %s failed: %s — using empty accumulator",
+                        leaf_name, exc,
+                    )
+                    leaf_accumulators[str(leaf_name)] = _empty_acc()
+                    leaves_done[0] += 1
+                    _pbar.update(1)
+    else:
+        for leaf in valid_leaves:
+            try:
+                result = _leaf_worker_task(
+                    leaf.fasta_path, leaf.header_id, leaf.name,
+                    min_len, key_bytes, disk_threshold, spill_dir,
+                )
+                _record(result)
+            except Exception as exc:
+                _logger.error(
+                    "[bottom-up] leaf %s failed: %s — using empty accumulator",
+                    leaf.name, exc,
+                )
+                leaf_accumulators[str(leaf.name)] = _empty_acc()
+                leaves_done[0] += 1
+                _pbar.update(1)
+
+    _pbar.close()
+
+    # Save a checkpoint so a re-run with the same spill_dir can skip Phase 1.
+    if spill_dir and valid_leaves:
+        _save_leaf_checkpoint(leaf_accumulators, spill_dir, min_len, void_dtype)
+        _logger.info(
+            "[bottom-up] Leaf checkpoint saved (%d leaves) to %s",
+            len(leaf_accumulators), spill_dir,
+        )
+
+    # ── Phase 2: sequential bottom-up merge ──────────────────────────────
+
     def _resolve(node) -> _NodeCapacityKeys:
         if getattr(node, "rank", "") == "sequence":
-            return _NodeCapacityKeys.from_sequence_leaf(
-                node, min_len, void_dtype, disk_threshold
-            )
-        child_sets = [_resolve(child) for child in node.children]
-        merged = _NodeCapacityKeys.merge(child_sets, void_dtype, disk_threshold)
-        for child_set in child_sets:
-            child_set.release()
-        capacities[str(node.name)] = merged.cardinality()
-        return merged
+            return leaf_accumulators.pop(str(node.name), _empty_acc())
+
+        if not node.children:
+            return _empty_acc()
+
+        # Progressive accumulation: process one child at a time so that
+        # at most one child's key array is live simultaneously alongside
+        # the running accumulator. This bounds peak memory to
+        # O(disk_threshold) regardless of how many children a node has,
+        # instead of O(n_children × disk_threshold) with a batch merge.
+        running = _resolve(node.children[0])
+        for child_node in node.children[1:]:
+            child_set = _resolve(child_node)
+
+            if running._on_disk:
+                running._inplace_extend(child_set, key_bytes)
+                child_set.release()
+            elif child_set._on_disk:
+                spilled = _NodeCapacityKeys._spilled_from_arrays(
+                    [running._pure_keys],
+                    running._ambiguous_count,
+                    key_bytes,
+                    spill_dir=spill_dir,
+                )
+                running.release()
+                spilled._inplace_extend(child_set, key_bytes)
+                child_set.release()
+                running = spilled
+            else:
+                r_count = (
+                    running._pure_keys.shape[0]
+                    if running._pure_keys is not None else 0
+                )
+                c_count = (
+                    child_set._pure_keys.shape[0]
+                    if child_set._pure_keys is not None else 0
+                )
+                if r_count + c_count < disk_threshold:
+                    arrays = [
+                        a for a in [running._pure_keys, child_set._pure_keys]
+                        if a is not None and a.shape[0]
+                    ]
+                    pure_keys = (
+                        np.unique(np.concatenate(arrays))
+                        if arrays
+                        else np.empty((0,), dtype=void_dtype)
+                    )
+                    new_running = _NodeCapacityKeys(
+                        pure_keys,
+                        running._ambiguous_count + child_set._ambiguous_count,
+                        key_bytes,
+                    )
+                    running.release()
+                    child_set.release()
+                    running = new_running
+                else:
+                    spilled = _NodeCapacityKeys._spilled_merge(
+                        [running, child_set],
+                        running._ambiguous_count + child_set._ambiguous_count,
+                        key_bytes,
+                        spill_dir=spill_dir,
+                    )
+                    running.release()
+                    child_set.release()
+                    running = spilled
+
+        cap = running.cardinality()
+        capacities[str(node.name)] = cap
+        avail = psutil.virtual_memory().available / 2**30
+        _logger.info(
+            "[bottom-up] node %s (%s)  cap=%s  sys_avail=%.2f GiB%s",
+            node.name, getattr(node, "rank", ""), f"{cap:,}", avail,
+            "  [on-disk]" if running._on_disk else "",
+        )
+        return running
 
     root_set = _resolve(tree_root)
     root_set.release()
+    _logger.info("[bottom-up] Done: %d nodes resolved.", len(capacities))
+
+    # Phase 2 completed successfully — checkpoint is no longer needed.
+    if spill_dir:
+        _delete_leaf_checkpoint(spill_dir)
+
     return capacities
 
 
@@ -724,6 +1340,315 @@ def _encode_windows_2bit(windows, min_len: int):
         np.dtype((np.void, key_bytes))
     ).reshape(n_pure)
     return keys, pure_mask
+
+
+# ---------------------------------------------------------------------------
+# GPU-accelerated leaf processing (requires CuPy + CUDA)
+# ---------------------------------------------------------------------------
+
+
+def _detect_cuda_device_count() -> int:
+    """Return the number of available CUDA devices, or 0 if CuPy is absent."""
+    try:
+        import cupy as cp
+        return int(cp.cuda.runtime.getDeviceCount())
+    except Exception:
+        return 0
+
+
+def _gpu_sliding_window_view(seq_gpu, window_len: int):
+    """Sliding-window view over a 1-D CuPy uint8 array.
+
+    Uses ``sliding_window_view`` when available (CuPy ≥ 12) and falls
+    back to ``as_strided`` for older releases.
+    """
+    import cupy as cp
+
+    try:
+        return cp.lib.stride_tricks.sliding_window_view(seq_gpu, window_len)
+    except AttributeError:
+        n = seq_gpu.shape[0]
+        n_windows = n - window_len + 1
+        strides = (seq_gpu.strides[0], seq_gpu.strides[0])
+        return cp.lib.stride_tricks.as_strided(
+            seq_gpu, shape=(n_windows, window_len), strides=strides,
+        )
+
+
+def _gpu_unique_rows(packed_gpu):
+    """Return deduplicated rows of a 2-D uint8 CuPy array.
+
+    Uses ``cp.lexsort`` (GPU radix sort column-by-column) rather than
+    ``cp.unique(axis=0)``.  On CuPy ≥ 14 the latter silently calls
+    ``numpy.unique`` on the host for void-typed keys, turning a 50 ms GPU
+    operation into a multi-minute CPU sort for large arrays.
+    ``cp.lexsort`` dispatches to thrust and stays on the device.
+    """
+    import cupy as cp
+
+    n = packed_gpu.shape[0]
+    if n <= 1:
+        return packed_gpu
+    # cp.lexsort requires a 2-D CuPy ndarray, not a Python sequence.
+    # Transposing gives shape (key_bytes, n); reversing columns puts
+    # column-0 (most significant byte) on the last row, which lexsort
+    # treats as the primary sort key.
+    keys_2d = cp.ascontiguousarray(packed_gpu[:, ::-1].T)
+    idx = cp.lexsort(keys_2d)
+    del keys_2d
+    sorted_arr = packed_gpu[idx]
+    diff = cp.any(sorted_arr[1:] != sorted_arr[:-1], axis=1)
+    mask = cp.concatenate([cp.array([True]), diff])
+    return sorted_arr[mask]
+
+
+def _gpu_encode_unique(
+    seq_arr: "np.ndarray",
+    min_len: int,
+    device_id: int,
+    key_bytes: int,
+) -> "np.ndarray":
+    """Encode and globally deduplicate a sequence's k-mers entirely on GPU.
+
+    Processes the sequence in VRAM-sized chunks, deduplicates each chunk
+    on the GPU, then performs a final cross-chunk dedup.  Only the unique
+    packed keys are transferred back to the host — a small fraction of all
+    windows for repetitive sequences.
+
+    Ambiguous windows (non-ACGT bases) are intentionally not tracked; the
+    returned count is therefore exact for pure-ACGT sequences and an
+    under-estimate otherwise.  This matches ``_from_chunked_sequence``.
+
+    Args:
+        seq_arr: Host-side uint8 array of ASCII-encoded sequence bases.
+        min_len: Sliding-window size in bases.
+        device_id: CUDA device index.
+        key_bytes: Packed key width = ceil(min_len / 4).
+
+    Returns:
+        (M,) void-dtype numpy array of unique 2-bit-packed keys.
+    """
+    import numpy as np
+    import cupy as cp
+
+    cp.cuda.Device(device_id).use()
+    lut_gpu = cp.array(_get_acgt_lut())
+
+    n = seq_arr.shape[0]
+    n_windows = n - min_len + 1
+
+    # Budget 30 % of free VRAM per chunk.  Peak per window: codes array
+    # (min_len bytes) + filtered pure (≈ 0.9 × min_len) + packed (key_bytes).
+    free_vram, _ = cp.cuda.runtime.memGetInfo()
+    bytes_per_window = int(min_len * 2.0 + key_bytes)
+    chunk_size = max(500_000, int(free_vram * 0.30 / bytes_per_window))
+
+    # Upload the full sequence to VRAM once.  For sequences larger than
+    # available VRAM this raises cupy.cuda.memory.OutOfMemoryError, which
+    # propagates out of _gpu_encode_unique and is caught by
+    # _leaf_worker_task_auto, routing the leaf to the CPU disk-spill path.
+    # This is the correct filter: only sequences that genuinely fit in VRAM
+    # are processed on GPU; everything else goes to CPU automatically.
+    seq_gpu = cp.asarray(seq_arr)
+
+    # Accumulate per-chunk unique arrays on CPU (not GPU) to avoid exhausting
+    # VRAM on GPUs with small memory budgets (e.g. GTX 1650 with 4 GB).
+    # Guard: if accumulated data exceeds 30 % of *currently* available RAM,
+    # raise MemoryError to trigger CPU fallback before the host OOMs.
+    # psutil.available adapts automatically: ~2 GB locally, ~75 GB on
+    # HoreKa Green, so large chromosomes are handled in-memory on big nodes
+    # without unnecessary spill.
+    import psutil as _psutil
+    _ACCUM_LIMIT = int(_psutil.virtual_memory().available * 0.30)
+    all_unique_cpu: list = []
+    _accumulated_bytes = 0
+
+    for chunk_start in range(0, n_windows, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, n_windows)
+
+        sub = seq_gpu[chunk_start: chunk_end + min_len - 1]
+        windows = _gpu_sliding_window_view(sub, min_len)
+
+        codes = lut_gpu[windows]                              # (N, min_len) uint8
+        del windows
+        pure_mask = cp.all(codes != cp.uint8(255), axis=1)   # (N,) bool
+        pure = codes[pure_mask]
+        n_pure = int(pure.shape[0])
+        del codes, pure_mask
+
+        if n_pure == 0:
+            del pure
+            cp.get_default_memory_pool().free_all_blocks()
+            continue
+
+        pad = (-min_len) % _BASES_PER_BYTE
+        if pad:
+            pure = cp.concatenate(
+                [pure, cp.zeros((n_pure, pad), dtype=cp.uint8)], axis=1,
+            )
+        groups = pure.reshape(n_pure, key_bytes, _BASES_PER_BYTE)
+        packed = (
+            groups[:, :, 0]
+            | (groups[:, :, 1] << cp.uint8(2))
+            | (groups[:, :, 2] << cp.uint8(4))
+            | (groups[:, :, 3] << cp.uint8(6))
+        ).astype(cp.uint8)                                    # (n_pure, key_bytes)
+        del pure, groups
+
+        # Dedup this chunk on GPU, transfer only unique keys to CPU, then
+        # release the slab once per chunk.
+        unique_chunk_gpu = _gpu_unique_rows(packed)
+        unique_cpu = cp.asnumpy(unique_chunk_gpu)
+        del packed, unique_chunk_gpu
+        cp.get_default_memory_pool().free_all_blocks()  # one sync per chunk
+
+        _accumulated_bytes += unique_cpu.nbytes
+        if _accumulated_bytes > _ACCUM_LIMIT:
+            del seq_gpu, lut_gpu, all_unique_cpu, unique_cpu
+            cp.get_default_memory_pool().free_all_blocks()
+            raise MemoryError(
+                f"GPU encode accumulation reached "
+                f"{_accumulated_bytes / 1024**3:.1f} GB — "
+                "routing to CPU spill path"
+            )
+        all_unique_cpu.append(unique_cpu)
+
+    del seq_gpu, lut_gpu
+    cp.get_default_memory_pool().free_all_blocks()
+
+    void_dtype = np.dtype((np.void, key_bytes))
+
+    if not all_unique_cpu:
+        return np.empty((0,), dtype=void_dtype)
+
+    # Final cross-chunk dedup.  If the concatenated unique-per-chunk data fits
+    # in VRAM (3× for sort scratch), run it on GPU.  Otherwise fall back to a
+    # CPU bucket sort, which is the same O(N/256) per-bucket np.unique the CPU
+    # leaf worker uses.
+    all_cpu = np.concatenate(all_unique_cpu, axis=0)          # (total, key_bytes) uint8
+    del all_unique_cpu
+
+    try:
+        free_vram, _ = cp.cuda.runtime.memGetInfo()
+        if all_cpu.nbytes * 3 < free_vram:
+            merged_gpu = cp.asarray(all_cpu)
+            del all_cpu
+            unique_gpu = _gpu_unique_rows(merged_gpu)
+            del merged_gpu
+            cp.get_default_memory_pool().free_all_blocks()
+            result_cpu = cp.asnumpy(unique_gpu)
+            del unique_gpu
+            return np.ascontiguousarray(result_cpu).view(void_dtype).reshape(-1)
+    except Exception:
+        pass
+
+    # CPU bucket-based dedup: mirror of _flush_keys_to_buckets / _from_chunked_sequence.
+    n_buckets = _HASHED_PREFIX_BUCKETS
+    cpu_buckets: list[list] = [[] for _ in range(n_buckets)]
+    first_byte = all_cpu[:, 0]
+    order = np.argsort(first_byte, kind="stable")
+    sb = all_cpu[order]
+    sf = first_byte[order]
+    del all_cpu, order, first_byte
+
+    split_pts = np.flatnonzero(np.diff(sf)) + 1
+    starts = np.concatenate([[0], split_pts])
+    ends = np.concatenate([split_pts, [len(sf)]])
+    for s, e in zip(starts, ends):
+        b = int(sf[s])
+        cpu_buckets[b].append(sb[s:e])
+    del sb, sf
+
+    result_parts = []
+    for bucket_arrs in cpu_buckets:
+        if not bucket_arrs:
+            continue
+        merged = np.concatenate(bucket_arrs, axis=0)
+        keys_v = np.ascontiguousarray(merged).view(void_dtype).reshape(-1)
+        result_parts.append(np.unique(keys_v))
+
+    if not result_parts:
+        return np.empty((0,), dtype=void_dtype)
+    return np.concatenate(result_parts)
+
+
+def _leaf_pool_initializer(counter, lock, n_gpus: int) -> None:
+    """Assign each worker a GPU device ID or mark it as CPU-only.
+
+    Called once when a worker process starts.  The first ``n_gpus``
+    workers to call this initializer receive CUDA device indices
+    0 … n_gpus-1; subsequent workers are marked CPU-only
+    (``_WORKER_GPU_DEVICE_ID = -1``).
+
+    A shared counter protected by a lock guarantees exactly one worker
+    per device regardless of process-start timing.
+    """
+    global _WORKER_GPU_DEVICE_ID
+    with lock:
+        idx = counter.value
+        counter.value += 1
+    device_id = idx if idx < n_gpus else -1
+    _WORKER_GPU_DEVICE_ID = device_id
+    if device_id >= 0:
+        try:
+            import cupy as cp
+            cp.cuda.Device(device_id).use()
+        except Exception:
+            _WORKER_GPU_DEVICE_ID = -1
+
+
+def _leaf_worker_task_auto(
+    fasta_path: str,
+    header_id: str,
+    leaf_name,
+    min_len: int,
+    key_bytes: int,
+    disk_threshold: int,
+    spill_dir: str | None,
+) -> tuple:
+    """Dispatch a leaf to the GPU path or the CPU path.
+
+    GPU path: used when this worker was assigned a CUDA device
+    (``_WORKER_GPU_DEVICE_ID >= 0``) and the sequence is at least
+    ``_GPU_MIN_BASES`` long.
+
+    CPU path: used for short sequences, CPU-only workers, or when the
+    GPU path raises any exception (OOM, driver error, …).  The returned
+    tuple is identical in format to ``_leaf_worker_task``.
+    """
+    import numpy as np
+    from taxotreeset.dataset.utils import _read_single_sequence
+
+    device_id = _WORKER_GPU_DEVICE_ID
+
+    if device_id >= 0:
+        seq = _read_single_sequence(fasta_path, header_id) or ""
+        if len(seq) >= _GPU_MIN_BASES:
+            try:
+                seq_arr = np.frombuffer(seq.encode("ascii"), dtype=np.uint8)
+                keys_void = _gpu_encode_unique(seq_arr, min_len, device_id, key_bytes)
+                # For very large unique key sets spill to disk so the IPC pipe
+                # doesn't carry gigabytes of raw bytes.  The threshold mirrors
+                # the CPU path's disk_threshold parameter.
+                if keys_void.shape[0] > disk_threshold:
+                    acc = _NodeCapacityKeys._spilled_from_arrays(
+                        [keys_void], 0, key_bytes, spill_dir=spill_dir,
+                    )
+                    bpaths = acc._bucket_paths
+                    tdir = acc._tmp_dir
+                    acc._bucket_paths = None
+                    acc._tmp_dir = None
+                    return (leaf_name, True, bpaths, 0, key_bytes, tdir)
+                return (leaf_name, False, keys_void.tobytes(), 0, key_bytes, None)
+            except Exception as exc:
+                logger.warning(
+                    "[bottom-up-gpu] leaf %s GPU encode failed (%s) — retrying on CPU",
+                    leaf_name, exc,
+                )
+
+    return _leaf_worker_task(
+        fasta_path, header_id, leaf_name, min_len, key_bytes, disk_threshold, spill_dir,
+    )
 
 
 # noqa rationale: intrinsic complexity from the adaptive design --

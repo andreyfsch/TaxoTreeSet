@@ -20,21 +20,21 @@ Usage::
     python scripts/validate_selective_download.py \\
         --taxon 50557 \\
         --stop-at order \\
-        --output-dir /tmp/selective_download_test \\
+        --output-dir ~/taxotreeset_insecta_test \\
         --dry-run
 
     # Full run: discovery + selection + download + capacity + refinement
     python scripts/validate_selective_download.py \\
         --taxon 50557 \\
         --stop-at order \\
-        --output-dir /tmp/selective_download_test
+        --output-dir ~/taxotreeset_insecta_test
 
     # Larger scope that is certain to exceed the threshold
     python scripts/validate_selective_download.py \\
         --taxon 7742 \\
         --stop-at class \\
         --max-n-per-class 5000 \\
-        --output-dir /tmp/selective_download_vertebrata
+        --output-dir ~/taxotreeset_vertebrata_test
 
 Taxon suggestions (NCBI TaxIDs):
     50557   Insecta       genomes 150-600 MB, probably 50-200 GB total
@@ -315,7 +315,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--output-dir",
-        default="/tmp/taxotreeset_selective_download_test",
+        default=os.path.join(os.path.expanduser("~"), "taxotreeset_selective_download_test"),
         dest="output_dir",
         help="Directory for the test registry, vault, and report.",
     )
@@ -323,6 +323,17 @@ def main() -> None:
         "--mapping",
         default="configs/mapping.json",
         help="Path to configs/mapping.json. Default: configs/mapping.json.",
+    )
+    parser.add_argument(
+        "--spill-dir",
+        default=None,
+        dest="spill_dir",
+        help=(
+            "Directory for temporary spill files created during the bottom-up "
+            "capacity pass. Defaults to the OS temp directory (usually on the "
+            "system drive). Set to a path on a large external drive to avoid "
+            "filling the system disk on large scopes."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -348,6 +359,7 @@ def main() -> None:
     print(f"  Threshold        : {_gib(args.threshold)}")
     print(f"  min_subseq_len   : {args.min_subseq_len}")
     print(f"  Output directory : {args.output_dir}")
+    print(f"  Spill directory  : {args.spill_dir or '(OS default /tmp)'}")
     mode = "DRY-RUN (no download)" if args.dry_run else "FULL (with download)"
     print(f"  Mode             : {mode}")
     print(f"  Started at       : {datetime.now().isoformat(timespec='seconds')}")
@@ -367,6 +379,7 @@ def main() -> None:
         min_subseq_len=args.min_subseq_len,
         max_n_per_class=args.max_n_per_class,
         selective_download_threshold=args.threshold,
+        spill_dir=args.spill_dir,
     )
     orch._depth_boundary = args.stop_at
     orch._single_level = False

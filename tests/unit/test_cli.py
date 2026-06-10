@@ -213,6 +213,10 @@ class TestGenerateRun:
             min_leaves_per_class=3,
             rare_taxa_strategy="fallback",
             no_sync=no_sync,
+            spill_dir=None,
+            tmp_dir=None,
+            workers=None,
+            gpu_workers=None,
             log_level="INFO",
         )
 

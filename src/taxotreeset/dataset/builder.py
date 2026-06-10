@@ -106,6 +106,18 @@ def extract_parent_node_worker(job: tuple) -> bool:
     """
     _parent_taxid, target_dir, parent_tasks, max_subseq_len, _seed, output_format = job
 
+    # Skip heads whose every non-empty split file already exists on disk.
+    # This makes Stage 4 resumable across job restarts: completed heads are
+    # detected by the presence of all expected output files and not re-run.
+    expected_splits = [
+        s for s in _SPLITS if parent_tasks.get(s)
+    ]
+    if expected_splits and all(
+        os.path.exists(os.path.join(target_dir, f"{s}.{output_format}"))
+        for s in expected_splits
+    ):
+        return True
+
     for split in _SPLITS:
         tasks = parent_tasks.get(split, [])
         if not tasks:

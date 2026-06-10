@@ -74,12 +74,18 @@ class NCBIDownloader:
     """
 
     _DEFAULT_CHUNK_SIZE = 100
+    # Cap each CLI invocation at ~5 GiB of total sequence data so that
+    # large eukaryotic assemblies don't produce a single 60+ GiB request
+    # that the NCBI server rejects.
+    _DEFAULT_MAX_BYTES_PER_CHUNK = 5 * 1024 ** 3  # 5 GiB
 
     def __init__(
         self,
         registry: Any,
         vault_path: str,
         chunk_size: int = _DEFAULT_CHUNK_SIZE,
+        max_bytes_per_chunk: int = _DEFAULT_MAX_BYTES_PER_CHUNK,
+        tmp_dir: str | None = None,
     ) -> None:
         """Initialize the downloader without opening the LMDB environment.
 
@@ -95,10 +101,16 @@ class NCBIDownloader:
             chunk_size: Number of accessions per bulk CLI invocation.
                 Larger values reduce overhead but increase memory and
                 temporary disk usage during each batch.
+            tmp_dir: Directory for temporary download archives and
+                extracted files. Defaults to the OS temp dir when None.
+                Set to a path on a large drive to avoid inflating the
+                WSL VHDX on the system drive.
         """
         self.registry: Any = registry
         self.vault_path: str = vault_path
         self.chunk_size: int = chunk_size
+        self.max_bytes_per_chunk: int = max_bytes_per_chunk
+        self.tmp_dir: str | None = tmp_dir
 
         os.makedirs(self.vault_path, exist_ok=True)
         self.lmdb_path: str = os.path.join(self.vault_path, "sequences.lmdb")
@@ -134,7 +146,9 @@ class NCBIDownloader:
         chunks = self._split_into_chunks(pending)
         logger.info(
             f"Grouped {total_pending} pending accessions into "
-            f"{len(chunks)} batch downloads (chunk size: {self.chunk_size})."
+            f"{len(chunks)} batch downloads "
+            f"(chunk_size: {self.chunk_size}, "
+            f"max_bytes_per_chunk: {self.max_bytes_per_chunk / 1024**3:.1f} GiB)."
         )
 
         self._env = lmdb.open(
@@ -272,19 +286,45 @@ class NCBIDownloader:
         ]
 
     def _split_into_chunks(self, accessions: list[str]) -> list[list[str]]:
-        """Split a flat list of accessions into chunks of chunk_size.
+        """Split accessions into volume-capped chunks for CLI batching.
+
+        Each chunk is bounded by both ``chunk_size`` (max accessions) and
+        ``max_bytes_per_chunk`` (max total sequence bytes). For accessions
+        whose ``total_sequence_length`` is unknown the volume guard is
+        skipped and only ``chunk_size`` applies.
 
         Args:
             accessions: Flat list of accession IDs to split.
 
         Returns:
-            List of lists, each containing up to chunk_size accessions.
-            The final chunk may be smaller.
+            List of lists, each within the configured size/volume bounds.
         """
-        return [
-            accessions[i : i + self.chunk_size]
-            for i in range(0, len(accessions), self.chunk_size)
-        ]
+        registry_accessions = self.registry.registry.get("accessions", {})
+        chunks: list[list[str]] = []
+        current_chunk: list[str] = []
+        current_bytes = 0
+
+        for accession in accessions:
+            vol = (registry_accessions.get(accession) or {}).get(
+                "total_sequence_length"
+            ) or 0
+            at_count_limit = len(current_chunk) >= self.chunk_size
+            at_volume_limit = (
+                vol > 0
+                and current_bytes > 0
+                and current_bytes + vol > self.max_bytes_per_chunk
+            )
+            if current_chunk and (at_count_limit or at_volume_limit):
+                chunks.append(current_chunk)
+                current_chunk = []
+                current_bytes = 0
+            current_chunk.append(accession)
+            current_bytes += vol
+
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        return chunks
 
     def _process_chunks(
         self,
@@ -362,7 +402,7 @@ class NCBIDownloader:
         logger.debug(f"Spawning bulk NCBI fetch for {len(accessions)} accessions.")
         batch_results: dict[str, list[dict[str, str]]] = {}
 
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory(dir=self.tmp_dir) as temp_dir:
             archive_path = os.path.join(temp_dir, "batch_package.zip")
 
             if not self._invoke_ncbi_datasets_cli(accessions, archive_path):
@@ -416,8 +456,10 @@ class NCBIDownloader:
                 env=os.environ.copy(),
             )
         except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr.strip() if exc.stderr else str(exc)
-            logger.error(f"NCBI Datasets CLI invocation failed: {stderr}")
+            stderr = exc.stderr.strip() if exc.stderr else ""
+            stdout = exc.stdout.strip() if exc.stdout else ""
+            detail = "\n".join(filter(None, [stderr, stdout])) or str(exc)
+            logger.error(f"NCBI Datasets CLI invocation failed: {detail}")
             return False
 
         if not os.path.exists(archive_path) or os.path.getsize(archive_path) == 0:

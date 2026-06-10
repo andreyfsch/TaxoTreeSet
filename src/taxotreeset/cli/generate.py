@@ -169,6 +169,40 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "(default: fallback).",
     )
     parser.add_argument(
+        "--spill-dir",
+        type=str,
+        default=None,
+        help="Directory for spilling large capacity supernodes to disk "
+        "during the bottom-up capacity pass. Use a path on a large drive "
+        "to avoid exhausting RAM on wide clades (e.g. Insecta).",
+    )
+    parser.add_argument(
+        "--workers", "-j",
+        type=int,
+        default=None,
+        help="CPU worker processes for the parallel leaf phase of the "
+        "bottom-up capacity pass. Defaults to cpu_count - 1. Pass 1 to "
+        "disable CPU parallelism.",
+    )
+    parser.add_argument(
+        "--gpu-workers",
+        type=int,
+        default=None,
+        help="GPU worker processes for large leaves in the capacity pass "
+        "(requires CuPy). Each worker is pinned to one CUDA device. "
+        "Defaults to auto-detect: uses all available CUDA devices when "
+        "CuPy is installed, 0 otherwise. Pass 0 to disable GPU.",
+    )
+    parser.add_argument(
+        "--tmp-dir",
+        type=str,
+        default=None,
+        help="Directory for temporary download archives and extracted "
+        "genome files. Defaults to the OS temp dir (/tmp on Linux). "
+        "Set to a path on a large external drive to prevent inflating "
+        "the WSL VHDX on the system drive during large downloads.",
+    )
+    parser.add_argument(
         "--no-sync",
         action="store_true",
         help="Skip the NCBI sync step and use the existing vault as-is "
@@ -218,6 +252,10 @@ def run(args: argparse.Namespace) -> None:
             use_exact_capacity=not args.approximate_capacity,
             min_leaves_per_class=args.min_leaves_per_class,
             rare_taxa_strategy=args.rare_taxa_strategy,
+            spill_dir=args.spill_dir,
+            tmp_dir=args.tmp_dir,
+            n_workers=args.workers,
+            n_gpu_workers=args.gpu_workers,
         )
 
         logger.info(
