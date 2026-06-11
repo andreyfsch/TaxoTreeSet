@@ -782,8 +782,13 @@ def _cleanup_spill_dirs(spill_dir: str) -> None:
         if not os.path.isdir(path):
             continue
         try:
-            shutil.rmtree(path)
-            removed += 1
+            shutil.rmtree(path, ignore_errors=True)
+            if not os.path.exists(path):
+                removed += 1
+            else:
+                logging.getLogger("TaxoTreeSet.Core.Generation.Capacity").warning(
+                    "[bottom-up] Could not fully remove spill dir %s", path
+                )
         except OSError as exc:
             logging.getLogger("TaxoTreeSet.Core.Generation.Capacity").warning(
                 "[bottom-up] Could not remove spill dir %s: %s", path, exc
