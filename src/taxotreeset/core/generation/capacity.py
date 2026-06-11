@@ -927,8 +927,9 @@ def compute_all_capacities(
     # workers (which creates 256 small bucket files per leaf, 3× slower), the
     # main process evicts the oldest in-memory accumulators to flat single .bin
     # files when its RAM budget is exceeded; Phase 2 loads them on demand.
-    _flat_bins: dict[str, tuple[str, int]] = {}   # name → (bin_path, amb_count)
-    _flat_bin_dir: list[str | None] = [None]      # created lazily on first eviction
+    # name → (bin_path, byte_offset, n_keys, amb_count)
+    _flat_bins: dict[str, tuple[str, int, int, int]] = {}
+    _flat_bin_file: list[str | None] = [None]     # single file, created lazily
     _in_memory_key_count: list[int] = [0]
     # Reserve 25 % of currently available RAM for leaf accumulation.
     _leaf_ram_budget_keys: int = max(
@@ -1001,18 +1002,23 @@ def compute_all_capacities(
     )
 
     def _evict_to_flat_bins() -> None:
-        """Evict ~50 % of in-memory leaf accumulators to single flat bin files.
+        """Evict ~50 % of in-memory leaf accumulators to a single flat-bin file.
 
-        Writing one file per leaf (a flat numpy array) is ~3× faster than the
-        256-bucket-file spill path used by _spilled_from_arrays, because it
-        issues one file-create + one sequential write instead of 256.
+        All evicted leaves are appended sequentially to ONE file per run,
+        recording each leaf's byte offset in _flat_bins.  This issues a
+        single file-create + one large sequential write per eviction event
+        instead of N small file creates, which is critical on NTFS/VHDX
+        where per-file overhead limits effective throughput to ~5 MB/s
+        with thousands of small files vs ~100 MB/s for sequential writes.
         """
         import tempfile
-        if _flat_bin_dir[0] is None:
-            _flat_bin_dir[0] = tempfile.mkdtemp(
-                prefix="tts_capacity_flatbins_", dir=spill_dir,
+        if _flat_bin_file[0] is None:
+            fd, path = tempfile.mkstemp(
+                prefix="tts_capacity_flatbins_", dir=spill_dir, suffix=".bin"
             )
-        bin_dir = _flat_bin_dir[0]
+            os.close(fd)
+            _flat_bin_file[0] = path
+        bin_path = _flat_bin_file[0]
         target = max(1, _in_memory_key_count[0] // 2)
         evicted_keys = 0
         to_evict = []
@@ -1023,16 +1029,20 @@ def compute_all_capacities(
             evicted_keys += acc._pure_keys.shape[0]
             if evicted_keys >= target:
                 break
-        for name, acc in to_evict:
-            bin_path = os.path.join(bin_dir, f"{name}.bin")
-            acc._pure_keys.tofile(bin_path)
-            _flat_bins[name] = (bin_path, acc._ambiguous_count)
-            del leaf_accumulators[name]
-            acc._pure_keys = None
-            acc._ambiguous_count = 0
+        # One sequential write per eviction event — all leaves appended to the
+        # same file.  f.tell() gives the byte offset before each array is written.
+        with open(bin_path, "ab") as f:
+            for name, acc in to_evict:
+                offset = f.tell()
+                n_keys = acc._pure_keys.shape[0]
+                acc._pure_keys.tofile(f)
+                _flat_bins[name] = (bin_path, offset, n_keys, acc._ambiguous_count)
+                del leaf_accumulators[name]
+                acc._pure_keys = None
+                acc._ambiguous_count = 0
         _in_memory_key_count[0] -= evicted_keys
         _logger.info(
-            "[bottom-up] Evicted %d leaves to flat bins (%.2f GiB freed); "
+            "[bottom-up] Evicted %d leaves to flat-bin file (%.2f GiB); "
             "in-memory keys remaining: %d",
             len(to_evict), evicted_keys * key_bytes / 2**30,
             _in_memory_key_count[0],
@@ -1166,12 +1176,14 @@ def compute_all_capacities(
             if acc is not None:
                 return acc
             if leaf_name in _flat_bins:
-                bin_path, amb = _flat_bins.pop(leaf_name)
+                bin_path, offset, n_keys, amb = _flat_bins.pop(leaf_name)
                 if os.path.exists(bin_path):
-                    raw = np.fromfile(bin_path, dtype=void_dtype)
-                    os.remove(bin_path)
+                    with open(bin_path, "rb") as f:
+                        f.seek(offset)
+                        raw = np.fromfile(f, dtype=void_dtype, count=n_keys)
                 else:
                     raw = np.empty((0,), dtype=void_dtype)
+                # The file is shared; deletion happens in bulk after Phase 2.
                 return _NodeCapacityKeys(raw, amb, key_bytes)
             return _empty_acc()
 
@@ -1253,12 +1265,14 @@ def compute_all_capacities(
     root_set.release()
     _logger.info("[bottom-up] Done: %d nodes resolved.", len(capacities))
 
-    # Phase 2 completed successfully — flat-bin dir, checkpoint, and spill
+    # Phase 2 completed successfully — flat-bin file, checkpoint, and spill
     # dirs are no longer needed.  Clean up all so the spill_dir stays lean.
-    if _flat_bin_dir[0] is not None:
-        import shutil as _shutil
-        _shutil.rmtree(_flat_bin_dir[0], ignore_errors=True)
-        _flat_bin_dir[0] = None
+    if _flat_bin_file[0] is not None:
+        try:
+            os.remove(_flat_bin_file[0])
+        except OSError:
+            pass
+        _flat_bin_file[0] = None
     if spill_dir:
         _delete_leaf_checkpoint(spill_dir)
         _cleanup_spill_dirs(spill_dir)

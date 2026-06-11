@@ -988,20 +988,20 @@ class TestFlatBinEviction:
         for k in result_normal:
             assert result_evicted[k] == result_normal[k], f"Mismatch for {k!r}"
 
-    def test_flat_bin_dir_cleaned_after_success(self, tmp_path):
-        """tts_capacity_flatbins_* dirs are removed after successful Phase 2."""
+    def test_flat_bin_file_cleaned_after_success(self, tmp_path):
+        """tts_capacity_flatbins_*.bin file is removed after successful Phase 2."""
         seq = self._seq_of(50)
         seq_map = {f"NC_{i:04d}": seq for i in range(3)}
         self._run(self._make_tree_n(3), seq_map, tmp_path)
-        leftover = list(tmp_path.glob("tts_capacity_flatbins_*"))
-        assert leftover == [], f"Flat-bin dir not cleaned up: {leftover}"
+        leftover = list(tmp_path.glob("tts_capacity_flatbins_*.bin"))
+        assert leftover == [], f"Flat-bin file not cleaned up: {leftover}"
 
     def test_no_flat_bins_when_budget_is_ample(self, tmp_path):
-        """No tts_capacity_flatbins_* dirs are created when memory is ample."""
+        """No tts_capacity_flatbins_*.bin file is created when memory is ample."""
         seq = self._seq_of(50)
         seq_map = {f"NC_{i:04d}": seq for i in range(2)}
         self._run(self._make_tree_n(2), seq_map, tmp_path, tiny_budget=False)
-        assert list(tmp_path.glob("tts_capacity_flatbins_*")) == []
+        assert list(tmp_path.glob("tts_capacity_flatbins_*.bin")) == []
 
     def test_eviction_is_logged(self, tmp_path, caplog):
         import logging
@@ -1010,7 +1010,7 @@ class TestFlatBinEviction:
         with caplog.at_level(logging.INFO, logger="TaxoTreeSet"):
             self._run(self._make_tree_n(3), seq_map, tmp_path)
         assert "Evicted" in caplog.text
-        assert "flat bins" in caplog.text
+        assert "flat-bin file" in caplog.text
 
     def test_future_result_cleared_in_parallel_mode(self, tmp_path):
         """future._result is set to None after each result is consumed so that
