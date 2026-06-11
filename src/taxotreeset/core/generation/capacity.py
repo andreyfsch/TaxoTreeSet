@@ -760,6 +760,40 @@ def _delete_leaf_checkpoint(spill_dir: str) -> None:
         pass
 
 
+def _cleanup_spill_dirs(spill_dir: str) -> None:
+    """Remove all tts_capacity_* directories inside spill_dir.
+
+    Called in two situations:
+    - At the start of a fresh run (no valid checkpoint found) to evict
+      directories left behind by previous failed runs.
+    - After a successful Phase 2 to remove directories created by the
+      current run once their data has been merged and is no longer needed.
+
+    Errors are logged as warnings and never propagate — a failure to clean
+    up is unfortunate but must not abort an otherwise successful pipeline.
+    """
+    import glob
+    import os
+    import shutil
+
+    pattern = os.path.join(spill_dir, "tts_capacity_*")
+    removed = 0
+    for path in glob.glob(pattern):
+        if not os.path.isdir(path):
+            continue
+        try:
+            shutil.rmtree(path)
+            removed += 1
+        except OSError as exc:
+            logging.getLogger("TaxoTreeSet.Core.Generation.Capacity").warning(
+                "[bottom-up] Could not remove spill dir %s: %s", path, exc
+            )
+    if removed:
+        logging.getLogger("TaxoTreeSet.Core.Generation.Capacity").info(
+            "[bottom-up] Removed %d spill dir(s) from %s.", removed, spill_dir
+        )
+
+
 def _leaf_worker_task(
     fasta_path: str,
     header_id: str,
@@ -912,6 +946,10 @@ def compute_all_capacities(
                 "[bottom-up] Resuming from checkpoint: %d/%d leaves already computed.",
                 len(restored), total_leaves,
             )
+        else:
+            # Fresh run with no valid checkpoint — evict any tts_capacity_*
+            # directories left by previous failed runs before starting Phase 1.
+            _cleanup_spill_dirs(spill_dir)
 
     def _reconstruct(result: tuple) -> _NodeCapacityKeys:
         """Rebuild a _NodeCapacityKeys from a _leaf_worker_task result."""
@@ -1122,9 +1160,11 @@ def compute_all_capacities(
     root_set.release()
     _logger.info("[bottom-up] Done: %d nodes resolved.", len(capacities))
 
-    # Phase 2 completed successfully — checkpoint is no longer needed.
+    # Phase 2 completed successfully — checkpoint and spill dirs are no
+    # longer needed.  Clean up both so the spill_dir stays lean.
     if spill_dir:
         _delete_leaf_checkpoint(spill_dir)
+        _cleanup_spill_dirs(spill_dir)
 
     return capacities
 

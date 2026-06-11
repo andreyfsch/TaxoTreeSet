@@ -10,6 +10,7 @@ from bigtree import Node
 
 import taxotreeset.core.generation.capacity as cap_module
 from taxotreeset.core.generation.capacity import (
+    _cleanup_spill_dirs,
     _read_sequence_cached,
     _resolve_bottom_up_threshold,
     _SEQUENCE_CACHE,
@@ -833,3 +834,81 @@ class TestComputeNodeCapacity:
         child.rank = "species"
         result = compute_node_capacity(parent, min_len=4, leaf_cache={}, mode="exact")
         assert result == 0
+
+
+# ---------------------------------------------------------------------------
+# _cleanup_spill_dirs
+# ---------------------------------------------------------------------------
+
+class TestCleanupSpillDirs:
+    def test_removes_tts_capacity_dirs(self, tmp_path):
+        d1 = tmp_path / "tts_capacity_aabbccdd"
+        d2 = tmp_path / "tts_capacity_11223344"
+        d1.mkdir()
+        d2.mkdir()
+        (d1 / "bucket.bin").write_bytes(b"x" * 100)
+
+        _cleanup_spill_dirs(str(tmp_path))
+
+        assert not d1.exists()
+        assert not d2.exists()
+
+    def test_ignores_unrelated_files_and_dirs(self, tmp_path):
+        keep_dir = tmp_path / "my_other_dir"
+        keep_file = tmp_path / "tts_capacity_not_a_dir.txt"
+        keep_dir.mkdir()
+        keep_file.write_text("keep")
+        spill_dir = tmp_path / "tts_capacity_shouldgo"
+        spill_dir.mkdir()
+
+        _cleanup_spill_dirs(str(tmp_path))
+
+        assert keep_dir.exists()
+        assert keep_file.exists()
+        assert not spill_dir.exists()
+
+    def test_empty_spill_dir_is_a_noop(self, tmp_path):
+        _cleanup_spill_dirs(str(tmp_path))  # must not raise
+
+    def test_dirs_absent_after_successful_compute(self, tmp_path):
+        from bigtree import Node
+        from unittest.mock import patch
+
+        spill = tmp_path / "spill"
+        spill.mkdir()
+
+        root = Node("root"); root.rank = "superkingdom"
+        sp = Node("sp1", parent=root); sp.rank = "species"
+        leaf = Node("leaf1", parent=sp); leaf.rank = "sequence"
+        leaf.fasta_path = "fake"; leaf.header_id = "HDR1"
+
+        with patch(
+            "taxotreeset.core.generation.capacity._leaf_worker_task",
+            return_value=("leaf1", False, b"", 0, 13, None),
+        ):
+            compute_all_capacities(root, min_len=100, spill_dir=str(spill), n_workers=1, n_gpu_workers=0)
+
+        leftover = list(spill.glob("tts_capacity_*"))
+        assert leftover == [], f"Spill dirs not cleaned up: {leftover}"
+
+    def test_orphaned_dirs_cleaned_on_fresh_run(self, tmp_path):
+        from bigtree import Node
+        from unittest.mock import patch
+
+        spill = tmp_path / "spill"
+        spill.mkdir()
+        orphan = spill / "tts_capacity_orphan123"
+        orphan.mkdir()
+
+        root = Node("root"); root.rank = "superkingdom"
+        sp = Node("sp1", parent=root); sp.rank = "species"
+        leaf = Node("leaf1", parent=sp); leaf.rank = "sequence"
+        leaf.fasta_path = "fake"; leaf.header_id = "HDR1"
+
+        with patch(
+            "taxotreeset.core.generation.capacity._leaf_worker_task",
+            return_value=("leaf1", False, b"", 0, 13, None),
+        ):
+            compute_all_capacities(root, min_len=100, spill_dir=str(spill), n_workers=1, n_gpu_workers=0)
+
+        assert not orphan.exists(), "Orphaned spill dir was not cleaned up"
