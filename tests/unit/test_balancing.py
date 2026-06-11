@@ -516,6 +516,57 @@ class TestCacheAndLeafCountCorrectness:
         plan = _plan(parent, children, caps)
         assert plan["capacities"]["2"] == 0
 
+    def test_virtual_bucket_capacity_aggregated_from_absorbed_children(self):
+        # Regression: Stage-3 rank-bucketing creates virtual bucket nodes that did
+        # not exist during Phase 2, so their taxid is absent from capacity_override.
+        # Without the fix, n_per_class collapses to 0 because min(capacities)=0.
+        #
+        # Simulates the Viruses→kingdom scheduling where Naldaviricetes (a class-rank
+        # child) is absorbed into a virtual_misc bucket that has no entry in the
+        # capacity dict from Phase 2.
+        parent = _node("10239", rank="superkingdom")
+
+        # Five canonical (kingdom) children — all present in capacity_override.
+        kingdoms = [_node(str(tid), rank="kingdom", parent=parent) for tid in
+                    [2732396, 2732092, 2731360, 2732397, 2732005]]
+
+        # One virtual misc bucket (created by classify_children_by_rank in Stage 3).
+        # Its taxid is a synthetic ID NOT in capacity_override.
+        # Its ONE bigtree child IS in capacity_override.
+        virtual_bucket = _node("9SYNTHETIC", rank="virtual_misc", parent=parent)
+        absorbed_child = _node("2840056", rank="class", parent=virtual_bucket)
+
+        all_children = kingdoms + [virtual_bucket]
+        caps = {
+            "2732396": 42_502_112,
+            "2732092":  7_103_188,
+            "2731360": 293_454_005,
+            "2732397":  1_614_908,
+            "2732005": 52_212_643,
+            "2840056": 15_327_937,  # Naldaviricetes — present via absorbed_child
+            # "9SYNTHETIC" intentionally absent — simulates the production bug
+        }
+
+        plan = compute_balanced_extraction_plan(
+            parent_node=parent,
+            children=all_children,
+            leaf_cache={},
+            min_num_seqs=0,
+            min_leaves_per_class=0,
+            rare_taxa_strategy="keep",
+            max_n_per_class=10_000,
+            cutoff_percentage=98.0,
+            capacity_override=caps,
+        )
+
+        assert plan["n_per_class"] > 0, (
+            "n_per_class collapsed to 0 because the virtual bucket's capacity "
+            "was not aggregated from its absorbed children. "
+            f"Got capacities: {plan['capacities']}"
+        )
+        # The virtual bucket's capacity should equal its absorbed child's capacity.
+        assert plan["capacities"]["9SYNTHETIC"] == 15_327_937
+
     def test_leaf_cache_hit_used_when_eligible_gate_does_not_fire(self):
         # ID 37: cached=None mutant skips cache; need 3 children so gate doesn't activate
         parent = _node("root", rank="genus")

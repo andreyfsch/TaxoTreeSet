@@ -156,10 +156,19 @@ def compute_balanced_extraction_plan(
     if capacity_override is not None:
         # Pre-computed capacities (e.g. genome-size estimates) bypass the
         # sequence-based computation, enabling balancing before download.
-        capacities = {
-            str(child.name): capacity_override.get(str(child.name), 0)
-            for child in eligible_children
-        }
+        capacities = {}
+        for child in eligible_children:
+            cap = capacity_override.get(str(child.name), 0)
+            if not cap and child.children:
+                # Virtual bucket nodes (created by rank-bucketing in Stage 3)
+                # are absent from capacity_override because they didn't exist
+                # during Phase 2. Aggregate their direct children's capacities
+                # from the override as a conservative upper-bound substitute.
+                cap = sum(
+                    capacity_override.get(str(gc.name), 0)
+                    for gc in child.children
+                )
+            capacities[str(child.name)] = cap
         if progress_callback is not None:
             for _ in eligible_children:
                 progress_callback()
