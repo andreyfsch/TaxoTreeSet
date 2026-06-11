@@ -1003,6 +1003,40 @@ class TestFlatBinEviction:
         self._run(self._make_tree_n(2), seq_map, tmp_path, tiny_budget=False)
         assert list(tmp_path.glob("tts_capacity_flatbins_*.bin")) == []
 
+    def test_single_flat_bin_file_across_multiple_evictions(self, tmp_path):
+        """All eviction events append to exactly ONE .bin file, not one per leaf.
+
+        Regression guard: the previous implementation created one file per leaf
+        inside a directory, which caused ~5 MB/s effective write speed on NTFS
+        VHDX due to filesystem overhead, leading to cascading evictions and OOM.
+        The single-file architecture issues one sequential write per eviction
+        event at ~100 MB/s.
+        """
+        from unittest.mock import patch, call as mock_call
+
+        n = 8
+        seq = self._seq_of(50)
+        seq_map = {f"NC_{i:04d}": seq for i in range(n)}
+
+        mkstemp_calls: list = []
+        import tempfile as _tempfile
+        _real_mkstemp = _tempfile.mkstemp
+
+        def _spy_mkstemp(*args, **kwargs):
+            result = _real_mkstemp(*args, **kwargs)
+            mkstemp_calls.append(kwargs.get("prefix", args[0] if args else ""))
+            return result
+
+        with patch("tempfile.mkstemp", side_effect=_spy_mkstemp):
+            self._run(self._make_tree_n(n), seq_map, tmp_path, tiny_budget=True)
+
+        flatbin_calls = [c for c in mkstemp_calls if "flatbins" in str(c)]
+        assert len(flatbin_calls) == 1, (
+            f"Expected exactly 1 flat-bin file creation, got {len(flatbin_calls)}. "
+            "Multiple calls means one file per eviction event (regression to "
+            "the NTFS-slow-path that caused cascading evictions and OOM)."
+        )
+
     def test_eviction_is_logged(self, tmp_path, caplog):
         import logging
         seq = self._seq_of(50)
