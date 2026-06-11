@@ -916,6 +916,20 @@ def compute_all_capacities(
     ]
     total_leaves = len(all_leaves)
 
+    # Flat-bin eviction: when thousands of leaves' accumulators accumulate in the
+    # main process (e.g. 18 567 viral leaves × 500 KB each = 9 GB), it OOMs
+    # before Phase 2 can start.  Rather than forcing per-leaf disk spill in the
+    # workers (which creates 256 small bucket files per leaf, 3× slower), the
+    # main process evicts the oldest in-memory accumulators to flat single .bin
+    # files when its RAM budget is exceeded; Phase 2 loads them on demand.
+    _flat_bins: dict[str, tuple[str, int]] = {}   # name → (bin_path, amb_count)
+    _flat_bin_dir: list[str | None] = [None]      # created lazily on first eviction
+    _in_memory_key_count: list[int] = [0]
+    # Reserve 25 % of currently available RAM for leaf accumulation.
+    _leaf_ram_budget_keys: int = max(
+        1, int(psutil.virtual_memory().available * 0.25) // key_bytes
+    )
+
     gpu_info = (
         f", gpu_workers={n_gpu_workers}"
         f" (devices 0-{n_gpu_workers - 1})"
@@ -981,10 +995,56 @@ def compute_all_capacities(
         smoothing=0.05,
     )
 
+    def _evict_to_flat_bins() -> None:
+        """Evict ~50 % of in-memory leaf accumulators to single flat bin files.
+
+        Writing one file per leaf (a flat numpy array) is ~3× faster than the
+        256-bucket-file spill path used by _spilled_from_arrays, because it
+        issues one file-create + one sequential write instead of 256.
+        """
+        import tempfile
+        if _flat_bin_dir[0] is None:
+            _flat_bin_dir[0] = tempfile.mkdtemp(
+                prefix="tts_capacity_flatbins_", dir=spill_dir,
+            )
+        bin_dir = _flat_bin_dir[0]
+        target = max(1, _in_memory_key_count[0] // 2)
+        evicted_keys = 0
+        to_evict = []
+        for name, acc in leaf_accumulators.items():
+            if acc._on_disk or acc._pure_keys is None or acc._pure_keys.shape[0] == 0:
+                continue
+            to_evict.append((name, acc))
+            evicted_keys += acc._pure_keys.shape[0]
+            if evicted_keys >= target:
+                break
+        for name, acc in to_evict:
+            bin_path = os.path.join(bin_dir, f"{name}.bin")
+            acc._pure_keys.tofile(bin_path)
+            _flat_bins[name] = (bin_path, acc._ambiguous_count)
+            del leaf_accumulators[name]
+            acc._pure_keys = None
+            acc._ambiguous_count = 0
+        _in_memory_key_count[0] -= evicted_keys
+        _logger.info(
+            "[bottom-up] Evicted %d leaves to flat bins (%.2f GiB freed); "
+            "in-memory keys remaining: %d",
+            len(to_evict), evicted_keys * key_bytes / 2**30,
+            _in_memory_key_count[0],
+        )
+
     def _record(result: tuple) -> None:
         leaf_name = result[0]
         acc = _reconstruct(result)
         leaf_accumulators[str(leaf_name)] = acc
+        # Snapshot cardinality and on-disk flag BEFORE potential eviction, which
+        # nulls acc._pure_keys to allow GC — accessing it afterwards would fail.
+        n_keys = acc.cardinality()
+        acc_on_disk = acc._on_disk
+        if not acc_on_disk and acc._pure_keys is not None:
+            _in_memory_key_count[0] += acc._pure_keys.shape[0]
+        if _in_memory_key_count[0] > _leaf_ram_budget_keys:
+            _evict_to_flat_bins()
         leaves_done[0] += 1
         _pbar.update(1)
         if leaves_done[0] % 50 == 0 or leaves_done[0] == total_leaves:
@@ -993,8 +1053,8 @@ def compute_all_capacities(
                 "[bottom-up] leaves %d/%d  sys_avail=%.2f GiB  leaf=%s  keys=%s%s",
                 leaves_done[0], total_leaves, avail,
                 leaf_name,
-                f"{acc.cardinality():,}",
-                "  [on-disk]" if acc._on_disk else "",
+                f"{n_keys:,}",
+                "  [on-disk]" if acc_on_disk else "",
             )
 
     for leaf in all_leaves:
@@ -1069,18 +1129,39 @@ def compute_all_capacities(
     _pbar.close()
 
     # Save a checkpoint so a re-run with the same spill_dir can skip Phase 1.
-    if spill_dir and valid_leaves:
+    # Skipped when flat-bin eviction occurred: evicted leaves are absent from
+    # leaf_accumulators, so the checkpoint would be incomplete.  A crash during
+    # Phase 2 in that case requires re-running Phase 1 from scratch.
+    if spill_dir and valid_leaves and not _flat_bins:
         _save_leaf_checkpoint(leaf_accumulators, spill_dir, min_len, void_dtype)
         _logger.info(
             "[bottom-up] Leaf checkpoint saved (%d leaves) to %s",
             len(leaf_accumulators), spill_dir,
+        )
+    elif _flat_bins:
+        _logger.info(
+            "[bottom-up] Checkpoint skipped: %d leaves are in flat-bin storage "
+            "(Phase 2 crash requires re-running Phase 1).",
+            len(_flat_bins),
         )
 
     # ── Phase 2: sequential bottom-up merge ──────────────────────────────
 
     def _resolve(node) -> _NodeCapacityKeys:
         if getattr(node, "rank", "") == "sequence":
-            return leaf_accumulators.pop(str(node.name), _empty_acc())
+            leaf_name = str(node.name)
+            acc = leaf_accumulators.pop(leaf_name, None)
+            if acc is not None:
+                return acc
+            if leaf_name in _flat_bins:
+                bin_path, amb = _flat_bins.pop(leaf_name)
+                if os.path.exists(bin_path):
+                    raw = np.fromfile(bin_path, dtype=void_dtype)
+                    os.remove(bin_path)
+                else:
+                    raw = np.empty((0,), dtype=void_dtype)
+                return _NodeCapacityKeys(raw, amb, key_bytes)
+            return _empty_acc()
 
         if not node.children:
             return _empty_acc()
@@ -1160,8 +1241,12 @@ def compute_all_capacities(
     root_set.release()
     _logger.info("[bottom-up] Done: %d nodes resolved.", len(capacities))
 
-    # Phase 2 completed successfully — checkpoint and spill dirs are no
-    # longer needed.  Clean up both so the spill_dir stays lean.
+    # Phase 2 completed successfully — flat-bin dir, checkpoint, and spill
+    # dirs are no longer needed.  Clean up all so the spill_dir stays lean.
+    if _flat_bin_dir[0] is not None:
+        import shutil as _shutil
+        _shutil.rmtree(_flat_bin_dir[0], ignore_errors=True)
+        _flat_bin_dir[0] = None
     if spill_dir:
         _delete_leaf_checkpoint(spill_dir)
         _cleanup_spill_dirs(spill_dir)

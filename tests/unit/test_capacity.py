@@ -912,3 +912,102 @@ class TestCleanupSpillDirs:
             compute_all_capacities(root, min_len=100, spill_dir=str(spill), n_workers=1, n_gpu_workers=0)
 
         assert not orphan.exists(), "Orphaned spill dir was not cleaned up"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestFlatBinEviction
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestFlatBinEviction:
+    """Flat-bin eviction: main process evicts leaf accumulators to single .bin
+    files rather than 256-bucket spill dirs when the RAM budget is exceeded."""
+
+    def _seq_of(self, length: int, seed: int = 42) -> str:
+        import random as _r
+        rng = _r.Random(seed)
+        return "".join(rng.choice("ACGT") for _ in range(length))
+
+    def _make_tree_n(self, n: int):
+        """Root → n species, each with one sequence leaf."""
+        root = Node("root")
+        root.rank = "genus"
+        for i in range(n):
+            sp = Node(f"sp{i}", parent=root)
+            sp.rank = "species"
+            leaf = Node(f"leaf{i}", parent=sp)
+            leaf.rank = "sequence"
+            leaf.header_id = f"NC_{i:04d}"
+            leaf.fasta_path = "/fake/vault"
+        return root
+
+    def _run(self, root, seq_map, tmp_path, tiny_budget: bool = True):
+        """Run compute_all_capacities with optional tiny RAM budget."""
+        from unittest.mock import MagicMock
+
+        # Patch disk_threshold high so workers never spill; patch psutil low so
+        # the main-process _leaf_ram_budget_keys triggers eviction immediately.
+        mock_vmem = MagicMock()
+        mock_vmem.available = 10  # 10 B → _leaf_ram_budget_keys = max(1, 2//1) = 2
+
+        ctx = [
+            patch(
+                "taxotreeset.core.generation.capacity._read_single_sequence",
+                side_effect=lambda path, hid: seq_map.get(hid, ""),
+            ),
+            patch(
+                "taxotreeset.core.generation.capacity._resolve_bottom_up_threshold",
+                return_value=1_000_000,
+            ),
+        ]
+        if tiny_budget:
+            ctx.append(patch("psutil.virtual_memory", return_value=mock_vmem))
+
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for c in ctx:
+                stack.enter_context(c)
+            return compute_all_capacities(
+                root, min_len=4,
+                spill_dir=str(tmp_path),
+                n_workers=1, n_gpu_workers=0,
+            )
+
+    def test_correct_result_despite_eviction(self, tmp_path):
+        """Capacity values are identical whether or not eviction fires."""
+        n = 5
+        seq = self._seq_of(50, seed=1)
+        seq_map = {f"NC_{i:04d}": seq for i in range(n)}
+
+        result_evicted = self._run(self._make_tree_n(n), seq_map, tmp_path, tiny_budget=True)
+        normal_dir = tmp_path / "b"
+        normal_dir.mkdir()
+        result_normal = self._run(self._make_tree_n(n), seq_map, normal_dir, tiny_budget=False)
+
+        assert result_evicted.keys() == result_normal.keys()
+        for k in result_normal:
+            assert result_evicted[k] == result_normal[k], f"Mismatch for {k!r}"
+
+    def test_flat_bin_dir_cleaned_after_success(self, tmp_path):
+        """tts_capacity_flatbins_* dirs are removed after successful Phase 2."""
+        seq = self._seq_of(50)
+        seq_map = {f"NC_{i:04d}": seq for i in range(3)}
+        self._run(self._make_tree_n(3), seq_map, tmp_path)
+        leftover = list(tmp_path.glob("tts_capacity_flatbins_*"))
+        assert leftover == [], f"Flat-bin dir not cleaned up: {leftover}"
+
+    def test_no_flat_bins_when_budget_is_ample(self, tmp_path):
+        """No tts_capacity_flatbins_* dirs are created when memory is ample."""
+        seq = self._seq_of(50)
+        seq_map = {f"NC_{i:04d}": seq for i in range(2)}
+        self._run(self._make_tree_n(2), seq_map, tmp_path, tiny_budget=False)
+        assert list(tmp_path.glob("tts_capacity_flatbins_*")) == []
+
+    def test_eviction_is_logged(self, tmp_path, caplog):
+        import logging
+        seq = self._seq_of(50)
+        seq_map = {f"NC_{i:04d}": seq for i in range(3)}
+        with caplog.at_level(logging.INFO, logger="TaxoTreeSet"):
+            self._run(self._make_tree_n(3), seq_map, tmp_path)
+        assert "Evicted" in caplog.text
+        assert "flat bins" in caplog.text
