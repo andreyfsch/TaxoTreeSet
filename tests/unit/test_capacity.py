@@ -1011,3 +1011,50 @@ class TestFlatBinEviction:
             self._run(self._make_tree_n(3), seq_map, tmp_path)
         assert "Evicted" in caplog.text
         assert "flat bins" in caplog.text
+
+    def test_future_result_cleared_in_parallel_mode(self, tmp_path):
+        """future._result is set to None after each result is consumed so that
+        completed futures don't accumulate IPC bytes across 18 000+ leaves."""
+        import concurrent.futures
+        from unittest.mock import patch
+
+        # Write real FASTA files — workers are subprocesses and can't use mocks.
+        seq = self._seq_of(200, seed=7)
+        n = 4
+        vault_dir = tmp_path / "vault"
+        vault_dir.mkdir()
+        spill_dir = tmp_path / "spill"
+        spill_dir.mkdir()
+
+        root = Node("root")
+        root.rank = "genus"
+        for i in range(n):
+            sp = Node(f"sp{i}", parent=root)
+            sp.rank = "species"
+            leaf = Node(f"leaf{i}", parent=sp)
+            leaf.rank = "sequence"
+            leaf.header_id = f"NC_{i:04d}"
+            fasta_path = vault_dir / f"leaf{i}.fasta"
+            fasta_path.write_text(f">NC_{i:04d}\n{seq}\n")
+            leaf.fasta_path = str(fasta_path)
+
+        processed_futures: list = []
+        _orig = concurrent.futures.as_completed
+
+        def _spy(fs, **kw):
+            for f in _orig(fs, **kw):
+                yield f
+                processed_futures.append(f)
+
+        with patch("concurrent.futures.as_completed", _spy):
+            compute_all_capacities(
+                root, min_len=4, spill_dir=str(spill_dir),
+                n_workers=2, n_gpu_workers=0,
+            )
+
+        assert processed_futures, "No futures were processed via parallel path"
+        for f in processed_futures:
+            assert f._result is None, (
+                "future._result not cleared; IPC bytes would accumulate in "
+                "future_map for the lifetime of the ProcessPoolExecutor"
+            )

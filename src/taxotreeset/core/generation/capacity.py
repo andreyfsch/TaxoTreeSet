@@ -1104,7 +1104,14 @@ def compute_all_capacities(
             }
             for future in as_completed(future_map):
                 try:
-                    _record(future.result())
+                    result = future.result()
+                    # Release the IPC bytes immediately so completed futures
+                    # don't accumulate ~500 KB each across 18 000+ leaves.
+                    # CPython holds the result in Future._result until the
+                    # Future is GC'd; as_completed keeps all futures alive
+                    # internally, so we must clear it ourselves.
+                    future._result = None
+                    _record(result)
                 except Exception as exc:
                     leaf_name = future_map[future]
                     _logger.error(
