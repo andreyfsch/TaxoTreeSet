@@ -6,7 +6,7 @@ Builds the top-level argument parser with the ``discover`` and
 import argparse
 import sys
 
-from taxotreeset.cli import discover, generate
+from taxotreeset.cli import discover, generate, separability
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(
         dest="command",
-        metavar="{discover,generate}",
+        metavar="{discover,generate,separability}",
         help="Subcommand to run.",
     )
 
@@ -55,6 +55,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     generate.add_arguments(generate_parser)
     generate_parser.set_defaults(_run=generate.run)
+
+    separability_parser = subparsers.add_parser(
+        "separability",
+        parents=[common],
+        help="Score k-mer separability per head and enrich label_map.json.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    separability.add_arguments(separability_parser)
+    separability_parser.set_defaults(_run=separability.run)
 
     return parser
 
