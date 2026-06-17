@@ -1,21 +1,21 @@
 # TaxoTreeSet
 
 TaxoTreeSet builds balanced, hierarchically structured training datasets from
-NCBI Virus RefSeq for cascaded LoRA fine-tuning of genomic language models. It
-turns a raw catalog of viral genome sequences into a tree of
-per-decision-point training shards (one per classifier head), each ready to
-train a LoRA adapter on top of a foundation model backbone such as DNABERT-2.
+NCBI RefSeq for LoRA fine-tuning of genomic language models. It turns a raw
+catalog of genome sequences into a tree of per-node training shards — one
+dataset for each internal taxonomic node, classifying that node's direct
+children — each ready to train a LoRA adapter on top of a foundation model
+backbone such as DNABERT-2.
 
 ## Overview
 
-A single flat classifier over thousands of viral taxa is impractical to train
-and to interpret. TaxoTreeSet instead mirrors the NCBI taxonomy as a cascade of
-small classifiers: each internal taxonomic node becomes a *head* that
-discriminates only among its direct children. At inference time, a sequence is
-routed down the tree head by head until it reaches the most specific
-confidently predicted taxon.
+A single flat classifier over thousands of taxa is impractical to train and to
+interpret. TaxoTreeSet instead decomposes the problem along the NCBI taxonomy:
+each internal taxonomic node becomes its own training set — a *head* that
+discriminates only among that node's direct children — so one thousand-way
+problem becomes many small, independently trainable ones.
 
-Producing such a cascade from real taxonomy is not mechanical. NCBI Taxonomy is
+Producing such datasets from real taxonomy is not mechanical. NCBI Taxonomy is
 irregular -- sibling nodes can carry different ranks, clades vary in sampling
 depth by orders of magnitude, and the post-ICTV-2022 reorganization left many
 viral genera orphaned without a family. TaxoTreeSet contains the machinery to
@@ -110,7 +110,7 @@ find data/datasets -name '*.parquet' | head
 ```
 
 To start higher, stop earlier, or generate a single head, see
-[Parameterizing the cascade](#parameterizing-the-cascade)
+[Parameterizing generation](#parameterizing-generation)
 (`--root`, `--stop-at`, `--single-level`).
 
 ## How it works
@@ -206,11 +206,11 @@ three genomes does it fall back to slicing a single sequence positionally
 (70 / 15 / 15), accepting some intra-genome leakage as the price of having any
 data at all for that class.
 
-### Parameterizing the cascade
+### Parameterizing generation
 
-![Parameterizing the cascade with --root (where to start) and --stop-at (how deep)](docs/figures/parameterization.png)
+![Parameterizing generation with --root (where to start) and --stop-at (how deep)](docs/figures/parameterization.png)
 
-Two parameters shape the generated cascade. `--root` chooses where it starts: a
+Two parameters shape the generated tree. `--root` chooses where it starts: a
 domain shortcut (`viruses`, `bacteria`, `archaea`, `eukaryotes`), a numeric NCBI
 TaxID, or a clade scientific name (e.g. `Caudoviricetes`). `--stop-at` chooses
 how deep heads are created — nodes deeper than the given canonical rank still
@@ -248,7 +248,7 @@ Key options:
 ### Stage 2: Generation
 
 `taxotreeset generate` builds the taxonomic tree from the registry, runs the
-decision-point cascade to decide heads, buckets, and passthroughs, and writes
+top-down traversal to decide heads, buckets, and passthroughs, and writes
 the balanced Parquet shards plus the sidecar manifests.
 
 ```
@@ -259,7 +259,7 @@ Key options:
 
 | Option                   | Default       | Purpose                                                        |
 |--------------------------|---------------|----------------------------------------------------------------|
-| `--root, -g`             | viruses       | Where the cascade starts: domain shortcut, NCBI TaxID, or clade name |
+| `--root, -g`             | viruses       | Where generation starts: domain shortcut, NCBI TaxID, or clade name |
 | `--stop-at`              | (deepest)     | Canonical rank where heads stop; deeper taxa become labels only |
 | `--single-level`         | off           | Generate only the root's head (no recursion into children)     |
 | `--output, -o`           | data/datasets | Output directory for shards and manifests                      |
@@ -273,7 +273,7 @@ Key options:
 
 Behind these options, the per-head mechanics are illustrated in
 [How it works](#how-it-works): `--root` / `--stop-at` / `--single-level` shape
-the cascade ([Parameterizing the cascade](#parameterizing-the-cascade));
+generation ([Parameterizing generation](#parameterizing-generation));
 `--approximate-capacity` toggles how
 [capacity](#capacity-computed-bottom-up) is measured; `--min-num-seqs`,
 `--cutoff-percentage` and `--max-n-per-class` drive
@@ -405,7 +405,7 @@ and adapt the backbone, hyperparameters, and dependencies for real runs.
 
 ## Architecture
 
-The cascade is a recursive top-down traversal of the taxonomy. For each node it
+Generation is a recursive top-down traversal of the taxonomy. For each node it
 classifies children by rank, estimates each child's capacity, computes a
 balanced extraction plan, materializes any virtual buckets, distributes the
 per-class sample budget across leaves, stratifies into train/val/test, records
