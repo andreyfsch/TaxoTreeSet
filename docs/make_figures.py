@@ -63,24 +63,23 @@ def fig_taxotreeset() -> None:
     ax.text(50, 95, "TaxoTreeSet - balanced hierarchical dataset generation",
             ha="center", fontsize=13, weight="bold")
 
-    src = _box(ax, 2, 55, 18, 24,
-               "NCBI taxonomy\n(root = Viruses)\n+\nRefSeq genomes",
-               ec=GREY, fontsize=8.5, fc="#f2f2f2")
-    disc = _box(ax, 26, 58, 16, 18,
-                "discover\n\n- scan taxonomy\n- inventory\n  registry",
-                ec=BLUE, fontsize=8.5)
-    gen = _box(ax, 48, 50, 22, 34,
-               "generate\n\n- build tree\n- capacity\n  (bottom-up)\n"
-               "- balance +\n  virtual buckets\n- download +\n  extract\n"
-               "- write splits\n  + label_map", ec=BLUE, fontsize=8.5)
-    out = _box(ax, 76, 52, 22, 28,
-               "per-head datasets\n\nhead/\n  train / val / test\n  "
-               "(parquet or csv)\n  label_map.json\n  (+ kmer_separab.)",
-               ec=GREEN, fontsize=8)
+    cy, by, bh = 67, 54, 26          # shared centre so every arrow is horizontal
+    _box(ax, 2, by, 18, bh,
+         "Input\n\nNCBI taxonomy\n+ RefSeq genomes",
+         ec=GREY, fontsize=8.5, fc="#f2f2f2")
+    _box(ax, 25, by, 17, bh,
+         "discover\n\nscan NCBI →\nregistry +\nsequence vault",
+         ec=BLUE, fontsize=8.5)
+    _box(ax, 47, by, 23, bh,
+         "generate\n\nbuild the cascade of\nbalanced heads,\nextract the shards",
+         ec=BLUE, fontsize=8.5)
+    _box(ax, 74, by, 23, bh,
+         "per-head datasets\n\none balanced\ntrain / val / test set\n"
+         "per head (+ label_map)", ec=GREEN, fontsize=8)
 
-    _arrow(ax, (20, 67), (26, 67))
-    _arrow(ax, (42, 67), (48, 67))
-    _arrow(ax, (70, 67), (76, 66))
+    _arrow(ax, (20, cy), (25, cy))
+    _arrow(ax, (42, cy), (47, cy))
+    _arrow(ax, (70, cy), (74, cy))
 
     ax.text(50, 30, "One balanced classifier dataset per taxonomic node "
             "(family → genera, genus → species, ...)",
