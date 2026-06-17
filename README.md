@@ -271,6 +271,19 @@ Key options:
 | `--min-leaves-per-class` | 3             | Minimum sequence leaves for a child to stay a standalone class |
 | `--rare-taxa-strategy`   | fallback      | `fallback` (divert rare taxa) or `keep` (retain all classes)   |
 
+Behind these options, the per-head mechanics are illustrated in
+[How it works](#how-it-works): `--root` / `--stop-at` / `--single-level` shape
+the cascade ([Parameterizing the cascade](#parameterizing-the-cascade));
+`--approximate-capacity` toggles how
+[capacity](#capacity-computed-bottom-up) is measured; `--min-num-seqs`,
+`--cutoff-percentage` and `--max-n-per-class` drive
+[per-class balancing and the percentile cutoff](#per-class-balancing-and-the-percentile-cutoff);
+`--min-leaves-per-class` and `--rare-taxa-strategy` govern the
+[virtual buckets](#virtual-buckets); and `--max-subseq-len` sets the window for
+[extraction and the leakage-safe split](#splitting-whole-genomes-leakage-safe).
+What actually gets downloaded is decided by
+[selective download with capacity-driven refinement](#selective-download-with-capacity-driven-refinement).
+
 ## Output
 
 Stage 2 produces, under the output directory:
@@ -374,7 +387,12 @@ The cascade is a recursive top-down traversal of the taxonomy. For each node it
 classifies children by rank, estimates each child's capacity, computes a
 balanced extraction plan, materializes any virtual buckets, distributes the
 per-class sample budget across leaves, stratifies into train/val/test, records
-the head in the manifest, and recurses into canonical children. The core terms
+the head in the manifest, and recurses into canonical children. Each of these
+steps is illustrated in [How it works](#how-it-works) — see
+[capacity](#capacity-computed-bottom-up),
+[balancing and the percentile cutoff](#per-class-balancing-and-the-percentile-cutoff),
+[virtual buckets](#virtual-buckets), and the
+[leakage-safe split](#splitting-whole-genomes-leakage-safe). The core terms
 (head, bucket, passthrough, capacity, cascade terminator) are defined in
 `docs/GLOSSARY.md`.
 
