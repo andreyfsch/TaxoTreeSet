@@ -284,6 +284,28 @@ the cascade ([Parameterizing the cascade](#parameterizing-the-cascade));
 What actually gets downloaded is decided by
 [selective download with capacity-driven refinement](#selective-download-with-capacity-driven-refinement).
 
+### Optional: separability diagnostic
+
+`taxotreeset separability` is a post-generation diagnostic (install the
+`diagnose` extra). For every head it fits a k-mer + logistic-regression
+baseline and writes the macro-F1 into each `label_map.json` under
+`kmer_separability`. That baseline upper-bounds what a sequence-only model can
+learn from a head, so a head scoring near chance flags little discriminable
+signal — useful for spotting hard branches before spending any GPU time.
+
+```
+python3 -m taxotreeset separability data/datasets --csv separability.csv
+```
+
+| Option        | Default | Purpose                                               |
+|---------------|---------|-------------------------------------------------------|
+| `dataset_dir` | —       | Root of a generated dataset tree (positional)         |
+| `--k`         | 4       | k-mer length; the feature space is `4**k`             |
+| `--max-train` | 4000    | Class-balanced cap on training rows per head          |
+| `--max-test`  | 3000    | Cap on test rows per head                             |
+| `--csv`       | —       | Also write an aggregate CSV across all heads          |
+| `--no-write`  | off     | Report only; do not modify the `label_map.json` files |
+
 ## Output
 
 Stage 2 produces, under the output directory:
