@@ -27,6 +27,92 @@ The output format (Parquet shards of subsequence/label pairs plus JSON
 manifests) is model-agnostic; DNABERT-2 is the reference backbone but the
 datasets can train any sequence classifier.
 
+## Installation
+
+### TaxoTreeSet
+
+TaxoTreeSet requires **Python 3.11**. Install it from source:
+
+```
+git clone https://github.com/andreyfsch/TaxoTreeSet.git
+cd TaxoTreeSet
+pip install -e .
+```
+
+This pulls the runtime dependencies: `bigtree` (tree construction), `taxoniq`
+(local NCBI Taxonomy lineage resolution), `numpy`, `pyarrow` (Parquet output),
+`lmdb` (sequence vault), and `zstandard` (vault compression). The optional k-mer
+separability diagnostic additionally needs scikit-learn:
+
+```
+pip install -e ".[diagnose]"
+```
+
+### NCBI Datasets CLI (required)
+
+TaxoTreeSet drives NCBI's official **Datasets** command-line tool — the
+`datasets` binary — to list assemblies (`datasets summary`) and download genomes
+(`datasets download`). It is an external program, **not** a Python package, and
+must be on your `PATH`. The simplest install is via conda:
+
+```
+conda install -c conda-forge ncbi-datasets-cli
+```
+
+Alternatively, download the standalone binary for your platform following the
+[NCBI Datasets v2 documentation](https://www.ncbi.nlm.nih.gov/datasets/docs/v2/).
+Confirm the shell can find it before continuing:
+
+```
+datasets --version
+```
+
+### NCBI API key (required in practice)
+
+NCBI throttles anonymous Datasets traffic to about 3 requests per second; a
+personal API key raises that to about 10/s. Because discovering even a modest
+clade issues thousands of metadata requests, **a key is effectively required** —
+without one the scan is painfully slow and NCBI may begin rejecting requests.
+Create a key from your NCBI account (sign in, then **Account settings → API Key
+Management**) and export it in the shell before running TaxoTreeSet:
+
+```
+export NCBI_API_KEY=your_key_here
+```
+
+Add that line to your `~/.bashrc` or `~/.zshrc` to make it persistent.
+TaxoTreeSet forwards the variable to every `datasets` subprocess automatically
+and logs at startup whether a key was detected.
+
+## Quickstart
+
+The two stages run back to back. The example uses **Coronaviridae** (TaxID
+`11118`), a small RefSeq-curated family that downloads quickly; substitute any
+TaxID or clade for your own scope.
+
+```
+export NCBI_API_KEY=your_key_here
+
+# 1. Scan NCBI and cache the clade's RefSeq genomes in the LMDB vault
+python3 -m taxotreeset discover --taxon-id 11118
+
+# 2. Build the balanced, per-head train/val/test datasets
+python3 -m taxotreeset generate --root 11118 --output data/datasets
+```
+
+The first command contacts NCBI and downloads genomes, so its runtime scales
+with the clade (very large scopes are bounded by selective download). The second
+writes a directory tree of heads under `data/datasets/`, each containing
+`train.parquet` / `val.parquet` / `test.parquet` and a `label_map.json`:
+
+```
+find data/datasets -name '*.parquet' | head
+```
+
+To start higher, stop earlier, or generate a single head, see
+[Parameterizing the cascade](#parameterizing-the-cascade)
+(`--root`, `--stop-at`, `--single-level`).
+
 ## How it works
 
 TaxoTreeSet has two entry points. `discover` scans NCBI taxonomy from a root
@@ -135,16 +221,6 @@ single balanced train/val/test dataset.
 
 The figures above are generated, reproducibly and from no external data, by
 `python docs/make_figures.py`.
-
-## Requirements
-
-- Python 3.11
-- `bigtree` (taxonomic tree construction)
-- `taxoniq` (NCBI Taxonomy lineage resolution)
-- `numpy` (vectorized capacity estimation)
-- `pyarrow` (Parquet output)
-- `lmdb` (sequence vault storage)
-- `zstandard` (sequence compression in the vault)
 
 ## Workflow
 
