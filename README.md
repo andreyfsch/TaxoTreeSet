@@ -287,6 +287,60 @@ Stage 2 produces, under the output directory:
 These three JSON files are the contract with downstream training and evaluation
 code.
 
+### What a head looks like
+
+A single head directory — here `Coronaviridae`, reached at
+`.../76804/11118/` — contains its three shards and a label map:
+
+```
+11118/
+├── train.parquet
+├── val.parquet
+├── test.parquet
+└── label_map.json
+```
+
+`label_map.json` is self-contained: it names every integer class index,
+including the two virtual buckets the balancer introduced (note their synthetic
+TaxIDs and virtual ranks):
+
+```json
+{
+  "head_taxid": "11118",
+  "head_name": "Coronaviridae",
+  "head_rank": "family",
+  "id2label": {
+    "0": "Alphacoronavirus",
+    "1": "Betacoronavirus",
+    "2": "Gammacoronavirus",
+    "3": "Deltacoronavirus",
+    "4": "virtual_misc_Coronaviridae",
+    "5": "virtual_rare_taxa_Coronaviridae"
+  },
+  "classes": [
+    {"class_idx": 0, "taxid": "693996",    "name": "Alphacoronavirus",                "rank": "genus"},
+    {"class_idx": 1, "taxid": "694002",    "name": "Betacoronavirus",                 "rank": "genus"},
+    {"class_idx": 2, "taxid": "694013",    "name": "Gammacoronavirus",                "rank": "genus"},
+    {"class_idx": 3, "taxid": "1159901",   "name": "Deltacoronavirus",                "rank": "genus"},
+    {"class_idx": 4, "taxid": "948922171", "name": "virtual_misc_Coronaviridae",      "rank": "virtual_misc"},
+    {"class_idx": 5, "taxid": "904115526", "name": "virtual_rare_taxa_Coronaviridae", "rank": "virtual_rare_taxa"}
+  ]
+}
+```
+
+Each shard pairs one subsequence with its class index (`seq` shown truncated;
+subsequences vary in length up to `--max-subseq-len`):
+
+| `class_idx` | `seq`                                       |
+|-------------|---------------------------------------------|
+| 0           | `GCTATTATACCTGCTGCT…CAAGATGCTGAT` (138 bp)   |
+| 0           | `TTGAACTTGAACCTCCAT…GTTAGGCTCAAA` (709 bp)   |
+| 1           | `ACGCAGCTAAAGTGACTG…CAGTTGTGGTAA` (1917 bp)  |
+
+Running `taxotreeset separability` afterward adds a `kmer_separability` block to
+each `label_map.json` (a quick estimate of how learnable the head is); plain
+`generate` does not write it.
+
 ## Example: fine-tuning a head
 
 `examples/finetune_head.py` is a reference consumer of the generated shards: it
