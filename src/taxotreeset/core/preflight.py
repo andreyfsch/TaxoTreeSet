@@ -91,6 +91,122 @@ def _free_bytes(path: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Report rendering and gating
+# ---------------------------------------------------------------------------
+
+def _format_preflight_report(
+    n_acc: int,
+    total_bytes: int,
+    disk_checks: list[tuple[str, str, int, int]],
+    time_rows: list[tuple[str, float, float]],
+    total_lo: float,
+    total_hi: float,
+    n_gpu_workers: int | None,
+    gpu_on: bool,
+) -> str:
+    """Build the boxed pre-flight summary text.
+
+    Args:
+        n_acc: Number of genomes in scope.
+        total_bytes: Total sequence data in scope.
+        disk_checks: ``(label, path, needed, free)`` rows to display.
+        time_rows: ``(label, lo_secs, hi_secs)`` runtime estimate rows.
+        total_lo: Optimistic total runtime in seconds.
+        total_hi: Pessimistic total runtime in seconds.
+        n_gpu_workers: Configured GPU worker count (0 or None = CPU only).
+        gpu_on: Whether GPU acceleration is enabled.
+
+    Returns:
+        The fully rendered, multi-line report (without surrounding blank lines).
+    """
+    W = 62
+    sep = "─" * W
+
+    def _row(label: str, value: str, flag: str = "") -> str:
+        flag_part = f"  {flag}" if flag else ""
+        pad = W - 4 - len(label) - len(value) - len(flag_part)
+        return f"║  {label}{' ' * max(pad, 1)}{value}{flag_part}  ║"
+
+    lines: list[str] = [
+        f"╔{'═' * W}╗",
+        f"║{'  TaxoTreeSet — Pre-flight Check':^{W}}║",
+        f"║{sep}║",
+        _row("Genomes in scope:", f"{n_acc:,}"),
+        _row("Total sequence data:", _fmt_bytes(total_bytes)),
+        f"║{sep}║",
+        f"║  {'Disk requirements (estimated)':<{W - 2}}║",
+    ]
+
+    for lbl, path, need, free in disk_checks:
+        short = path if len(path) <= 32 else "…" + path[-31:]
+        status = "✗ INSUFFICIENT" if free < need else "✓"
+        # Two-line entry: path on first line, figures on second
+        lines.append(f"║  {lbl}  {short:<{W - len(lbl) - 4}}║")
+        fig = f"{_fmt_bytes(need)} needed  /  {_fmt_bytes(free)} free"
+        lines.append(_row(f"    {fig}", status))
+
+    lines += [
+        f"║{sep}║",
+        f"║  {'Estimated runtime':<{W - 2}}║",
+    ]
+
+    for label, lo, hi in time_rows:
+        marker = "  ◀ most expensive step" if "k-mer" in label else ""
+        lines.append(_row(f"  {label}", _fmt_time_range(lo, hi), marker))
+
+    workers = n_gpu_workers or 0
+    gpu_value = (
+        f"enabled ({n_gpu_workers} worker{'s' if workers > 1 else ''})"
+        if gpu_on else "disabled (CPU only)"
+    )
+    lines += [
+        _row("  " + "─" * 36, ""),
+        _row("  Total", _fmt_time_range(total_lo, total_hi)),
+        f"║{sep}║",
+        _row("GPU acceleration:", gpu_value),
+        f"╚{'═' * W}╝",
+    ]
+    return "\n".join(lines)
+
+
+def _abort_if_insufficient_disk(
+    failures: list[tuple[str, str, int, int]],
+) -> None:
+    """Print disk-shortage details and ``exit(1)`` when any check failed."""
+    if not failures:
+        return
+    print("ERROR: insufficient disk space on the following paths:", file=sys.stderr)
+    for lbl, path, need, free in failures:
+        shortage = need - free
+        print(
+            f"  {lbl.strip()}: {path}\n"
+            f"    → need {_fmt_bytes(need)}, "
+            f"have {_fmt_bytes(free)}, "
+            f"short by {_fmt_bytes(shortage)}",
+            file=sys.stderr,
+        )
+    print(
+        "\nFix: free up space on the affected drives, use a different "
+        "--spill-dir / --output / --vault path, or reduce the dataset scope.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _confirm_long_run(total_hi: float) -> None:
+    """Prompt for confirmation on a TTY when the run may be long; exit on no."""
+    if not (total_hi > _WARN_THRESHOLD_SECS and sys.stdin.isatty()):
+        return
+    try:
+        answer = input("This run may take a while. Proceed? [Y/n]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = "n"
+    if answer in ("n", "no"):
+        print("Aborted.", file=sys.stderr)
+        sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -165,78 +281,12 @@ def run_preflight(
     time_rows.append(("Building datasets    ", build_lo, build_hi))
 
     # ---- display -------------------------------------------------------
-    W = 62
-    sep = "─" * W
+    report = _format_preflight_report(
+        n_acc, total_bytes, disk_checks, time_rows,
+        total_lo, total_hi, n_gpu_workers, gpu_on,
+    )
+    print("\n" + report + "\n", flush=True)
 
-    def _row(label: str, value: str, flag: str = "") -> str:
-        flag_part = f"  {flag}" if flag else ""
-        pad = W - 4 - len(label) - len(value) - len(flag_part)
-        return f"║  {label}{' ' * max(pad, 1)}{value}{flag_part}  ║"
-
-    lines: list[str] = [
-        f"╔{'═' * W}╗",
-        f"║{'  TaxoTreeSet — Pre-flight Check':^{W}}║",
-        f"║{sep}║",
-        _row("Genomes in scope:", f"{n_acc:,}"),
-        _row("Total sequence data:", _fmt_bytes(total_bytes)),
-        f"║{sep}║",
-        f"║  {'Disk requirements (estimated)':<{W - 2}}║",
-    ]
-
-    for lbl, path, need, free in disk_checks:
-        short = path if len(path) <= 32 else "…" + path[-31:]
-        status = "✗ INSUFFICIENT" if free < need else "✓"
-        # Two-line entry: path on first line, figures on second
-        lines.append(f"║  {lbl}  {short:<{W - len(lbl) - 4}}║")
-        fig = f"{_fmt_bytes(need)} needed  /  {_fmt_bytes(free)} free"
-        lines.append(_row(f"    {fig}", status))
-
-    lines += [
-        f"║{sep}║",
-        f"║  {'Estimated runtime':<{W - 2}}║",
-    ]
-
-    for label, lo, hi in time_rows:
-        marker = "  ◀ most expensive step" if "k-mer" in label else ""
-        lines.append(_row(f"  {label}", _fmt_time_range(lo, hi), marker))
-
-    lines += [
-        _row("  " + "─" * 36, ""),
-        _row("  Total", _fmt_time_range(total_lo, total_hi)),
-        f"║{sep}║",
-        _row("GPU acceleration:",
-             f"enabled ({n_gpu_workers} worker{'s' if (n_gpu_workers or 0) > 1 else ''})"
-             if gpu_on else "disabled (CPU only)"),
-        f"╚{'═' * W}╝",
-    ]
-
-    print("\n" + "\n".join(lines) + "\n", flush=True)
-
-    # ---- hard abort on disk failure ------------------------------------
-    if failures:
-        print("ERROR: insufficient disk space on the following paths:", file=sys.stderr)
-        for lbl, path, need, free in failures:
-            shortage = need - free
-            print(
-                f"  {lbl.strip()}: {path}\n"
-                f"    → need {_fmt_bytes(need)}, "
-                f"have {_fmt_bytes(free)}, "
-                f"short by {_fmt_bytes(shortage)}",
-                file=sys.stderr,
-            )
-        print(
-            "\nFix: free up space on the affected drives, use a different "
-            "--spill-dir / --output / --vault path, or reduce the dataset scope.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # ---- interactive confirmation for long runs -----------------------
-    if total_hi > _WARN_THRESHOLD_SECS and sys.stdin.isatty():
-        try:
-            answer = input("This run may take a while. Proceed? [Y/n]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            answer = "n"
-        if answer in ("n", "no"):
-            print("Aborted.", file=sys.stderr)
-            sys.exit(0)
+    # ---- hard abort on disk failure, then confirm long runs ------------
+    _abort_if_insufficient_disk(failures)
+    _confirm_long_run(total_hi)

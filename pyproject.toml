@@ -62,11 +62,9 @@ target-version = "py311"
 select = ["E", "F", "C901"]
 
 [tool.ruff.lint.mccabe]
-# Functions above this complexity are flagged. One existing outlier,
-# _capacity_exact, carries an explicit noqa with rationale; it is slated
-# for refactoring once a test suite guarantees behavioral equivalence.
-# (The other former outliers lived in dead Kraken2-era code that has
-# since been removed.) See docs/TODOs/complexity_refactor.md.
+# Functions above this complexity are flagged (C901). _capacity_exact was
+# the last deferred outlier and has been split into helpers to comply;
+# keep new code under the limit rather than adding noqa suppressions.
 max-complexity = 12
 
 [tool.pytest.ini_options]
