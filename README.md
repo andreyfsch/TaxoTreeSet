@@ -27,6 +27,115 @@ The output format (Parquet shards of subsequence/label pairs plus JSON
 manifests) is model-agnostic; DNABERT-2 is the reference backbone but the
 datasets can train any sequence classifier.
 
+## How it works
+
+TaxoTreeSet has two entry points. `discover` scans NCBI taxonomy from a root
+and builds an inventory registry; `generate` turns that registry into a tree of
+balanced, per-head datasets. Sequence data lives in an LMDB vault, kept separate
+from the registry metadata.
+
+![TaxoTreeSet pipeline: discover then generate, producing one balanced dataset per head](docs/figures/pipeline.png)
+
+### The four stages of `generate`
+
+After an optional sync of the registry and vault against NCBI, `generate` runs
+four stages. The map below points to the mechanism each stage relies on; the
+following sections explain them in turn.
+
+![The four stages of generate: download, tree + capacity, scheduling, extraction](docs/figures/generate_stages.png)
+
+### Capacity, computed bottom-up
+
+![Capacity is the deduplicated union of a node's descendant subsequences, aggregated from genomes up to the root](docs/figures/capacity_bottomup.png)
+
+A node's **capacity** is the number of *distinct* sliding-window subsequences
+(of length ≥ `min_len`) extractable from all genomes beneath it. Because the
+same subsequence can occur in sibling genomes, capacity is the size of the
+**union** of their subsequences — a shared window is counted once — so a
+parent's capacity is at most the sum of its children's, never more. Capacity is
+the currency of every balancing decision. It is computed exactly with a
+memory-bounded union, or approximately with a Bloom filter
+(`--approximate-capacity`, ~1 % error), and cached in the registry so reruns are
+cheap.
+
+### Selective download with capacity-driven refinement
+
+![Selective download: only above a volume threshold, references first, with a refinement loop that tops up real capacity](docs/figures/selective_download.png)
+
+Downloading every RefSeq genome is wasteful when only a fraction is needed to
+balance the heads. When the total pending volume exceeds a threshold (default
+50 GiB, parameterizable), TaxoTreeSet selects — *per label* and only for the
+labels of the requested rank — the genomes needed to reach that label's capacity
+target: **reference assemblies first**, then by decreasing size, until the
+target is met; the rest are deferred. Because the genome-size estimate is a
+heuristic that can over-count capacity (repetitive genomes inflate it), a
+**refinement loop** measures the *real* capacity after extraction and undefers
+additional genomes for any label that fell short, repeating until every target
+is satisfied or its deferred pool is exhausted. Downloaded sequences land in the
+LMDB vault.
+
+### Per-class balancing and the percentile cutoff
+
+![Capacity becomes a balanced dataset: the smallest tail below the p-th percentile is routed to a bucket so n_per_class is set by the retained classes](docs/figures/generate_balancing.png)
+
+At each node the sibling classes are balanced so the head does not learn priors
+skewed toward better-sequenced clades. `n_per_class` is set to the smallest
+capacity among the *retained* classes. When at least one child falls below
+`--min-num-seqs`, the children are sorted by capacity and the smallest tail
+(below the p-th percentile — `--cutoff-percentage`, default 98) is routed into a
+bucket rather than allowed to drag `n_per_class` down. The tail is therefore
+**routed, not dropped**, and every retained class is sampled to the same
+`n_per_class`.
+
+### Virtual buckets
+
+![Three kinds of virtual bucket: rank-aware (virtual_misc), rare-taxa (virtual_rare_taxa), and low-capacity](docs/figures/virtual_buckets.png)
+
+Children that cannot become clean classes are absorbed into **virtual buckets**
+— routable classes on the head — instead of being discarded. Three distinct
+mechanisms produce them:
+
+- **Rank-aware (`virtual_misc`)** — when a node's children carry heterogeneous
+  ranks, the off-baseline ranks are grouped into one bucket *per rank* (for
+  example, genera and species attached directly under a class get a genera
+  bucket and a species bucket). A non-canonical rank needs at least
+  `--min-subclades-per-bucket` members to earn its own bucket.
+- **Rare-taxa (`virtual_rare_taxa`)** — children with too few distinct genomes
+  (below `--min-leaves-per-class`) lack the *diversity* to train a class. This
+  is independent of capacity: a single very large genome is high-capacity yet
+  still rare, because it is one source.
+- **Low-capacity** — the percentile-cutoff tail above merges here so it cannot
+  starve the head.
+
+### Splitting: whole genomes, leakage-safe
+
+![Splitting: assign whole genomes to train/val/test when there are at least three; otherwise slice one sequence positionally](docs/figures/split_distribution.png)
+
+The per-class budget is distributed across a class's genomes in proportion to
+their length, so longer genomes contribute more windows. The train/val/test
+split is **by whole genome** whenever a class has at least three genomes: each
+genome is assigned entirely to a single split, so no sliding window is ever
+shared between splits — there is no leakage. Only when a class has fewer than
+three genomes does it fall back to slicing a single sequence positionally
+(70 / 15 / 15), accepting some intra-genome leakage as the price of having any
+data at all for that class.
+
+### Parameterizing the cascade
+
+![Parameterizing the cascade with --root (where to start) and --stop-at (how deep)](docs/figures/parameterization.png)
+
+Two parameters shape the generated cascade. `--root` chooses where it starts: a
+domain shortcut (`viruses`, `bacteria`, `archaea`, `eukaryotes`), a numeric NCBI
+TaxID, or a clade scientific name (e.g. `Caudoviricetes`). `--stop-at` chooses
+how deep heads are created — nodes deeper than the given canonical rank still
+become training labels, but not heads of their own — while `--single-level`
+generates only the root's head. Every node from `--root` down to `--stop-at`
+becomes one balanced classifier; each head classifies its direct children into a
+single balanced train/val/test dataset.
+
+The figures above are generated, reproducibly and from no external data, by
+`python docs/make_figures.py`.
+
 ## Requirements
 
 - Python 3.11
@@ -67,14 +176,16 @@ decision-point cascade to decide heads, buckets, and passthroughs, and writes
 the balanced Parquet shards plus the sidecar manifests.
 
 ```
-python3 -m taxotreeset generate --rank viruses
+python3 -m taxotreeset generate --root viruses
 ```
 
 Key options:
 
 | Option                   | Default       | Purpose                                                        |
 |--------------------------|---------------|----------------------------------------------------------------|
-| `--rank, -g`             | viruses       | Target biological domain scope                                 |
+| `--root, -g`             | viruses       | Where the cascade starts: domain shortcut, NCBI TaxID, or clade name |
+| `--stop-at`              | (deepest)     | Canonical rank where heads stop; deeper taxa become labels only |
+| `--single-level`         | off           | Generate only the root's head (no recursion into children)     |
 | `--output, -o`           | data/datasets | Output directory for shards and manifests                      |
 | `--max-subseq-len, -w`   | 2000          | Sliding-window size (bp) for subsequence extraction            |
 | `--approximate-capacity` | off           | Bloom filter for capacity (~12MB, ~1% error); default is exact, memory-bounded |
