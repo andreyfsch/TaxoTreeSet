@@ -14,7 +14,6 @@ from taxotreeset.core.generation.capacity import (
     _read_sequence_cached,
     _resolve_bottom_up_threshold,
     _SEQUENCE_CACHE,
-    _SEQUENCE_CACHE_MAX_ENTRIES,
     _HASHED_DISK_THRESHOLD,
     _NodeCapacityKeys,
     _encode_windows_2bit,
@@ -296,7 +295,10 @@ class TestNodeCapacityKeysMemoryMode:
     def test_from_sequence_leaf_too_short_returns_empty(self):
         leaf = _seq_leaf("l", "NC_001")
         vd = _void_dtype(4)
-        with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="ACG"):
+        with patch(
+            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            return_value="ACG",
+        ):
             acc = _NodeCapacityKeys.from_sequence_leaf(leaf, 4, vd, _BIG_THRESHOLD)
         assert acc.cardinality() == 0
         acc.release()
@@ -305,7 +307,10 @@ class TestNodeCapacityKeysMemoryMode:
         # "ACGTACGT" → 5 windows, 4 unique 4-mers
         leaf = _seq_leaf("l", "NC_001")
         vd = _void_dtype(4)
-        with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="ACGTACGT"):
+        with patch(
+            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            return_value="ACGTACGT",
+        ):
             acc = _NodeCapacityKeys.from_sequence_leaf(leaf, 4, vd, _BIG_THRESHOLD)
         assert acc.cardinality() == 4
         assert not acc._on_disk
@@ -315,7 +320,10 @@ class TestNodeCapacityKeysMemoryMode:
         # "NNNN" → 1 window, all-ambiguous → 0 pure keys, 1 ambiguous string
         leaf = _seq_leaf("l", "NC_001")
         vd = _void_dtype(4)
-        with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="NNNN"):
+        with patch(
+            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            return_value="NNNN",
+        ):
             acc = _NodeCapacityKeys.from_sequence_leaf(leaf, 4, vd, _BIG_THRESHOLD)
         assert acc.cardinality() == 1
         acc.release()
@@ -323,7 +331,10 @@ class TestNodeCapacityKeysMemoryMode:
     def test_release_drops_keys(self):
         leaf = _seq_leaf("l", "NC_001")
         vd = _void_dtype(4)
-        with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="ACGTACGT"):
+        with patch(
+            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            return_value="ACGTACGT",
+        ):
             acc = _NodeCapacityKeys.from_sequence_leaf(leaf, 4, vd, _BIG_THRESHOLD)
         acc.release()
         assert acc._pure_keys is None
@@ -367,7 +378,10 @@ class TestNodeCapacityKeysMemoryMode:
         # Single child → passthrough: original accumulator's keys move to the returned one
         vd = _void_dtype(4)
         leaf = _seq_leaf("l", "NC_001")
-        with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="ACGTACGT"):
+        with patch(
+            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            return_value="ACGTACGT",
+        ):
             acc = _NodeCapacityKeys.from_sequence_leaf(leaf, 4, vd, _BIG_THRESHOLD)
         card_before = acc.cardinality()
         merged = _NodeCapacityKeys.merge([acc], vd, _BIG_THRESHOLD)
@@ -380,7 +394,10 @@ class TestNodeCapacityKeysMemoryMode:
         # Both children have 0 pure keys → memory_arrays=[] → empty array branch (line 346)
         vd = _void_dtype(4)
         leaf1, leaf2 = _seq_leaf("l1", "NC_001"), _seq_leaf("l2", "NC_002")
-        with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="NNNN"):
+        with patch(
+            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            return_value="NNNN",
+        ):
             acc1 = _NodeCapacityKeys.from_sequence_leaf(leaf1, 4, vd, _BIG_THRESHOLD)
             acc2 = _NodeCapacityKeys.from_sequence_leaf(leaf2, 4, vd, _BIG_THRESHOLD)
         # Both accs have 0 pure keys (all-N sequence), 1 ambiguous each
@@ -404,7 +421,10 @@ class TestNodeCapacityKeysDiskMode:
     def test_leaf_with_any_pure_keys_spills_when_threshold_is_one(self):
         leaf = _seq_leaf("l", "NC_001")
         vd = _void_dtype(4)
-        with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="ACGTACGT"):
+        with patch(
+            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            return_value="ACGTACGT",
+        ):
             acc = _NodeCapacityKeys.from_sequence_leaf(leaf, 4, vd, disk_threshold=1)
         assert acc._on_disk
         acc.release()
@@ -426,7 +446,10 @@ class TestNodeCapacityKeysDiskMode:
         import os
         leaf = _seq_leaf("l", "NC_001")
         vd = _void_dtype(4)
-        with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="ACGTACGT"):
+        with patch(
+            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            return_value="ACGTACGT",
+        ):
             acc = _NodeCapacityKeys.from_sequence_leaf(leaf, 4, vd, disk_threshold=1)
         tmp_dir = acc._tmp_dir
         assert os.path.isdir(tmp_dir)
@@ -482,24 +505,36 @@ class TestCapacityExact:
 
     def test_leaf_with_short_sequence_is_skipped(self):
         leaf = _seq_leaf("l", "NC_001")
-        with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="ACG"):
+        with patch(
+            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            return_value="ACG",
+        ):
             assert _capacity_exact([leaf], min_len=4) == 0
 
     def test_pure_acgt_count_is_exact(self):
         leaf = _seq_leaf("l", "NC_001")
-        with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="ACGTACGT"):
+        with patch(
+            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            return_value="ACGTACGT",
+        ):
             assert _capacity_exact([leaf], min_len=4) == 4
 
     def test_ambiguous_windows_counted_via_string_set(self):
         # "ACNN" (4 chars, 1 window): entirely ambiguous → result = 1
         leaf = _seq_leaf("l", "NC_001")
-        with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="ACNN"):
+        with patch(
+            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            return_value="ACNN",
+        ):
             assert _capacity_exact([leaf], min_len=4) == 1
 
     def test_mixed_pure_and_ambiguous_windows(self):
         # "ACGTN" → 2 windows: "ACGT" pure + "CGTN" ambiguous → total 2
         leaf = _seq_leaf("l", "NC_001")
-        with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="ACGTN"):
+        with patch(
+            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            return_value="ACGTN",
+        ):
             assert _capacity_exact([leaf], min_len=4) == 2
 
     def test_early_stop_returns_when_compaction_exceeds_threshold(self):
@@ -508,7 +543,10 @@ class TestCapacityExact:
         # max_useful=1 → early_stop_threshold=5; compacted unique (5) >= 5 → early return.
         leaf = _seq_leaf("l", "NC_001")
         with patch("taxotreeset.core.generation.capacity._HASHED_FLUSH_THRESHOLD", 3):
-            with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="ACGTCGTA"):
+            with patch(
+                "taxotreeset.core.generation.capacity._read_sequence_cached",
+                return_value="ACGTCGTA",
+            ):
                 result = _capacity_exact([leaf], min_len=4, max_useful=1)
         assert result == 5  # returned at early stop, count is correct
 
@@ -571,7 +609,7 @@ class TestCapacityExact:
         assert result == 4
 
     def test_finally_block_closes_open_handles_on_disk_processing_exception(self):
-        """Handles in finally are closed when exception interrupts disk-mode flushing (lines 835, 879)."""
+        """Open handles are closed in finally when disk-mode flushing raises."""
         leaf1, leaf2 = _seq_leaf("l1", "NC_001"), _seq_leaf("l2", "NC_002")
         flush_call_count = [0]
         original_flush = cap_module._flush_keys_to_buckets
@@ -688,12 +726,18 @@ class TestCapacityApproximate:
 
     def test_leaf_with_short_sequence_is_skipped(self):
         leaf = _seq_leaf("l", "NC_001")
-        with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="ACG"):
+        with patch(
+            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            return_value="ACG",
+        ):
             assert _capacity_approximate([leaf], min_len=4) == 0
 
     def test_returns_positive_for_real_sequence(self):
         leaf = _seq_leaf("l", "NC_001")
-        with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="ACGTACGT"):
+        with patch(
+            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            return_value="ACGTACGT",
+        ):
             assert _capacity_approximate([leaf], min_len=4) >= 1
 
     def test_early_stop_fires_before_all_leaves_processed(self, caplog):
@@ -714,7 +758,10 @@ class TestCapacityApproximate:
         import logging
         # Patch progress interval to 1 so the log fires after each leaf
         leaf = _seq_leaf("l", "NC_001")
-        with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="ACGTACGT"):
+        with patch(
+            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            return_value="ACGTACGT",
+        ):
             with patch("taxotreeset.core.generation.capacity._PROGRESS_LOG_INTERVAL", 1):
                 with caplog.at_level(logging.INFO, logger="TaxoTreeSet"):
                     _capacity_approximate([leaf], min_len=4)
@@ -804,7 +851,10 @@ class TestComputeNodeCapacity:
         parent.rank = "genus"
         leaf = _seq_leaf("l", "NC_001")
         leaf.parent = parent
-        with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="ACGTACGT"):
+        with patch(
+            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            return_value="ACGTACGT",
+        ):
             result = compute_node_capacity(parent, min_len=4, leaf_cache={}, mode="exact")
         assert result == 4
 
@@ -813,7 +863,10 @@ class TestComputeNodeCapacity:
         parent.rank = "genus"
         leaf = _seq_leaf("l", "NC_001")
         leaf.parent = parent
-        with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="ACGTACGT"):
+        with patch(
+            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            return_value="ACGTACGT",
+        ):
             result = compute_node_capacity(parent, min_len=4, leaf_cache={}, mode="approximate")
         assert result >= 1
 
@@ -823,7 +876,10 @@ class TestComputeNodeCapacity:
         # No children attached — the cache provides the leaves directly
         leaf = _seq_leaf("l", "NC_001")
         leaf_cache = {"root": [leaf]}
-        with patch("taxotreeset.core.generation.capacity._read_sequence_cached", return_value="ACGTACGT"):
+        with patch(
+            "taxotreeset.core.generation.capacity._read_sequence_cached",
+            return_value="ACGTACGT",
+        ):
             result = compute_node_capacity(parent, min_len=4, leaf_cache=leaf_cache, mode="exact")
         assert result == 4
 
@@ -877,16 +933,22 @@ class TestCleanupSpillDirs:
         spill = tmp_path / "spill"
         spill.mkdir()
 
-        root = Node("root"); root.rank = "superkingdom"
-        sp = Node("sp1", parent=root); sp.rank = "species"
-        leaf = Node("leaf1", parent=sp); leaf.rank = "sequence"
-        leaf.fasta_path = "fake"; leaf.header_id = "HDR1"
+        root = Node("root")
+        root.rank = "superkingdom"
+        sp = Node("sp1", parent=root)
+        sp.rank = "species"
+        leaf = Node("leaf1", parent=sp)
+        leaf.rank = "sequence"
+        leaf.fasta_path = "fake"
+        leaf.header_id = "HDR1"
 
         with patch(
             "taxotreeset.core.generation.capacity._leaf_worker_task",
             return_value=("leaf1", False, b"", 0, 13, None),
         ):
-            compute_all_capacities(root, min_len=100, spill_dir=str(spill), n_workers=1, n_gpu_workers=0)
+            compute_all_capacities(
+                root, min_len=100, spill_dir=str(spill), n_workers=1, n_gpu_workers=0
+            )
 
         leftover = list(spill.glob("tts_capacity_*"))
         assert leftover == [], f"Spill dirs not cleaned up: {leftover}"
@@ -900,16 +962,22 @@ class TestCleanupSpillDirs:
         orphan = spill / "tts_capacity_orphan123"
         orphan.mkdir()
 
-        root = Node("root"); root.rank = "superkingdom"
-        sp = Node("sp1", parent=root); sp.rank = "species"
-        leaf = Node("leaf1", parent=sp); leaf.rank = "sequence"
-        leaf.fasta_path = "fake"; leaf.header_id = "HDR1"
+        root = Node("root")
+        root.rank = "superkingdom"
+        sp = Node("sp1", parent=root)
+        sp.rank = "species"
+        leaf = Node("leaf1", parent=sp)
+        leaf.rank = "sequence"
+        leaf.fasta_path = "fake"
+        leaf.header_id = "HDR1"
 
         with patch(
             "taxotreeset.core.generation.capacity._leaf_worker_task",
             return_value=("leaf1", False, b"", 0, 13, None),
         ):
-            compute_all_capacities(root, min_len=100, spill_dir=str(spill), n_workers=1, n_gpu_workers=0)
+            compute_all_capacities(
+                root, min_len=100, spill_dir=str(spill), n_workers=1, n_gpu_workers=0
+            )
 
         assert not orphan.exists(), "Orphaned spill dir was not cleaned up"
 
@@ -1012,7 +1080,7 @@ class TestFlatBinEviction:
         The single-file architecture issues one sequential write per eviction
         event at ~100 MB/s.
         """
-        from unittest.mock import patch, call as mock_call
+        from unittest.mock import patch
 
         n = 8
         seq = self._seq_of(50)

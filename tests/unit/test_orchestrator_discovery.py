@@ -1,6 +1,5 @@
 """Tests for taxotreeset.core.orchestrator — DiscoveryOrchestrator pure helpers."""
 
-import io
 import json
 import subprocess
 from unittest.mock import MagicMock, patch
@@ -534,7 +533,6 @@ class TestDiscoverFromRootEarlyReturn:
 
 class TestLogApiKeyStatus:
     def test_logs_when_api_key_env_var_is_set(self, monkeypatch):
-        import logging
         monkeypatch.setenv("NCBI_API_KEY", "fake_api_key_12345")
         with patch("taxotreeset.core.orchestrator.logger") as mock_logger:
             DiscoveryOrchestrator._log_api_key_status()

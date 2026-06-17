@@ -178,36 +178,6 @@ class TestCapacityCache:
         assert loaded == {"A": 1, "B": 2}
 
 
-class TestInvalidateAncestorCapacities:
-    def _populate(self, reg):
-        lineage = [
-            {"taxid": "10239", "rank": "superkingdom", "name": "Viruses"},
-            {"taxid": "11118", "rank": "family", "name": "Coronaviridae"},
-        ]
-        reg.registry["lineages"]["12227"] = lineage
-        reg.registry["capacities"] = {
-            "10239": {"100": 9000},
-            "11118": {"100": 4000},
-            "99999": {"100": 1000},
-        }
-
-    def test_ancestor_capacities_removed_on_invalidation(self, reg):
-        self._populate(reg)
-        reg._invalidate_ancestor_capacities("12227")
-        assert "10239" not in reg.registry["capacities"]
-        assert "11118" not in reg.registry["capacities"]
-
-    def test_unrelated_taxid_not_removed(self, reg):
-        self._populate(reg)
-        reg._invalidate_ancestor_capacities("12227")
-        assert "99999" in reg.registry["capacities"]
-
-    def test_missing_lineage_is_a_noop(self, reg):
-        reg.registry["capacities"]["10239"] = {"100": 5000}
-        reg._invalidate_ancestor_capacities("99999")
-        assert "10239" in reg.registry["capacities"]
-
-
 # ---------------------------------------------------------------------------
 # get_pending_volume
 # ---------------------------------------------------------------------------
@@ -429,6 +399,34 @@ class TestSave:
 
 
 class TestInvalidateAncestorCapacities:
+    def _populate(self, reg):
+        lineage = [
+            {"taxid": "10239", "rank": "superkingdom", "name": "Viruses"},
+            {"taxid": "11118", "rank": "family", "name": "Coronaviridae"},
+        ]
+        reg.registry["lineages"]["12227"] = lineage
+        reg.registry["capacities"] = {
+            "10239": {"100": 9000},
+            "11118": {"100": 4000},
+            "99999": {"100": 1000},
+        }
+
+    def test_ancestor_capacities_removed_on_invalidation(self, reg):
+        self._populate(reg)
+        reg._invalidate_ancestor_capacities("12227")
+        assert "10239" not in reg.registry["capacities"]
+        assert "11118" not in reg.registry["capacities"]
+
+    def test_unrelated_taxid_not_removed(self, reg):
+        self._populate(reg)
+        reg._invalidate_ancestor_capacities("12227")
+        assert "99999" in reg.registry["capacities"]
+
+    def test_missing_lineage_is_a_noop(self, reg):
+        reg.registry["capacities"]["10239"] = {"100": 5000}
+        reg._invalidate_ancestor_capacities("99999")
+        assert "10239" in reg.registry["capacities"]
+
     def test_removes_ancestor_capacity_from_cache(self, reg):
         lineage = [
             {"taxid": "2697049", "rank": "species", "name": "SARS"},

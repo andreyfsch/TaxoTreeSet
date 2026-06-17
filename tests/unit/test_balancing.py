@@ -4,7 +4,6 @@ All tests use capacity_override and rare_taxa_strategy='keep' to avoid
 requiring actual sequence data or LMDB access.
 """
 
-import pytest
 from bigtree import Node
 from taxotreeset.core.generation.balancing import (
     _compute_n_per_class_from_retained,
@@ -150,7 +149,10 @@ class TestCutoffAppliedScenario:
         parent = _node("root", rank="genus")
         names = list(range(10))
         children = [_node(str(i), parent=parent) for i in names]
-        caps = {str(i): v for i, v in enumerate([50, 100, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000])}
+        caps = {
+            str(i): v
+            for i, v in enumerate([50, 100, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000])
+        }
         return parent, children, caps
 
     def test_scenario_label_is_cutoff_applied(self):
@@ -400,14 +402,18 @@ class TestPartitionByLeafCount:
 
         lean_child = _node("99", parent=parent)
         children = rich_children + [lean_child]
-        eligible, rare = _partition_by_leaf_count(children, {}, min_leaves_per_class=3, rare_taxa_strategy="fallback")
+        eligible, rare = _partition_by_leaf_count(
+            children, {}, min_leaves_per_class=3, rare_taxa_strategy="fallback"
+        )
         assert lean_child in rare
         assert lean_child not in eligible
 
     def test_fallback_gate_when_fewer_than_two_eligible(self):
         parent = _node("root")
         children = [_node(str(i), parent=parent) for i in range(2)]
-        eligible, rare = _partition_by_leaf_count(children, {}, min_leaves_per_class=10, rare_taxa_strategy="fallback")
+        eligible, rare = _partition_by_leaf_count(
+            children, {}, min_leaves_per_class=10, rare_taxa_strategy="fallback"
+        )
         assert len(eligible) == 2
         assert rare == []
 
@@ -534,7 +540,8 @@ class TestCacheAndLeafCountCorrectness:
         # Its taxid is a synthetic ID NOT in capacity_override.
         # Its ONE bigtree child IS in capacity_override.
         virtual_bucket = _node("9SYNTHETIC", rank="virtual_misc", parent=parent)
-        absorbed_child = _node("2840056", rank="class", parent=virtual_bucket)
+        # The absorbed child node attaches to the virtual bucket (side effect).
+        _node("2840056", rank="class", parent=virtual_bucket)
 
         all_children = kingdoms + [virtual_bucket]
         caps = {
@@ -543,7 +550,7 @@ class TestCacheAndLeafCountCorrectness:
             "2731360": 293_454_005,
             "2732397":  1_614_908,
             "2732005": 52_212_643,
-            "2840056": 15_327_937,  # Naldaviricetes — present via absorbed_child
+            "2840056": 15_327_937,  # Naldaviricetes — present via the absorbed child
             # "9SYNTHETIC" intentionally absent — simulates the production bug
         }
 

@@ -2,7 +2,6 @@
 
 from unittest.mock import patch
 
-import pytest
 from bigtree import Node
 from taxotreeset.core.generation.distribution import (
     _allocate_n_across_leaves,

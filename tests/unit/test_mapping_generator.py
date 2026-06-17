@@ -1,6 +1,5 @@
 """Tests for taxotreeset.dataset.mapping_generator — DynamicMappingGenerator."""
 
-import pytest
 from bigtree import Node
 from taxotreeset.dataset.mapping_generator import DynamicMappingGenerator
 

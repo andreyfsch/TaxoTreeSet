@@ -2,7 +2,6 @@
 
 from unittest.mock import patch
 
-import pytest
 from bigtree import Node
 from taxotreeset.dataset.analyzer import TaxonDiversityAnalyzer
 

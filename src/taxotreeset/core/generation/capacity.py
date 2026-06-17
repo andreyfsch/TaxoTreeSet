@@ -57,6 +57,7 @@ Typical usage::
 import contextlib
 import logging
 import math
+from typing import TYPE_CHECKING
 
 from tqdm import tqdm
 
@@ -65,6 +66,9 @@ from taxotreeset.core.generation.constants import (
     BLOOM_FALSE_POSITIVE_RATE,
 )
 from taxotreeset.dataset.utils import _read_single_sequence
+
+if TYPE_CHECKING:
+    import numpy as np
 
 logger = logging.getLogger("TaxoTreeSet.Core.Generation.Capacity")
 
@@ -729,7 +733,11 @@ def _load_leaf_checkpoint(
             if not os.path.exists(fpath):
                 return None
             raw = np.fromfile(fpath, dtype=void_dtype)
-            result[name] = _NodeCapacityKeys(raw.copy() if raw.size else np.empty((0,), dtype=void_dtype), amb, kb)
+            result[name] = _NodeCapacityKeys(
+                raw.copy() if raw.size else np.empty((0,), dtype=void_dtype),
+                amb,
+                kb,
+            )
 
     return result or None
 

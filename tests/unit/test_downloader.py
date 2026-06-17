@@ -683,7 +683,6 @@ class TestPersistSequencesToLmdb:
 
     def test_writes_compressed_sequences_to_lmdb(self, tmp_path):
         # Covers lines 572-575: real LMDB env → txn.put compressed data
-        import os
         lmdb_dir = tmp_path / "sequences.lmdb"
         lmdb_dir.mkdir()
         env = lmdb.open(str(lmdb_dir), map_size=1024 * 1024)

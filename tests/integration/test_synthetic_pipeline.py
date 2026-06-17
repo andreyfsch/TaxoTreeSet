@@ -9,7 +9,6 @@ import json
 import zlib
 from pathlib import Path
 
-import lmdb
 import pytest
 
 from taxotreeset.core.generation.balancing import compute_balanced_extraction_plan
@@ -93,7 +92,7 @@ class TestTreeConstruction:
 
     def test_sequence_leaves_are_attached(self, tree_root):
         all_leaves = list(tree_root.leaves)
-        seq_leaves = [l for l in all_leaves if getattr(l, "rank", "") == "sequence"]
+        seq_leaves = [leaf for leaf in all_leaves if getattr(leaf, "rank", "") == "sequence"]
         assert len(seq_leaves) == 3
 
     def test_sequence_leaves_carry_fasta_path(self, tree_root, synthetic_env):
@@ -132,8 +131,8 @@ class TestTreeConstruction:
             domain_taxid=synthetic_env["domain_taxid"],
             mapping_path=synthetic_env["mapping_path"],
         )
-        leaves1 = {l.name for l in root1.leaves}
-        leaves2 = {l.name for l in root2.leaves}
+        leaves1 = {leaf.name for leaf in root1.leaves}
+        leaves2 = {leaf.name for leaf in root2.leaves}
         assert leaves1 == leaves2
 
 

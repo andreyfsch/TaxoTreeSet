@@ -1,6 +1,5 @@
 """Tests for taxotreeset.dataset.builder — DatasetBuilder and worker helpers."""
 
-import multiprocessing
 from unittest.mock import patch
 
 import pyarrow as pa
@@ -13,7 +12,6 @@ from taxotreeset.dataset.builder import (
     _buffer_to_arrow_table,
     _extract_subseqs_for_task,
     _write_split_parquet,
-    extract_parent_node_worker,
 )
 
 _MOCK_READ = "taxotreeset.dataset.builder._read_single_sequence"
@@ -373,7 +371,7 @@ class TestBuildNodeDatasetSerial:
         assert results == []
 
     def test_serial_mode_produces_parquet_when_tasks_non_empty(self, builder, tmp_path):
-        import pyarrow.parquet as pq, os
+        import os
 
         output_dir = str(tmp_path / "head")
         os.makedirs(output_dir)

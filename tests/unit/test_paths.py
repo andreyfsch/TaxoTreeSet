@@ -1,9 +1,7 @@
 """Tests for taxotreeset.paths — XDG-compliant path resolution."""
 
-import os
 from pathlib import Path
 
-import pytest
 from taxotreeset.paths import (
     _xdg_base,
     config_dir,

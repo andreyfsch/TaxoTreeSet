@@ -73,7 +73,11 @@ def _fake_lineage_for(taxid: int) -> list:
     """Return a canonical species-to-superkingdom lineage for known taxids."""
     if taxid == _SARS_COV2_TAXID:
         return [
-            _fake_ancestor(_SARS_COV2_TAXID, "species", "Severe acute respiratory syndrome coronavirus 2"),
+            _fake_ancestor(
+                _SARS_COV2_TAXID,
+                "species",
+                "Severe acute respiratory syndrome coronavirus 2",
+            ),
             _fake_ancestor(694002, "subgenus", "Sarbecovirus"),
             _fake_ancestor(11118, "family", "Coronaviridae"),
             _fake_ancestor(10239, "superkingdom", "Viruses"),
@@ -94,7 +98,11 @@ class _FakeTaxon:
         self._taxid = taxid
         lineage = _fake_lineage_for(taxid)
         self._lineage = lineage if lineage else []
-        self._self = self._lineage[0] if self._lineage else _fake_ancestor(taxid, "no_rank", str(taxid))
+        self._self = (
+            self._lineage[0]
+            if self._lineage
+            else _fake_ancestor(taxid, "no_rank", str(taxid))
+        )
 
     @property
     def tax_id(self) -> int:

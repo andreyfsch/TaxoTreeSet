@@ -2,7 +2,6 @@
 
 import logging
 
-import pytest
 from taxotreeset.logging_utils import (
     _TqdmCompatibleStreamHandler,
     get_ui_logger,

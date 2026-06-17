@@ -116,7 +116,11 @@ def compute_head_separability(
     seqs_tr, y_tr = _read_split(head_dir, "train")
     seqs_te, y_te = _read_split(head_dir, "test")
 
-    n_classes = int(len(np.unique(np.concatenate([y_tr, y_te])))) if len(y_te) else int(len(np.unique(y_tr)))
+    n_classes = (
+        int(len(np.unique(np.concatenate([y_tr, y_te]))))
+        if len(y_te)
+        else int(len(np.unique(y_tr)))
+    )
     chance = round(1.0 / n_classes, 4) if n_classes else None
 
     if len(np.unique(y_tr)) < 2:

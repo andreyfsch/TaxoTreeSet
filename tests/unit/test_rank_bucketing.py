@@ -1,6 +1,5 @@
 """Tests for taxotreeset.core.generation.rank_bucketing.classify_children_by_rank."""
 
-import pytest
 from bigtree import Node
 from taxotreeset.core.generation.rank_bucketing import classify_children_by_rank
 from taxotreeset.core.generation.virtual_id import make_virtual_id
@@ -156,7 +155,9 @@ class TestMixedRanksMiscBucket:
         parent = _node("1000", rank="class")
         canonical = [_node(str(i), rank="order", parent=parent) for i in range(7)]
         rare = [_node(str(i + 100), rank="family", parent=parent) for i in range(2)]
-        effective, _ = classify_children_by_rank(parent, canonical + rare, min_subclades_per_bucket=5)
+        effective, _ = classify_children_by_rank(
+            parent, canonical + rare, min_subclades_per_bucket=5
+        )
         misc_nodes = [c for c in effective if getattr(c, "rank", "") == "virtual_misc"]
         assert len(misc_nodes) == 1
 

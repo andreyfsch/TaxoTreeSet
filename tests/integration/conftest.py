@@ -17,7 +17,6 @@ capacity tests are stable across runs.
 
 import json
 import zlib
-from pathlib import Path
 
 import lmdb
 import pytest
@@ -32,7 +31,11 @@ _SPECIES = {
         "accession": "GCF_001",
         "header": "NC_045512",
         "lineage": [
-            {"taxid": "2697049", "rank": "species", "name": "Severe acute respiratory syndrome coronavirus 2"},
+            {
+                "taxid": "2697049",
+                "rank": "species",
+                "name": "Severe acute respiratory syndrome coronavirus 2",
+            },
             {"taxid": "11118", "rank": "family", "name": "Coronaviridae"},
             {"taxid": "10239", "rank": "superkingdom", "name": "Viruses"},
         ],

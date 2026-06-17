@@ -24,7 +24,6 @@ import pyarrow.parquet as pq
 import pytest
 
 from taxotreeset.core.generation.capacity import compute_all_capacities
-from taxotreeset.core.generation.balancing import compute_balanced_extraction_plan
 from taxotreeset.dataset.builder import DatasetBuilder
 from taxotreeset.dataset.tree_builder import generate_seqs_by_taxon_tree
 from taxotreeset.io.downloader import NCBIDownloader
@@ -197,8 +196,8 @@ class TestAcceptanceTreeConstruction:
 
     def test_sequence_leaf_attached_with_correct_header(self, tree_root):
         all_leaves = list(tree_root.leaves)
-        seq_leaves = [l for l in all_leaves if getattr(l, "rank", "") == "sequence"]
-        header_ids = {getattr(l, "header_id", None) for l in seq_leaves}
+        seq_leaves = [leaf for leaf in all_leaves if getattr(leaf, "rank", "") == "sequence"]
+        header_ids = {getattr(leaf, "header_id", None) for leaf in seq_leaves}
         assert _SARS_COV2_HEADER in header_ids
 
 
@@ -244,7 +243,10 @@ class TestAcceptanceDatasetMaterialization:
     def test_can_compute_balanced_plan(self, tree_root, all_capacities):
         species_node = self._get_species_node(tree_root)
         assert species_node is not None
-        seq_leaves = [l for l in species_node.leaves if getattr(l, "rank", "") == "sequence"]
+        seq_leaves = [
+            leaf for leaf in species_node.leaves
+            if getattr(leaf, "rank", "") == "sequence"
+        ]
         assert len(seq_leaves) >= 1
 
     def test_builder_produces_parquet_files(self, tree_root, all_capacities, sars_dataset_dir):
@@ -262,7 +264,10 @@ class TestAcceptanceDatasetMaterialization:
         )
         splits = builder.prepare_stratified_split([species_node])
 
-        seq_leaves = [l for l in species_node.leaves if getattr(l, "rank", "") == "sequence"]
+        seq_leaves = [
+            leaf for leaf in species_node.leaves
+            if getattr(leaf, "rank", "") == "sequence"
+        ]
         leaf = seq_leaves[0]
         tasks = {
             split_name: [
@@ -286,7 +291,9 @@ class TestAcceptanceDatasetMaterialization:
         train_path = os.path.join(output_dir, "train.parquet")
         assert os.path.exists(train_path)
 
-    def test_parquet_sequences_are_within_length_bounds(self, tree_root, all_capacities, sars_dataset_dir):
+    def test_parquet_sequences_are_within_length_bounds(
+        self, tree_root, all_capacities, sars_dataset_dir
+    ):
         output_dir = os.path.join(sars_dataset_dir, str(_SARS_COV2_TAXID))
         train_path = os.path.join(output_dir, "train.parquet")
         if not os.path.exists(train_path):

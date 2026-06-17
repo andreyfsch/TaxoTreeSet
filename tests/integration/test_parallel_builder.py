@@ -8,7 +8,6 @@ worker pool produces Parquet output files.
 import os
 
 import pyarrow.parquet as pq
-import pytest
 
 from taxotreeset.dataset.builder import DatasetBuilder
 

@@ -106,7 +106,8 @@ class TestEnrichLabelMap:
 class TestSurveyDataset:
     def test_survey_enriches_and_returns_rows(self, tmp_path):
         head_a = _make_head(tmp_path / "a", separable=True)
-        head_b = _make_head(tmp_path / "b", separable=False)
+        # Second head exists only so survey_dataset finds two (side effect).
+        _make_head(tmp_path / "b", separable=False)
         rows = separability.survey_dataset(str(tmp_path), k=3)
         assert len(rows) == 2
         assert all("test_f1_macro" in r and "head_taxid" in r for r in rows)
