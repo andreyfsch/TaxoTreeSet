@@ -211,6 +211,33 @@ Stage 2 produces, under the output directory:
 These three JSON files are the contract with downstream training and evaluation
 code.
 
+## Example: fine-tuning a head
+
+`examples/finetune_head.py` is a reference consumer of the generated shards: it
+fine-tunes a LoRA adapter on top of DNABERT-2 for a single head and writes the
+adapter, `metrics.json`, and `run_config.json`.
+
+It is **not part of the `taxotreeset` package** and is deliberately excluded
+from the package's dependencies — training pulls in a heavy, hardware-specific
+stack (PyTorch, Transformers, PEFT, ...) that has no place in a data-generation
+tool. Install those separately in your own environment:
+
+```
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+pip install transformers peft datasets scikit-learn accelerate sentencepiece
+```
+
+```
+python examples/finetune_head.py \
+    --data-dir   data/datasets/<lineage>/<taxid> \
+    --output-dir runs/<taxid>
+```
+
+The data directory is any head directory produced by `generate` (it must contain
+`train.parquet` / `val.parquet` / `test.parquet` with columns `seq` and
+`class_idx`). Treat the script as a starting point: copy it into your own project
+and adapt the backbone, hyperparameters, and dependencies for real runs.
+
 ## Architecture
 
 The cascade is a recursive top-down traversal of the taxonomy. For each node it
