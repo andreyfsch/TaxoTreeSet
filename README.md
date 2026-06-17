@@ -426,3 +426,16 @@ steps is illustrated in [How it works](#how-it-works) — see
 - `docs/PLANS/cami_evaluation_plan.md` -- evaluation plan against CAMI II and
   external tools
 - `configs/README.md` -- configuration file reference
+
+## Development
+
+Install the development extras and run the test suite from the repository root:
+
+```
+pip install -e ".[dev]"
+pytest
+```
+
+Coverage is available with `pytest --cov=taxotreeset`, and linting with
+`ruff check src tests`. The README figures are regenerated, from no external
+data, with `python docs/make_figures.py`.
