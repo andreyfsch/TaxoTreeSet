@@ -159,6 +159,7 @@ class DiscoveryOrchestrator:
             checkpoint_interval=checkpoint_interval,
         )
 
+        self.registry.mark_updated()
         self.registry.save()
         logger.info("Metadata registration and tree construction completed.")
 

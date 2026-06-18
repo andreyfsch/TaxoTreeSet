@@ -732,3 +732,18 @@ class TestAccessionSnapshot:
         first = reg.accession_snapshot()["sha256"]
         reg.registry["accessions"] = {"GCF_001.2": {}}  # same assembly, new version
         assert reg.accession_snapshot()["sha256"] != first
+
+
+# ---------------------------------------------------------------------------
+# mark_updated
+# ---------------------------------------------------------------------------
+
+
+class TestMarkUpdated:
+    def test_sets_parseable_utc_timestamp(self, reg):
+        import datetime
+
+        assert reg.registry["last_update"] is None
+        reg.mark_updated()
+        parsed = datetime.datetime.fromisoformat(reg.registry["last_update"])
+        assert parsed.tzinfo is not None

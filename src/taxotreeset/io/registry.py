@@ -32,6 +32,7 @@ Typical usage::
     registry.save()
 """
 
+import datetime
 import hashlib
 import json
 import logging
@@ -485,6 +486,17 @@ class NCBIRegistry:
             json.dump(self.registry, registry_file, indent=2)
 
         logger.debug(f"Registry persisted to: {self.registry_path}")
+
+    def mark_updated(self) -> None:
+        """Stamp the registry with the current UTC time as its last NCBI update.
+
+        Called when discovery refreshes the registry from NCBI, so the snapshot
+        records *when* "the current state of RefSeq" was captured -- part of the
+        provenance that makes a run reproducible.
+        """
+        self.registry["last_update"] = datetime.datetime.now(
+            datetime.timezone.utc
+        ).isoformat()
 
     def accession_snapshot(self) -> dict[str, Any]:
         """Return a reproducible snapshot of the registered accessions.
