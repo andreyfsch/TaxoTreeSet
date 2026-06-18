@@ -5,7 +5,7 @@ NCBI RefSeq for LoRA fine-tuning of genomic language models. It turns a raw
 catalog of genome sequences into a tree of per-node training shards — one
 dataset for each internal taxonomic node, classifying that node's direct
 children — each ready to train a LoRA adapter on top of a foundation model
-backbone such as DNABERT-2.
+backbone such as [DNABERT-2](https://github.com/MAGICS-LAB/DNABERT_2).
 
 ## Overview
 
@@ -24,7 +24,7 @@ capacity-based balancing, a leaf-count cardinality threshold, and curated
 semantic fallbacks. Each mechanism is documented in `docs/GLOSSARY.md`.
 
 The output format (Parquet shards of subsequence/label pairs plus JSON
-manifests) is model-agnostic; DNABERT-2 is the reference backbone but the
+manifests) is model-agnostic; [DNABERT-2](https://github.com/MAGICS-LAB/DNABERT_2) is the reference backbone but the
 datasets can train any sequence classifier.
 
 ## Installation
@@ -210,9 +210,10 @@ data at all for that class.
 
 ![Parameterizing generation with --root (where to start) and --stop-at (how deep)](docs/figures/parameterization.png)
 
-Two parameters shape the generated tree. `--root` chooses where it starts: a
-domain shortcut (`viruses`, `bacteria`, `archaea`, `eukaryotes`), a numeric NCBI
-TaxID, or a clade scientific name (e.g. `Caudoviricetes`). `--stop-at` chooses
+Two parameters shape the generated tree. `--root` chooses where it starts:
+`all` (every domain in the registry), a domain shortcut (`viruses`, `bacteria`,
+`archaea`, `eukaryotes`), a numeric NCBI TaxID, or a clade scientific name (e.g.
+`Caudoviricetes`). `--stop-at` chooses
 how deep heads are created — nodes deeper than the given canonical rank still
 become training labels, but not heads of their own — while `--single-level`
 generates only the root's head. Every node from `--root` down to `--stop-at`
@@ -259,7 +260,7 @@ Key options:
 
 | Option                   | Default       | Purpose                                                        |
 |--------------------------|---------------|----------------------------------------------------------------|
-| `--root, -g`             | viruses       | Where generation starts: domain shortcut, NCBI TaxID, or clade name |
+| `--root, -g`             | viruses       | Where generation starts: `all` (every domain), a domain shortcut, NCBI TaxID, or clade name |
 | `--stop-at`              | (deepest)     | Canonical rank where heads stop; deeper taxa become labels only |
 | `--single-level`         | off           | Generate only the root's head (no recursion into children)     |
 | `--output, -o`           | data/datasets | Output directory for shards and manifests                      |
@@ -379,7 +380,7 @@ each `label_map.json` (a quick estimate of how learnable the head is); plain
 ## Example: fine-tuning a head
 
 `examples/finetune_head.py` is a reference consumer of the generated shards: it
-fine-tunes a LoRA adapter on top of DNABERT-2 for a single head and writes the
+fine-tunes a LoRA adapter on top of [DNABERT-2](https://github.com/MAGICS-LAB/DNABERT_2) for a single head and writes the
 adapter, `metrics.json`, and `run_config.json`.
 
 It is **not part of the `taxotreeset` package** and is deliberately excluded
@@ -423,8 +424,8 @@ steps is illustrated in [How it works](#how-it-works) — see
 - `docs/GLOSSARY.md` -- authoritative definitions of all technical terms
 - `docs/PLANS/caudoviricetes_cardinality.md` -- diagnosis and rationale for the
   rare-taxa cardinality threshold
-- `docs/PLANS/cami_evaluation_plan.md` -- evaluation plan against CAMI II and
-  external tools
+- `docs/DESIGN/` -- design records for implemented subsystems (selective
+  download, registry/vault sync)
 - `configs/README.md` -- configuration file reference
 
 ## Development

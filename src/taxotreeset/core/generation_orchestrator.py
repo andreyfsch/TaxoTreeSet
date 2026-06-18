@@ -116,6 +116,10 @@ _DOMAIN_GROUP_TO_TAXID: dict[str, str] = {
     "eukaryotes": "2759",
 }
 
+# Special root meaning "every domain": no anchor TaxID -- the whole registry is
+# in scope. Resolves to a None domain_taxid throughout the pipeline.
+_ALL_DOMAINS = "all"
+
 _STRATIFIED_TRAIN_RATIO: float = 0.70
 _STRATIFIED_VAL_RATIO: float = 0.15
 _SPLITS: tuple[str, ...] = ("train", "val", "test")
@@ -293,7 +297,14 @@ class GenerationOrchestrator:
             registry=self.registry,
             mapping_config=mapping_config,
         )
-        discovery.discover_from_root(int(domain_taxid))
+        if domain_taxid is None:
+            # "all": re-discover every domain already present in the registry,
+            # so a single-domain registry is not surprised by an unrelated
+            # full-domain crawl. Falls back to all four when empty.
+            for dom_taxid in self._domains_to_sync():
+                discovery.discover_from_root(int(dom_taxid))
+        else:
+            discovery.discover_from_root(int(domain_taxid))
         self._reconcile_vault_against_registry()
 
         pending_volume = self.registry.get_pending_volume(domain_taxid)
@@ -313,7 +324,26 @@ class GenerationOrchestrator:
                 "all pending accessions will be downloaded."
             )
 
-    def _run_selective_download(self, domain_taxid: str) -> None:
+    def _domains_to_sync(self) -> list[str]:
+        """Return the superkingdom TaxIDs to re-discover for an ``all`` sync.
+
+        Restricts to the domains already represented in the registry's
+        stored lineages, so syncing ``all`` over a single-domain registry
+        does not trigger an unrelated full-domain crawl. Falls back to all
+        four superkingdoms when the registry has no lineages yet.
+        """
+        lineages = self.registry.registry.get("lineages", {})
+        present = [
+            taxid
+            for taxid in _DOMAIN_GROUP_TO_TAXID.values()
+            if any(
+                any(a.get("taxid") == taxid for a in stored)
+                for stored in lineages.values()
+            )
+        ]
+        return present or list(_DOMAIN_GROUP_TO_TAXID.values())
+
+    def _run_selective_download(self, domain_taxid: str | None) -> None:
         """Run the estimation pass and defer accessions not needed for Phase 1.
 
         Builds an estimation tree from stored lineages (no vault access
@@ -377,7 +407,7 @@ class GenerationOrchestrator:
         )
 
     def _estimate_capacities_from_registry(
-        self, domain_taxid: str
+        self, domain_taxid: str | None
     ) -> dict[str, int]:
         """Estimate node capacities using total_sequence_length metadata.
 
@@ -395,12 +425,16 @@ class GenerationOrchestrator:
         lineages = self.registry.registry["lineages"]
         accessions = self.registry.registry["accessions"]
         taxons = self.registry.registry["taxons"]
-        domain_str = str(domain_taxid)
+        domain_str = str(domain_taxid) if domain_taxid else None
 
         result: dict[str, int] = {}
         for taxid, acc_list in taxons.items():
             stored = lineages.get(taxid)
-            if not stored or not any(a["taxid"] == domain_str for a in stored):
+            if not stored:
+                continue
+            if domain_str is not None and not any(
+                a["taxid"] == domain_str for a in stored
+            ):
                 continue
             species_cap = sum(
                 int(accessions.get(acc, {}).get("total_sequence_length") or 0)
@@ -415,7 +449,7 @@ class GenerationOrchestrator:
         return result
 
     def _build_scope_accession_index(
-        self, domain_taxid: str
+        self, domain_taxid: str | None
     ) -> tuple[dict[str, int], dict[str, list[tuple[str, bool, int]]]]:
         """Build per-label capacity and pending accession lists for selection.
 
@@ -438,14 +472,18 @@ class GenerationOrchestrator:
         lineages = self.registry.registry["lineages"]
         accessions = self.registry.registry["accessions"]
         taxons = self.registry.registry["taxons"]
-        domain_str = str(domain_taxid)
+        domain_str = str(domain_taxid) if domain_taxid else None
 
         downloaded_cap: dict[str, int] = {}
         pending_index: dict[str, list[tuple[str, bool, int]]] = {}
 
         for taxid, acc_list in taxons.items():
             stored = lineages.get(taxid)
-            if not stored or not any(a["taxid"] == domain_str for a in stored):
+            if not stored:
+                continue
+            if domain_str is not None and not any(
+                a["taxid"] == domain_str for a in stored
+            ):
                 continue
             label_taxids = [taxid] + [a["taxid"] for a in stored]
             for acc_id in acc_list:
@@ -462,7 +500,7 @@ class GenerationOrchestrator:
                         )
         return downloaded_cap, pending_index
 
-    def _collect_scope_pending_accessions(self, domain_taxid: str) -> set[str]:
+    def _collect_scope_pending_accessions(self, domain_taxid: str | None) -> set[str]:
         """Return all pending accession IDs within the given domain scope.
 
         Args:
@@ -474,12 +512,16 @@ class GenerationOrchestrator:
         lineages = self.registry.registry["lineages"]
         accessions = self.registry.registry["accessions"]
         taxons = self.registry.registry["taxons"]
-        domain_str = str(domain_taxid)
+        domain_str = str(domain_taxid) if domain_taxid else None
 
         result: set[str] = set()
         for taxid, acc_list in taxons.items():
             stored = lineages.get(taxid)
-            if not stored or not any(a["taxid"] == domain_str for a in stored):
+            if not stored:
+                continue
+            if domain_str is not None and not any(
+                a["taxid"] == domain_str for a in stored
+            ):
                 continue
             for acc_id in acc_list:
                 info = accessions.get(acc_id, {})
@@ -581,7 +623,7 @@ class GenerationOrchestrator:
                 )
 
     def _run_refinement_pass(
-        self, domain_taxid: str, tree_root: Node
+        self, domain_taxid: str | None, tree_root: Node
     ) -> bool:
         """Check for capacity shortfalls and undefer accessions for the next round.
 
@@ -670,7 +712,7 @@ class GenerationOrchestrator:
         return True
 
     def _build_deferred_accession_index(
-        self, domain_taxid: str
+        self, domain_taxid: str | None
     ) -> dict[str, list[tuple[str, bool, int]]]:
         """Build per-label deferred accession lists for the refinement pass.
 
@@ -690,12 +732,16 @@ class GenerationOrchestrator:
         lineages = self.registry.registry["lineages"]
         accessions = self.registry.registry["accessions"]
         taxons = self.registry.registry["taxons"]
-        domain_str = str(domain_taxid)
+        domain_str = str(domain_taxid) if domain_taxid else None
 
         index: dict[str, list[tuple[str, bool, int]]] = {}
         for taxid, acc_list in taxons.items():
             stored = lineages.get(taxid)
-            if not stored or not any(a["taxid"] == domain_str for a in stored):
+            if not stored:
+                continue
+            if domain_str is not None and not any(
+                a["taxid"] == domain_str for a in stored
+            ):
                 continue
             label_taxids = [taxid] + [a["taxid"] for a in stored]
             for acc_id in acc_list:
@@ -809,13 +855,13 @@ class GenerationOrchestrator:
                 if sync:
                     ui_logger.error(
                         f"No data found for root '{target_group}' "
-                        f"(TaxID {domain_taxid}) after syncing with NCBI. "
+                        f"(TaxID {domain_taxid or 'all'}) after syncing with NCBI. "
                         "Verify the root exists in NCBI RefSeq."
                     )
                 else:
                     ui_logger.error(
                         f"No data found for root '{target_group}' "
-                        f"(TaxID {domain_taxid}) in the registry. Re-run "
+                        f"(TaxID {domain_taxid or 'all'}) in the registry. Re-run "
                         "without --no-sync to discover and download it "
                         "from NCBI."
                     )
@@ -908,28 +954,32 @@ class GenerationOrchestrator:
         ui_logger.info("Pipeline finished successfully.")
 
     @staticmethod
-    def _resolve_root_taxid(target_root: str) -> str:
+    def _resolve_root_taxid(target_root: str) -> str | None:
         """Resolve the generation root to an NCBI TaxID string.
 
-        Accepts a domain shortcut (viruses, bacteria, archaea,
-        eukaryotes), a numeric TaxID, or a clade scientific name. The
-        shortcuts are convenience aliases for the four superkingdom
-        TaxIDs; anything else is resolved via taxoniq with an NCBI
-        fallback.
+        Accepts ``"all"`` (every domain), a domain shortcut (viruses,
+        bacteria, archaea, eukaryotes), a numeric TaxID, or a clade
+        scientific name. The shortcuts are convenience aliases for the four
+        superkingdom TaxIDs; anything else is resolved via taxoniq with an
+        NCBI fallback.
 
         Args:
-            target_root: Domain shortcut, numeric TaxID, or clade name.
+            target_root: ``"all"``, a domain shortcut, a numeric TaxID, or
+                a clade scientific name.
 
         Returns:
-            The resolved NCBI TaxID as a string.
+            The resolved NCBI TaxID as a string, or ``None`` for ``"all"``
+            -- there is no anchor TaxID, so the whole registry is in scope.
 
         Raises:
             ValueError: If the reference cannot be resolved.
         """
+        if target_root == _ALL_DOMAINS:
+            return None
         if target_root in _DOMAIN_GROUP_TO_TAXID:
             return _DOMAIN_GROUP_TO_TAXID[target_root]
         return resolve_to_taxid(target_root)
-    def _build_target_tree(self, domain_taxid: str) -> Node | None:
+    def _build_target_tree(self, domain_taxid: str | None) -> Node | None:
         """Construct the taxonomic tree anchored at the domain TaxID.
 
         Args:
@@ -993,7 +1043,7 @@ class GenerationOrchestrator:
     def _schedule_pipeline_jobs(
         self,
         tree_root: Node,
-        domain_taxid: str,
+        domain_taxid: str | None,
         abundance_threshold: int,
     ) -> dict[str, Any]:
         """Walk the tree and schedule extraction jobs at decision points.
@@ -1035,7 +1085,7 @@ class GenerationOrchestrator:
             self._schedule_decision_point(
                 current_node=domain_node,
                 children_list=children_list,
-                accumulated_path=domain_taxid,
+                accumulated_path=domain_node.name,
                 abundance_threshold=abundance_threshold,
                 extraction_jobs=extraction_jobs,
                 master_manifest=master_manifest,
@@ -1055,16 +1105,23 @@ class GenerationOrchestrator:
         }
 
     @staticmethod
-    def _find_domain_node(tree_root: Node, domain_taxid: str) -> Node | None:
+    def _find_domain_node(
+        tree_root: Node, domain_taxid: str | None
+    ) -> Node | None:
         """Locate the domain anchor node under the tree root.
 
         Args:
             tree_root: Tree root from tree_builder.
-            domain_taxid: NCBI TaxID of the domain.
+            domain_taxid: NCBI TaxID of the domain, or ``None`` for the
+                whole-registry ("all") scope.
 
         Returns:
-            The matching child Node, or None if not found.
+            The matching child Node; ``tree_root`` itself when
+            ``domain_taxid`` is ``None`` (no single anchor); or ``None`` if
+            not found.
         """
+        if domain_taxid is None:
+            return tree_root
         for child in tree_root.children:
             if child.name == domain_taxid:
                 return child

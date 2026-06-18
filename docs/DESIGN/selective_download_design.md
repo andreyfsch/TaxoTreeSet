@@ -1,5 +1,10 @@
 # Design: selective download for large scopes
 
+> **Status: implemented.** This records the design now realized in the
+> pipeline (selective download in sync, the estimate/refine loop, and the
+> injectable capacity source). The one remaining future-work item is the
+> "Out of scope: intra-genome sampling" note at the end.
+
 ## Problem
 
 The pipeline downloads the entire scope (Stage 1), builds the tree

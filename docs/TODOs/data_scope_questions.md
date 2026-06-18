@@ -33,16 +33,16 @@ head adds useful signal: there are only tens to low-hundreds of species
 with very short genomes (~250-400 nt), so the head would be tiny. Decide
 based on the experiment design, not mechanics.
 
-## 3. No single root above the four domains
+## 3. The "all" target group (resolved)
 
 Confirmed via the NCBI Taxonomy Browser: there is no single taxid above
 Viruses, Bacteria, Archaea, and Eukaryotes (and Viroids) to use as a
-universal root. The "all" target group therefore cannot map to one taxid;
-it must iterate the known top-level groups. Relevant to how sync and
-generation handle target_group="all".
+universal root. The "all" target therefore cannot map to one taxid; it must
+iterate the known top-level groups.
 
-Note: target_group="all" is currently a latent bug. The generate --rank
-choices include "all", but _resolve_domain_taxid has no "all" entry and
-raises ValueError, so the pipeline cannot actually run it today. Fixing
-this (iterating the four groups, or introducing a sentinel) belongs with
-the generation-scope parameters work; until then "all" fails fast.
+Resolved: `--root all` now resolves to a `None` domain anchor, so the whole
+registry is in scope via the existing "everything" path, and sync iterates
+the top-level groups. `_domains_to_sync` re-discovers the domains already
+present in the registry, falling back to all four superkingdoms when it is
+empty. (`_resolve_root_taxid` -- formerly `_resolve_domain_taxid` -- returns
+None for "all".)

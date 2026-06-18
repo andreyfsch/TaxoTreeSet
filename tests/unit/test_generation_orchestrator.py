@@ -98,6 +98,35 @@ class TestResolveRootTaxid:
         mock_resolve.assert_called_once_with("Coronaviridae")
         assert result == "11234"
 
+    def test_all_resolves_to_none(self):
+        assert GenerationOrchestrator._resolve_root_taxid("all") is None
+
+
+# ---------------------------------------------------------------------------
+# _domains_to_sync
+# ---------------------------------------------------------------------------
+
+
+class TestDomainsToSync:
+    def test_returns_only_domains_present_in_lineages(self, tmp_path):
+        reg_data = {
+            "taxons": {},
+            "accessions": {},
+            "lineages": {
+                "2697049": [
+                    {"taxid": "2697049", "rank": "species", "name": "Virus"},
+                    {"taxid": "10239", "rank": "superkingdom", "name": "Viruses"},
+                ],
+            },
+            "capacities": {},
+        }
+        orch = _make_orchestrator(tmp_path, reg_data)
+        assert orch._domains_to_sync() == ["10239"]
+
+    def test_falls_back_to_all_four_when_no_lineages(self, tmp_path):
+        orch = _make_orchestrator(tmp_path)
+        assert orch._domains_to_sync() == ["10239", "2", "2157", "2759"]
+
 
 # ---------------------------------------------------------------------------
 # _find_domain_node
@@ -121,6 +150,11 @@ class TestFindDomainNode:
     def test_returns_none_for_empty_root(self):
         root = Node("root")
         assert GenerationOrchestrator._find_domain_node(root, "10239") is None
+
+    def test_returns_root_itself_for_none_domain(self):
+        root = Node("root")
+        Node("10239", parent=root)
+        assert GenerationOrchestrator._find_domain_node(root, None) is root
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +242,30 @@ class TestEstimateCapacitiesFromRegistry:
         orch = _make_orchestrator(tmp_path, reg_data)
         result = orch._estimate_capacities_from_registry("10239")
         assert result.get("10239") == 30000
+
+    def test_none_domain_includes_every_domain(self, tmp_path):
+        reg_data = {
+            "taxons": {"2697049": ["acc1"], "9999": ["acc2"]},
+            "accessions": {
+                "acc1": {"total_sequence_length": 30000, "downloaded": True},
+                "acc2": {"total_sequence_length": 5000, "downloaded": True},
+            },
+            "lineages": {
+                "2697049": [
+                    {"taxid": "2697049", "rank": "species", "name": "Virus"},
+                    {"taxid": "10239", "rank": "superkingdom", "name": "Viruses"},
+                ],
+                "9999": [
+                    {"taxid": "9999", "rank": "species", "name": "Bacterium"},
+                    {"taxid": "2", "rank": "superkingdom", "name": "Bacteria"},
+                ],
+            },
+        }
+        orch = _make_orchestrator(tmp_path, reg_data)
+        result = orch._estimate_capacities_from_registry(None)
+        # None scope spans the whole registry: both domains get capacity.
+        assert result.get("10239") == 30000
+        assert result.get("2") == 5000
 
     def test_excludes_taxa_not_in_domain(self, tmp_path):
         reg_data = {

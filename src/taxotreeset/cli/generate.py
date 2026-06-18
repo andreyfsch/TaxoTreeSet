@@ -69,9 +69,9 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--root", "-g",
         type=str,
         default="viruses",
-        help="Root of the taxonomy to generate from: a domain shortcut "
-        "(viruses, bacteria, archaea, eukaryotes), a numeric NCBI TaxID, "
-        "or a clade scientific name (e.g. Caudoviricetes).",
+        help="Root of the taxonomy to generate from: 'all' (every domain), "
+        "a domain shortcut (viruses, bacteria, archaea, eukaryotes), a "
+        "numeric NCBI TaxID, or a clade scientific name (e.g. Caudoviricetes).",
     )
     parser.add_argument(
         "--stop-at",

@@ -1,5 +1,9 @@
 # Issue: registry and LMDB vault drift
 
+> **Status: resolved.** The incremental-sync resolution below is implemented
+> (Stage 0 sync, vault reconciliation, `--no-sync`). The "Reverse mapping"
+> note remains a deferred optimization for multi-TB vaults.
+
 ## Background
 The registry tracks assembly accessions (e.g. GCF_000857325.2) and a
 per-accession downloaded flag. The LMDB vault stores sequences keyed by
