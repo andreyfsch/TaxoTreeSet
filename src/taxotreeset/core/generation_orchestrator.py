@@ -125,6 +125,45 @@ _STRATIFIED_VAL_RATIO: float = 0.15
 _SPLITS: tuple[str, ...] = ("train", "val", "test")
 
 
+def _capture_tool_versions() -> dict[str, str]:
+    """Capture versions of the external tools that determine the data snapshot.
+
+    Records the NCBI ``datasets`` CLI, the taxoniq taxonomy package, and the
+    Python runtime, so a generated dataset can be reproduced against the same
+    tooling. Each lookup degrades to ``"unknown"`` on failure (e.g. the CLI is
+    absent on a ``--no-sync`` run).
+
+    Returns:
+        Mapping of tool name to version string.
+    """
+    import platform
+    import subprocess
+    import sys
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
+
+    try:
+        completed = subprocess.run(
+            ["datasets", "--version"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        datasets_cli = (completed.stdout or completed.stderr).strip() or "unknown"
+    except (OSError, subprocess.SubprocessError):
+        datasets_cli = "unknown"
+
+    try:
+        taxoniq_version = _pkg_version("taxoniq")
+    except PackageNotFoundError:
+        taxoniq_version = "unknown"
+
+    return {
+        "datasets_cli": datasets_cli,
+        "taxoniq": taxoniq_version,
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+    }
+
+
 def _fmt_elapsed(secs: float) -> str:
     if secs < 90:
         return f"{secs:.0f}s"
@@ -1222,6 +1261,9 @@ class GenerationOrchestrator:
         except Exception:
             pkg_version = "unknown"
 
+        tools = _capture_tool_versions()
+        snapshot = self.registry.accession_snapshot()
+
         master_manifest = scheduling_artifacts.get("master_manifest", {})
         n_heads = len(scheduling_artifacts.get("extraction_jobs", []))
         n_classes_total = sum(len(v.get("labels", {})) for v in master_manifest.values())
@@ -1275,6 +1317,15 @@ class GenerationOrchestrator:
             "taxotreeset_version": pkg_version,
             "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "elapsed_seconds": round(time.monotonic() - t_pipeline_start, 1),
+            "provenance": {
+                "tools": tools,
+                "registry_last_update": self.registry.registry.get("last_update"),
+                "accession_snapshot": {
+                    "file": f"accession_snapshot_{target_group}.json",
+                    "sha256": snapshot["sha256"],
+                    "n_accessions": snapshot["n_accessions"],
+                },
+            },
             "parameters": {
                 "root": target_group,
                 "min_subseq_len": self.min_subseq_len,
@@ -1308,6 +1359,25 @@ class GenerationOrchestrator:
         with open(metadata_path, "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2)
         logger.info("Run metadata written to %s", metadata_path)
+
+        # Full reproducible accession snapshot (versioned accessions + digest),
+        # written alongside the metadata so the run can be re-fetched and cited.
+        snapshot_path = os.path.join(
+            self.output_dir, f"accession_snapshot_{target_group}.json"
+        )
+        with open(snapshot_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "generated_at": metadata["generated_at"],
+                    "tools": tools,
+                    "n_accessions": snapshot["n_accessions"],
+                    "sha256": snapshot["sha256"],
+                    "accessions": snapshot["accessions"],
+                },
+                f,
+                indent=2,
+            )
+        logger.info("Accession snapshot written to %s", snapshot_path)
 
     def _persist_scheduling_artifacts(
         self,

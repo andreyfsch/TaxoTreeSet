@@ -32,6 +32,7 @@ Typical usage::
     registry.save()
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -484,3 +485,25 @@ class NCBIRegistry:
             json.dump(self.registry, registry_file, indent=2)
 
         logger.debug(f"Registry persisted to: {self.registry_path}")
+
+    def accession_snapshot(self) -> dict[str, Any]:
+        """Return a reproducible snapshot of the registered accessions.
+
+        Accession keys carry NCBI version suffixes (e.g. ``GCF_000857325.2``),
+        which are immutable, so the sorted accession list and its SHA-256 digest
+        uniquely and reproducibly identify the genome set behind a dataset --
+        even though "the current state of RefSeq" drifts over time. Recording
+        this turns a run into a citable, re-fetchable snapshot.
+
+        Returns:
+            Dict with ``n_accessions``, ``sha256`` (digest of the
+            newline-joined sorted accession list) and the sorted ``accessions``
+            list.
+        """
+        accessions = sorted(self.registry.get("accessions", {}))
+        digest = hashlib.sha256("\n".join(accessions).encode("utf-8")).hexdigest()
+        return {
+            "n_accessions": len(accessions),
+            "sha256": digest,
+            "accessions": accessions,
+        }

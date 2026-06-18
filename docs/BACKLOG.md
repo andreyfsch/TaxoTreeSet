@@ -49,21 +49,25 @@ Files: `dataset/sequence_utils.py` (split), `core/generation/capacity.py`,
 
 ---
 
-## 🟠 P2 — Reproducible NCBI snapshot
+## 🟢 P2 — Reproducible NCBI snapshot (capture done; re-fetch pinning pending)
 
-**Problem.** `discover` captures "the current state of RefSeq", which is a moving
-target — re-running on the same TaxID at different dates yields different
-datasets, so results are not citable/reproducible.
+**Status (2026-06-18): implemented (capture/export).** Each generate run now
+writes a `provenance` block in `run_metadata_<group>.json` (NCBI `datasets` CLI
+version, taxoniq version, Python/platform, registry `last_update`) plus a full
+`accession_snapshot_<group>.json` — the sorted versioned accessions (immutable
+`GCF_….N`) and a SHA-256 digest. The digest is a citable snapshot ID; the
+accession list is the manifest to re-fetch. (`NCBIRegistry.accession_snapshot`,
+`_capture_tool_versions`.)
 
-**Approach.** Record the NCBI `datasets` CLI version in the registry; emit an
-accession manifest with versioned accessions (e.g. `GCF_000857325.2`); optional
-content hash. Allow pinning so a published benchmark can re-fetch the exact
-snapshot.
+**Problem (recap).** `discover` captures "the current state of RefSeq", a moving
+target, so without this a run is not citable/reproducible.
 
-**Effort.** Low–moderate — the accessions are already in the registry; this is
-mainly version capture plus a manifest export.
+**Remaining (follow-up).** Active **pinning**: a path that re-fetches exactly the
+accessions in a saved snapshot (instead of re-querying NCBI for the current set)
+so a benchmark reproduces byte-for-byte. The capture above already enables manual
+reproduction.
 
-Files: `io/registry.py`, the discover/download path.
+Files: `io/registry.py`, `core/generation_orchestrator.py`.
 
 ---
 

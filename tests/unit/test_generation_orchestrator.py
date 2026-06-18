@@ -420,3 +420,17 @@ class TestBuildScopeAccessionIndex:
         downloaded_cap, pending_index = orch._build_scope_accession_index("10239")
         assert downloaded_cap == {}
         assert pending_index == {}
+
+
+# ---------------------------------------------------------------------------
+# _capture_tool_versions
+# ---------------------------------------------------------------------------
+
+
+class TestCaptureToolVersions:
+    def test_returns_expected_keys_as_nonempty_strings(self):
+        from taxotreeset.core.generation_orchestrator import _capture_tool_versions
+
+        versions = _capture_tool_versions()
+        assert set(versions) == {"datasets_cli", "taxoniq", "python", "platform"}
+        assert all(isinstance(v, str) and v for v in versions.values())

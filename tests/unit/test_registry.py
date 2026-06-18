@@ -701,3 +701,34 @@ class TestResetSelectionFlagsLoopControl:
         reg.registry["accessions"] = {}  # GCF_GHOST not registered
         reg.registry["lineages"] = {}
         reg.reset_selection_flags()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# accession_snapshot
+# ---------------------------------------------------------------------------
+
+
+class TestAccessionSnapshot:
+    def test_empty_registry(self, reg):
+        snap = reg.accession_snapshot()
+        assert snap["n_accessions"] == 0
+        assert snap["accessions"] == []
+        assert len(snap["sha256"]) == 64  # sha256 hex digest
+
+    def test_sorted_and_counted(self, reg):
+        reg.registry["accessions"] = {"GCF_002.1": {}, "GCF_001.3": {}, "GCF_001.2": {}}
+        snap = reg.accession_snapshot()
+        assert snap["n_accessions"] == 3
+        assert snap["accessions"] == ["GCF_001.2", "GCF_001.3", "GCF_002.1"]
+
+    def test_digest_is_insertion_order_independent(self, reg):
+        reg.registry["accessions"] = {"GCF_002.1": {}, "GCF_001.1": {}}
+        first = reg.accession_snapshot()["sha256"]
+        reg.registry["accessions"] = {"GCF_001.1": {}, "GCF_002.1": {}}
+        assert reg.accession_snapshot()["sha256"] == first
+
+    def test_digest_changes_with_accession_version(self, reg):
+        reg.registry["accessions"] = {"GCF_001.1": {}}
+        first = reg.accession_snapshot()["sha256"]
+        reg.registry["accessions"] = {"GCF_001.2": {}}  # same assembly, new version
+        assert reg.accession_snapshot()["sha256"] != first
