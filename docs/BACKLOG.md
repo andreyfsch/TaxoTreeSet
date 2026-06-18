@@ -6,33 +6,43 @@ TaxoTreeSet (dataset generation); inference/evaluation items that belong to the
 downstream PhyloCascadeGLM project are listed separately at the end so they are
 not lost.
 
-Priority: 🔴 critical · 🟠 high · 🟡 medium · 🟢 low.
+Priority: 🔴 critical · 🟠 high · 🟡 medium · 🟢 low. Entries keep their original
+numbers; the badge on each is its *current* priority — P1 was downgraded after a
+2026-06-18 diagnostic (see its entry).
 
 ---
 
-## 🔴 P1 — Phylogenetic redundancy across splits; rethink `capacity`
+## 🟢 P1 — Phylogenetic redundancy across splits (largely N/A for RefSeq)
 
-**Problem.** The whole-genome split prevents window leakage *within* a genome,
-but not near-identical strains (e.g. the many SARS-CoV-2 genomes in RefSeq)
-landing one in train and one in test — so test scores overestimate
-generalization (near-memorization). Worse, `capacity` counts unique windows by
-*exact* dedup, so near-clones inflate a class's apparent diversity, which then
-drives both its download budget and its `n_per_class` without adding real
-signal. Epidemiologically oversampled clades dominate for the wrong reason.
+**Status (2026-06-18 diagnostic): not a material problem for the current
+pipeline.** Measured per class of every trained head, the unique-k-mer content
+tracks the raw sequence volume (`capacity / Σ lengths` ≈ 0.74–0.99) and the clone
+factor (`genomes / (capacity / median genome length)`) ≈ 1.0 — i.e. the genomes
+are genuinely diverse, not near-clones. SARS-CoV-2 (taxid 2697049) has a single
+genome; species classes hold 1–3 genomes, kingdom classes hold thousands but
+they are distinct *species*. Exact subsequence overlap between train and test is
+also ~0%. **Root cause:** TaxoTreeSet ingests **RefSeq reference assemblies**
+(~1 curated genome per species), so the epidemiological oversampling this item
+worried about (GenBank-style strain collections) is preempted at the source.
 
-**Approach.** Cluster genomes by similarity (Mash/MinHash, or an identity cutoff
-à la CD-HIT) and assign *whole clusters* — not isolated genomes — to a single
-split. Consider repurposing the retired k-means `virtual_cluster` for
-similarity clustering. Separately, reconsider whether `capacity` should reflect
-genuine diversity rather than raw sequence volume.
+**Conclusion.** The pilot test-F1 (Viruses 0.729, Orthornavirae 0.648,
+Bamfordvirae 0.897) are **not** inflated by near-clone memorization. The
+diagnostic is reproducible from the registry + manifest (per-class `capacity`
+vs. summed genome length); a genome-level Mash/MinHash check would confirm it but
+is unnecessary given the RefSeq curation.
 
-**Effort.** High — new dependency (Mash/MinHash), all-vs-all compute, touches
-both the split logic and the capacity metric.
+**Original concern (now a guard-rail for a future GenBank expansion).** The
+whole-genome split prevents window leakage *within* a genome but not near-
+identical strains spanning train/test, and exact-dedup `capacity` would count
+such near-clones as diversity — inflating both the download budget and
+`n_per_class`. This only bites with non-RefSeq (GenBank) data. If that expansion
+happens, cluster genomes by similarity (Mash/MinHash, or a CD-HIT identity
+cutoff) and assign *whole clusters* to one split, and reconsider whether
+`capacity` should reflect genuine diversity rather than raw volume. Couple with
+the molecule-type/scope work (P3, `data_scope_questions.md` item 1).
 
-**Impact.** Highest: this is the main threat to the validity of the reported
-fine-tuning numbers. The current pilot test-F1 (Viruses root 0.729,
-Orthornavirae 0.648) should be re-evaluated under cluster-aware splitting — they
-may be optimistic.
+**Effort (only if/when GenBank).** High — new dependency, all-vs-all compute,
+touches the split logic and the capacity metric.
 
 Files: `dataset/sequence_utils.py` (split), `core/generation/capacity.py`,
 `core/generation/balancing.py`.
