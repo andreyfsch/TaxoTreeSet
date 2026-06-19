@@ -163,16 +163,8 @@ under way: `_BottomUpCapacityComputer` was extracted from
 
 ---
 
-## Cross-repo — PhyloCascadeGLM (separate repo; tracked here only so they are not lost)
+## Cross-repo — PhyloCascadeGLM
 
-These belong to the inference/evaluation project and should migrate to that
-repo's backlog.
-
-- **Hierarchy-aware evaluation metric.** Replace per-head accuracy with a
-  metric that accounts for taxonomic distance (e.g. distance to the lowest
-  common ancestor, or hierarchical F1): confusing two species of one genus is
-  not the same error as missing the whole family.
-  - Note: the related "error propagation in a greedy cascade" critique is
-    largely moot — inference is already a best-first search with cumulative
-    uncertainty pruning (`_traverser.py`), not a greedy argmax.
-- **OOD routing validation at inference** — the inference half of P4 above.
+Inference/evaluation items — hierarchy-aware eval metric, OOD routing validation,
+and the classification-depth vs. theta script — live in the PhyloCascadeGLM
+repo's own `docs/BACKLOG.md`, since they belong to that project.
