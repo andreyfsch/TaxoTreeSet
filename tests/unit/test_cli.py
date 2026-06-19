@@ -216,6 +216,7 @@ class TestGenerateRun:
             tmp_dir=None,
             workers=None,
             gpu_workers=None,
+            exclude_plasmids=False,
             log_level="INFO",
         )
 

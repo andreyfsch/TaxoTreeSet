@@ -78,6 +78,10 @@ class NCBIDownloader:
     # large eukaryotic assemblies don't produce a single 60+ GiB request
     # that the NCBI server rejects.
     _DEFAULT_MAX_BYTES_PER_CHUNK = 5 * 1024 ** 3  # 5 GiB
+    # Defline keywords marking sequences to drop when exclude_plasmids is set.
+    # Substring, case-insensitive (so "megaplasmid" is also caught). Extend this
+    # set to also drop organelles (e.g. mitochondrion, chloroplast) in future.
+    _EXCLUDED_MOLECULE_KEYWORDS: tuple[str, ...] = ("plasmid",)
 
     def __init__(
         self,
@@ -86,6 +90,7 @@ class NCBIDownloader:
         chunk_size: int = _DEFAULT_CHUNK_SIZE,
         max_bytes_per_chunk: int = _DEFAULT_MAX_BYTES_PER_CHUNK,
         tmp_dir: str | None = None,
+        exclude_plasmids: bool = False,
     ) -> None:
         """Initialize the downloader without opening the LMDB environment.
 
@@ -105,12 +110,18 @@ class NCBIDownloader:
                 extracted files. Defaults to the OS temp dir when None.
                 Set to a path on a large drive to avoid inflating the
                 WSL VHDX on the system drive.
+            exclude_plasmids: When True, sequences whose FASTA defline marks
+                them as plasmids are dropped at ingestion (never stored in the
+                vault nor recorded as headers). Off by default; intended for
+                Bacteria, where plasmids (horizontally transferred) add little
+                reliable phylogenetic signal.
         """
         self.registry: Any = registry
         self.vault_path: str = vault_path
         self.chunk_size: int = chunk_size
         self.max_bytes_per_chunk: int = max_bytes_per_chunk
         self.tmp_dir: str | None = tmp_dir
+        self.exclude_plasmids: bool = exclude_plasmids
 
         os.makedirs(self.vault_path, exist_ok=True)
         self.lmdb_path: str = os.path.join(self.vault_path, "sequences.lmdb")
@@ -414,7 +425,10 @@ class NCBIDownloader:
 
             for accession in accessions:
                 headers = self._ingest_accession_fasta(accession, extracted_root)
-                if headers:
+                # None = genuine failure (missing/empty) -> omit so it stays
+                # pending and is retried. A list (even empty, when every
+                # sequence was filtered) means the accession was processed.
+                if headers is not None:
                     batch_results[accession] = headers
 
         return batch_results
@@ -500,7 +514,7 @@ class NCBIDownloader:
         self,
         accession: str,
         dataset_root: str,
-    ) -> list[dict[str, str]]:
+    ) -> list[dict[str, str]] | None:
         """Parse a single accession's FASTA file and persist to LMDB.
 
         Args:
@@ -509,24 +523,81 @@ class NCBIDownloader:
                 containing per-accession subdirectories.
 
         Returns:
-            List of header metadata dictionaries for sequences that were
-            successfully written to LMDB. Empty list if the accession's
-            directory or FASTA file is missing.
+            The header metadata for the sequences written to LMDB -- possibly an
+            empty list when ``exclude_plasmids`` filtered every sequence out --
+            or ``None`` when the accession failed (its directory, FASTA, or
+            content is missing). The None-vs-list distinction lets the caller
+            retry genuine failures while marking a present-but-all-filtered
+            accession as processed (no retry loop).
         """
         accession_dir = os.path.join(dataset_root, accession)
         if not os.path.exists(accession_dir):
-            return []
+            return None
 
         fasta_path = self._find_fasta_in_directory(accession_dir)
         if not fasta_path:
-            return []
+            return None
 
         sequences, headers_metadata = self._parse_fasta_file(fasta_path)
         if not sequences:
-            return []
+            return None
+
+        if self.exclude_plasmids:
+            sequences, headers_metadata = self._drop_excluded_molecules(
+                accession, sequences, headers_metadata
+            )
 
         self._persist_sequences_to_lmdb(sequences)
         return headers_metadata
+
+    @classmethod
+    def _is_excluded_molecule(cls, name: str) -> bool:
+        """Return True if a FASTA defline name marks an excluded molecule type.
+
+        Heuristic substring match against ``_EXCLUDED_MOLECULE_KEYWORDS`` (e.g.
+        a defline like "... plasmid pXYZ, complete sequence"). Reliable for
+        RefSeq deflines; the authoritative alternative is the NCBI sequence
+        report's ``assigned_molecule_location_type``.
+        """
+        lowered = name.lower()
+        return any(keyword in lowered for keyword in cls._EXCLUDED_MOLECULE_KEYWORDS)
+
+    def _drop_excluded_molecules(
+        self,
+        accession: str,
+        sequences: dict[str, str],
+        headers_metadata: list[dict[str, str]],
+    ) -> tuple[dict[str, str], list[dict[str, str]]]:
+        """Drop excluded-molecule sequences (e.g. plasmids) from a parse result.
+
+        Filters the sequence map and the header metadata in lock-step so the
+        vault and the recorded headers stay consistent, and logs how many were
+        skipped.
+
+        Args:
+            accession: Accession being processed (for logging).
+            sequences: Header-ID -> sequence map from ``_parse_fasta_file``.
+            headers_metadata: Ordered ``{'id', 'name'}`` records.
+
+        Returns:
+            The filtered ``(sequences, headers_metadata)`` pair.
+        """
+        kept_headers = [
+            header
+            for header in headers_metadata
+            if not self._is_excluded_molecule(header["name"])
+        ]
+        kept_ids = {header["id"] for header in kept_headers}
+        kept_sequences = {
+            seq_id: seq for seq_id, seq in sequences.items() if seq_id in kept_ids
+        }
+        skipped = len(headers_metadata) - len(kept_headers)
+        if skipped:
+            logger.info(
+                "Accession %s: skipped %d plasmid/excluded sequence(s) at "
+                "ingestion.", accession, skipped,
+            )
+        return kept_sequences, kept_headers
 
     @staticmethod
     def _find_fasta_in_directory(directory: str) -> str | None:

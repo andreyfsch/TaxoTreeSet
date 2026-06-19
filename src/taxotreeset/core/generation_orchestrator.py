@@ -224,6 +224,7 @@ class GenerationOrchestrator:
         tmp_dir: str | None = None,
         n_workers: int | None = None,
         n_gpu_workers: int | None = None,
+        exclude_plasmids: bool = False,
     ) -> None:
         """Initialize the orchestrator and its collaborating components.
 
@@ -305,6 +306,7 @@ class GenerationOrchestrator:
             registry=self.registry,
             vault_path=self.vault_path,
             tmp_dir=self.tmp_dir,
+            exclude_plasmids=exclude_plasmids,
         )
         self.builder: DatasetBuilder = DatasetBuilder(
             output_dir=self.output_dir,

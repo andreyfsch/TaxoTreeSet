@@ -5,7 +5,7 @@ valid to ingest and *which* top-level groups the tool should cover. They
 shape dataset quality and the multi-domain expansion, and should be
 resolved before (or as part of) expanding beyond viruses.
 
-## 1. Plasmid sequences in Bacteria (quality risk)
+## 1. Plasmid sequences in Bacteria (resolved: opt-in filter)
 
 The download path applies an assembly-level filter
 (_DEFAULT_ASSEMBLY_LEVELS = "complete,chromosome") but no molecule-type
@@ -14,14 +14,15 @@ its plasmids as separate sequences, and every sequence in the file is
 ingested into the vault indiscriminately. Plasmids are horizontally
 transferred across distant taxa, so the same plasmid sequence can appear
 under many classes, carrying little reliable phylogenetic signal of the
-host. For a taxonomic-classification objective this likely degrades the
-training signal once Bacteria is in scope.
+host -- noise for a taxonomic-classification objective once Bacteria is in
+scope. (Kraken2 reference databases do include plasmids, so there is
+precedent either way depending on goal.)
 
-Open question: filter plasmids out at ingestion (e.g. by inspecting the
-sequence/molecule type the NCBI report exposes, keeping only chromosomal
-sequences), keep them, or make it a parameter. Needs a decision before
-the Bacteria expansion. Note Kraken2 reference databases do include
-plasmid sequences, so there is precedent either way depending on goal.
+Resolved (2026-06-18): made it a parameter. `generate --exclude-plasmids`
+drops plasmid sequences at ingestion, matched heuristically from the FASTA
+defline (see BACKLOG P3). Off by default; enable it for the Bacteria
+download. The authoritative upgrade (the NCBI sequence report's
+`assigned_molecule_location_type`) is tracked in P3.
 
 ## 2. Viroids as an additional top-level group
 

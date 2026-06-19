@@ -208,6 +208,15 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Skip the NCBI sync step and use the existing vault as-is "
         "(faster iteration on an already-populated vault).",
     )
+    parser.add_argument(
+        "--exclude-plasmids",
+        action="store_true",
+        help="Drop plasmid sequences at ingestion (matched heuristically from "
+        "the FASTA defline) so they never enter the vault or training data. "
+        "Plasmids are horizontally transferred and carry little reliable host "
+        "phylogenetic signal; recommended before a Bacteria expansion. Off by "
+        "default (no effect on viruses, which have none).",
+    )
 
 
 def run(args: argparse.Namespace) -> None:
@@ -256,6 +265,7 @@ def run(args: argparse.Namespace) -> None:
             tmp_dir=args.tmp_dir,
             n_workers=args.workers,
             n_gpu_workers=args.gpu_workers,
+            exclude_plasmids=args.exclude_plasmids,
         )
 
         logger.info(

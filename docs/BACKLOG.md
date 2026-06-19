@@ -71,19 +71,31 @@ Files: `io/registry.py`, `core/generation_orchestrator.py`.
 
 ---
 
-## 🟠 P3 — Molecule-type filter (plasmids / contamination)
+## 🟢 P3 — Molecule-type filter (plasmids) — implemented (opt-in, heuristic)
 
-**Problem.** No molecule-type filter at ingestion, so plasmids (horizontally
-transferred across distant taxa, low phylogenetic signal) enter the vault mixed
-with chromosomal sequences. The effect is larger for Bacteria than viruses.
+**Status (2026-06-18): implemented.** `generate --exclude-plasmids` drops
+plasmid sequences at ingestion, matched heuristically from the FASTA defline, so
+they never enter the vault nor become training leaves. Off by default (no effect
+on viruses). Plumbed CLI -> `GenerationOrchestrator` -> `NCBIDownloader`
+(`_is_excluded_molecule` / `_drop_excluded_molecules`). An all-plasmid accession
+is still marked processed (not retried) via a None-vs-empty-list ingestion
+contract in `_ingest_accession_fasta`.
 
-**Approach.** Filter by molecule/sequence type at ingestion (keep chromosomal),
-or expose it as a parameter. Decide before any Bacteria expansion.
+**Problem (recap).** Plasmids are horizontally transferred across distant taxa
+and carry little reliable host phylogenetic signal; mixing them with chromosomal
+sequences adds noise. Larger effect for Bacteria than viruses.
 
-**Status.** Already captured in `docs/TODOs/data_scope_questions.md` (item 1);
-this backlog entry just tracks its priority.
+**Remaining / upgrades.**
+- Authoritative signal: `datasets download --include seq-report` +
+  `assigned_molecule_location_type` instead of defline text (more robust;
+  moderate). Also lets the keyword set extend to organelles.
+- `total_sequence_length` (per accession) still includes plasmids (it comes from
+  the discover-time summary), so selective-download volume estimates slightly
+  overcount after filtering — safe direction; optional recompute.
+- Ingestion-time only: pre-existing downloads are not retro-filtered (re-download
+  to change). Fine for the not-yet-fetched Bacteria scope.
 
-**Effort.** Moderate.
+Files: `io/downloader.py`, `core/generation_orchestrator.py`, `cli/generate.py`.
 
 ---
 

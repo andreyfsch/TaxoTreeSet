@@ -561,7 +561,20 @@ class TestDownloadBatch:
         assert "GCF_001" in result
         assert result["GCF_001"] == fake_headers
 
-    def test_omits_accession_with_no_headers(self, tmp_path):
+    def test_omits_accession_on_ingest_failure(self, tmp_path):
+        # None from ingestion = genuine failure -> omitted so it stays pending.
+        dl = self._make_downloader(tmp_path)
+        with (
+            patch.object(dl, "_invoke_ncbi_datasets_cli", return_value=True),
+            patch.object(dl, "_extract_assembly_archive", return_value="/fake/extracted"),
+            patch.object(dl, "_ingest_accession_fasta", return_value=None),
+        ):
+            result = dl.download_batch(["GCF_001"])
+        assert "GCF_001" not in result
+
+    def test_includes_accession_when_all_sequences_filtered(self, tmp_path):
+        # Empty list = processed but every sequence filtered -> recorded (with
+        # empty headers) so the accession is marked downloaded, not retried.
         dl = self._make_downloader(tmp_path)
         with (
             patch.object(dl, "_invoke_ncbi_datasets_cli", return_value=True),
@@ -569,7 +582,7 @@ class TestDownloadBatch:
             patch.object(dl, "_ingest_accession_fasta", return_value=[]),
         ):
             result = dl.download_batch(["GCF_001"])
-        assert "GCF_001" not in result
+        assert result["GCF_001"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -623,12 +636,12 @@ class TestIngestAccessionFasta:
         dl._env = MagicMock()
         return dl
 
-    def test_returns_empty_when_accession_dir_absent(self, tmp_path):
+    def test_returns_none_when_accession_dir_absent(self, tmp_path):
         dl = self._make_downloader(tmp_path)
         result = dl._ingest_accession_fasta("GCF_001", str(tmp_path / "data"))
-        assert result == []
+        assert result is None
 
-    def test_returns_empty_when_no_fasta_found(self, tmp_path):
+    def test_returns_none_when_no_fasta_found(self, tmp_path):
         dataset_root = tmp_path / "data"
         acc_dir = dataset_root / "GCF_001"
         acc_dir.mkdir(parents=True)
@@ -636,7 +649,7 @@ class TestIngestAccessionFasta:
 
         dl = self._make_downloader(tmp_path)
         result = dl._ingest_accession_fasta("GCF_001", str(dataset_root))
-        assert result == []
+        assert result is None
 
     def test_returns_headers_when_fasta_parsed_and_persisted(self, tmp_path):
         # Covers lines 482-487: parse_fasta returns sequences → persist called → headers returned
@@ -654,8 +667,9 @@ class TestIngestAccessionFasta:
         assert len(result) == 1
         assert result[0]["id"] == "NC_001"
 
-    def test_returns_empty_when_fasta_has_no_sequences(self, tmp_path):
-        # Covers line 484: FASTA file found but _parse_fasta_file returns empty sequences
+    def test_returns_none_when_fasta_has_no_sequences(self, tmp_path):
+        # FASTA file found but _parse_fasta_file returns no sequences -> treated
+        # as a failed/empty download (None) so it stays pending and is retried.
         dataset_root = tmp_path / "data"
         acc_dir = dataset_root / "GCF_001"
         acc_dir.mkdir(parents=True)
@@ -665,7 +679,7 @@ class TestIngestAccessionFasta:
 
         dl = self._make_downloader(tmp_path)
         result = dl._ingest_accession_fasta("GCF_001", str(dataset_root))
-        assert result == []
+        assert result is None
 
 
 # ---------------------------------------------------------------------------
@@ -700,3 +714,90 @@ class TestPersistSequencesToLmdb:
 
         assert raw is not None
         assert zlib.decompress(raw) == b"ACGTACGT"
+
+
+# ---------------------------------------------------------------------------
+# molecule-type (plasmid) filter
+# ---------------------------------------------------------------------------
+
+
+class TestIsExcludedMolecule:
+    def test_true_for_plasmid_defline(self):
+        assert NCBIDownloader._is_excluded_molecule(
+            "Escherichia coli strain K12 plasmid pXYZ, complete sequence"
+        )
+
+    def test_true_for_megaplasmid(self):
+        assert NCBIDownloader._is_excluded_molecule(
+            "Sinorhizobium meliloti megaplasmid pSymA, complete sequence"
+        )
+
+    def test_case_insensitive(self):
+        assert NCBIDownloader._is_excluded_molecule("X PLASMID p1")
+
+    def test_false_for_chromosome_and_genome(self):
+        assert not NCBIDownloader._is_excluded_molecule(
+            "Escherichia coli str. K-12 substr. MG1655, complete genome"
+        )
+        assert not NCBIDownloader._is_excluded_molecule(
+            "Homo sapiens chromosome 1, GRCh38"
+        )
+
+
+class TestDropExcludedMolecules:
+    def test_drops_plasmid_from_both_maps(self, downloader):
+        sequences = {"CHR": "ACGT", "PLA": "TTTT"}
+        headers = [
+            {"id": "CHR", "name": "E. coli, complete genome"},
+            {"id": "PLA", "name": "E. coli plasmid pX, complete sequence"},
+        ]
+        seqs, hdrs = downloader._drop_excluded_molecules("GCF_X", sequences, headers)
+        assert seqs == {"CHR": "ACGT"}
+        assert hdrs == [{"id": "CHR", "name": "E. coli, complete genome"}]
+
+    def test_keeps_all_when_no_plasmid(self, downloader):
+        sequences = {"CHR": "ACGT"}
+        headers = [{"id": "CHR", "name": "E. coli, complete genome"}]
+        seqs, hdrs = downloader._drop_excluded_molecules("GCF_X", sequences, headers)
+        assert seqs == sequences
+        assert hdrs == headers
+
+
+def _write_accession_fasta(root, accession, content):
+    """Create ``root/<accession>/genome.fna`` and return ``str(root)``."""
+    acc_dir = root / accession
+    acc_dir.mkdir(parents=True)
+    (acc_dir / "genome.fna").write_text(content)
+    return str(root)
+
+
+class TestIngestAccessionFastaFilter:
+    _CHR = ">NC_1 E. coli, complete genome\nACGTACGT\n"
+    _PLA = ">NC_2 E. coli plasmid pX, complete sequence\nTTTTCCCC\n"
+
+    def test_missing_directory_returns_none(self, downloader):
+        assert downloader._ingest_accession_fasta("GCF_X", "/nonexistent") is None
+
+    def test_no_filter_keeps_all(self, tmp_path, downloader):
+        root = _write_accession_fasta(tmp_path / "data", "GCF_A", self._CHR + self._PLA)
+        with patch.object(downloader, "_persist_sequences_to_lmdb") as persist:
+            headers = downloader._ingest_accession_fasta("GCF_A", root)
+        assert {h["id"] for h in headers} == {"NC_1", "NC_2"}
+        assert set(persist.call_args.args[0]) == {"NC_1", "NC_2"}
+
+    def test_filter_drops_plasmid(self, tmp_path, downloader):
+        downloader.exclude_plasmids = True
+        root = _write_accession_fasta(tmp_path / "data", "GCF_B", self._CHR + self._PLA)
+        with patch.object(downloader, "_persist_sequences_to_lmdb") as persist:
+            headers = downloader._ingest_accession_fasta("GCF_B", root)
+        assert [h["id"] for h in headers] == ["NC_1"]
+        assert set(persist.call_args.args[0]) == {"NC_1"}
+
+    def test_all_plasmid_returns_empty_list_not_none(self, tmp_path, downloader):
+        downloader.exclude_plasmids = True
+        root = _write_accession_fasta(tmp_path / "data", "GCF_C", self._PLA)
+        with patch.object(downloader, "_persist_sequences_to_lmdb") as persist:
+            headers = downloader._ingest_accession_fasta("GCF_C", root)
+        # Empty list (not None) -> processed, marked downloaded, not retried.
+        assert headers == []
+        assert persist.call_args.args[0] == {}
