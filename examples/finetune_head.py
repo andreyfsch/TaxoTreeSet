@@ -58,6 +58,7 @@ from transformers import (
     Trainer,
     TrainerCallback,
     TrainingArguments,
+    set_seed,
 )
 
 import sys
@@ -85,6 +86,7 @@ NUM_EPOCHS = 5
 WARMUP_RATIO = 0.06
 WEIGHT_DECAY = 0.01
 MAX_LENGTH = 128
+SEED = 42
 # ---------------------------------------------------------------------------
 
 
@@ -195,11 +197,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-fp16", dest="fp16", action="store_false")
     p.add_argument("--resume-from-checkpoint", type=Path, default=None,
                    help="Resume training from a saved checkpoint directory")
+    p.add_argument("--seed", type=int, default=SEED,
+                   help="Random seed; fixes the frozen pooler init so the adapter is reproducible")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+    # Seed BEFORE any model construction: the BertPooler is frozen at its random
+    # init under LoRA, so without a fixed seed the (unsaved) pooler is different
+    # on every run and the saved adapter cannot be reproduced.
+    set_seed(args.seed)
 
     data_dir = args.data_dir.resolve()
     output_dir = args.output_dir.resolve()
@@ -242,6 +250,11 @@ def main():
         lora_dropout=LORA_DROPOUT,
         target_modules=LORA_TARGET_MODULES,
         bias="none",
+        # SEQ_CLS auto-saves "classifier"/"score" but NOT the pooler, which the
+        # DNABERT-2 head uses (BertPooler.dense feeds the classifier). Saving it
+        # explicitly makes it trainable AND persisted, so the adapter reloads
+        # correctly standalone (e.g. in PhyloCascadeGLM inference).
+        modules_to_save=["classifier", "score", "pooler"],
     )
     model = get_peft_model(base_model, lora_cfg)
     model.print_trainable_parameters()
