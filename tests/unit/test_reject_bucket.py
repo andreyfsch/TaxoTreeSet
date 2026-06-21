@@ -1,5 +1,6 @@
 """Tests for the reject-class virtual bucket (core/generation/reject_bucket.py)."""
 
+import random
 from unittest.mock import patch
 
 from bigtree import Node
@@ -100,6 +101,18 @@ class TestSampleRejectLeaves:
         assert set(near) == {t["x1"], t["x2"], t["y1"]}
         assert far == []
         assert t["z1"] not in set(near)  # own leaf excluded
+
+    def test_caps_each_pool(self):
+        root = _node("1", rank="superkingdom", sci="Root")
+        head = _node("2", parent=root, rank="kingdom", sci="Head")
+        _seq_leaf("h1", head)
+        other = _node("3", parent=root, rank="kingdom", sci="Other")
+        for i in range(50):
+            _seq_leaf(f"o{i}", other)
+        near, far = sample_reject_leaves(head, max_per_pool=10, rng=random.Random(1))
+        assert len(near) == 10        # capped from 50
+        assert far == []              # all external are near-clade (under root)
+        assert all(leaf.header_id.startswith("o") for leaf in near)  # never own h1
 
 
 # ---------------------------------------------------------------------------

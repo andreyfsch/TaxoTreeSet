@@ -1897,7 +1897,9 @@ class GenerationOrchestrator:
         if not self.reject_class:
             return retained_children
 
-        near_leaves, far_leaves = sample_reject_leaves(current_node)
+        near_leaves, far_leaves = sample_reject_leaves(
+            current_node, rng=random.Random(self.seed)
+        )
         n_reject = round(plan["n_per_class"] * self.reject_fraction)
         reject_tasks = build_reject_tasks(
             near_leaves=near_leaves,

@@ -21,6 +21,7 @@ separate, future capability.
 """
 
 import logging
+import random
 
 from bigtree import Node
 
@@ -33,6 +34,15 @@ _REJECT_PURPOSE: str = "reject"
 _REJECT_RANK: str = "virtual_reject"
 _REJECT_NAME_PREFIX: str = "virtual_reject"
 _SEQUENCE_RANK: str = "sequence"
+_DEFAULT_MAX_REJECT_LEAVES_PER_POOL: int = 1000
+"""Cap on sampled leaves per pool (near / far).
+
+A head's external pool can hold tens of thousands of sequence leaves; weighing
+them all (each requires reading the sequence) for every head would be
+prohibitive. Capping to a bounded, randomly-sampled subset keeps the cost flat
+while still giving ample diversity — the per-leaf budget from
+``_allocate_n_across_leaves`` only needs a few windows from each of a few hundred
+leaves to reach a balanced reject class."""
 
 
 def make_reject_bucket_node(
@@ -88,22 +98,38 @@ def make_reject_bucket_node(
     return node, metadata
 
 
-def sample_reject_leaves(current_node) -> tuple[list, list]:
+def _cap_pool(pool: list, max_per_pool: int, rng: random.Random) -> list:
+    """Randomly down-sample ``pool`` to ``max_per_pool`` leaves (or return as-is)."""
+    if max_per_pool and len(pool) > max_per_pool:
+        return rng.sample(pool, max_per_pool)
+    return pool
+
+
+def sample_reject_leaves(
+    current_node,
+    max_per_pool: int = _DEFAULT_MAX_REJECT_LEAVES_PER_POOL,
+    rng: random.Random | None = None,
+) -> tuple[list, list]:
     """Partition the tree's sequence leaves into ``near`` and ``far`` negatives.
 
     ``near`` = sequence leaves under the nearest ancestor of ``current_node`` that
     has any leaf outside ``current_node`` (i.e. the closest sibling/cousin clades);
     ``far`` = all other external sequence leaves. Leaves under ``current_node``
-    itself (the head's genuine members) are excluded from both.
+    itself (the head's genuine members) are excluded from both. Each pool is
+    randomly capped to ``max_per_pool`` leaves to bound the per-head cost (see
+    :data:`_DEFAULT_MAX_REJECT_LEAVES_PER_POOL`).
 
     Args:
         current_node: bigtree node of the head whose reject negatives are sampled.
+        max_per_pool: Maximum leaves kept per pool; 0 disables the cap.
+        rng: Random source for the cap (deterministic ``Random(0)`` when None).
 
     Returns:
         Two-tuple ``(near_leaves, far_leaves)``. Both are empty when the head is
         the whole tree (e.g. the root), since there is then no intra-tree
         "outside" — that case needs a cross-domain (non-virus) source instead.
     """
+    rng = rng if rng is not None else random.Random(0)
     own_leaves = set(current_node.leaves)
     all_seq_leaves = [
         leaf for leaf in current_node.root.leaves
@@ -127,7 +153,7 @@ def sample_reject_leaves(current_node) -> tuple[list, list]:
 
     near_set = set(near)
     far = [leaf for leaf in external if leaf not in near_set]
-    return near, far
+    return _cap_pool(near, max_per_pool, rng), _cap_pool(far, max_per_pool, rng)
 
 
 def build_reject_tasks(
