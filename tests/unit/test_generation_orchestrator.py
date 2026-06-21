@@ -434,3 +434,78 @@ class TestCaptureToolVersions:
         versions = _capture_tool_versions()
         assert set(versions) == {"datasets_cli", "taxoniq", "python", "platform"}
         assert all(isinstance(v, str) and v for v in versions.values())
+
+
+# ---------------------------------------------------------------------------
+# _maybe_add_reject_class
+# ---------------------------------------------------------------------------
+
+
+def _rej_leaf(name, parent):
+    leaf = Node(str(name), parent=parent)
+    leaf.rank = "sequence"
+    leaf.header_id = str(name)
+    leaf.fasta_path = "/fake/vault"
+    return leaf
+
+
+def _reject_node(name, parent, rank, sci):
+    node = Node(str(name), parent=parent) if parent is not None else Node(str(name))
+    node.rank = rank
+    node.scientific_name = sci
+    return node
+
+
+def _reject_tree():
+    """root → A → CA → [a1,a2]; root → B → [b1,b2]. Head under test is A."""
+    root = _reject_node("1", None, "superkingdom", "Root")
+    node_a = _reject_node("2", root, "kingdom", "A")
+    node_b = _reject_node("3", root, "kingdom", "B")
+    child_a = _reject_node("20", node_a, "family", "CA")
+    _rej_leaf("a1", child_a)
+    _rej_leaf("a2", child_a)
+    _rej_leaf("b1", node_b)
+    _rej_leaf("b2", node_b)
+    return node_a, child_a
+
+
+class TestMaybeAddRejectClass:
+    def test_disabled_is_noop(self, orchestrator):
+        orchestrator.reject_class = False
+        node_a, child_a = _reject_tree()
+        per_child_tasks = {"20": [{"header_id": "a1"}]}
+        out = orchestrator._maybe_add_reject_class(
+            current_node=node_a, retained_children=[child_a],
+            per_child_tasks=per_child_tasks, plan={"n_per_class": 100},
+            virtual_id_registry={},
+        )
+        assert out == [child_a]
+        assert list(per_child_tasks.keys()) == ["20"]
+
+    @patch(
+        "taxotreeset.core.generation.distribution._read_sequence_cached",
+        return_value="A" * 1000,
+    )
+    def test_enabled_appends_reject_from_external_leaves(self, _mock, orchestrator):
+        orchestrator.reject_class = True
+        orchestrator.reject_fraction = 1.0
+        orchestrator.reject_near_far_ratio = 0.5
+        node_a, child_a = _reject_tree()
+        per_child_tasks = {"20": []}
+        registry: dict = {}
+
+        out = orchestrator._maybe_add_reject_class(
+            current_node=node_a, retained_children=[child_a],
+            per_child_tasks=per_child_tasks, plan={"n_per_class": 100},
+            virtual_id_registry=registry,
+        )
+
+        assert len(out) == 2
+        reject_node = out[-1]
+        assert reject_node.rank == "virtual_reject"
+        reject_taxid = str(reject_node.name)
+        assert reject_taxid in per_child_tasks and per_child_tasks[reject_taxid]
+        headers = {task["header_id"] for task in per_child_tasks[reject_taxid]}
+        assert headers <= {"b1", "b2"}            # external leaves only
+        assert not (headers & {"a1", "a2"})       # never the head's own leaves
+        assert registry[reject_taxid]["purpose"] == "reject"

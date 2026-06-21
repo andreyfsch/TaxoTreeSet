@@ -217,6 +217,9 @@ class TestGenerateRun:
             workers=None,
             gpu_workers=None,
             exclude_plasmids=False,
+            reject_class=False,
+            reject_fraction=1.0,
+            reject_near_far_ratio=0.5,
             log_level="INFO",
         )
 
@@ -230,6 +233,23 @@ class TestGenerateRun:
             mock_orch.return_value.run_pipeline.return_value = None
             generate.run(args)
         mock_orch.return_value.run_pipeline.assert_called_once()
+
+    def test_reject_flags_thread_to_orchestrator(self, tmp_path):
+        args = self._make_args(tmp_path)
+        args.reject_class = True
+        args.reject_fraction = 0.5
+        args.reject_near_far_ratio = 0.25
+        with (
+            patch("taxotreeset.cli.generate.setup_logging"),
+            patch("taxotreeset.cli.generate.NCBIRegistry"),
+            patch("taxotreeset.cli.generate.GenerationOrchestrator") as mock_orch,
+        ):
+            mock_orch.return_value.run_pipeline.return_value = None
+            generate.run(args)
+        kwargs = mock_orch.call_args.kwargs
+        assert kwargs["reject_class"] is True
+        assert kwargs["reject_fraction"] == 0.5
+        assert kwargs["reject_near_far_ratio"] == 0.25
 
     def test_no_sync_with_missing_registry_exits(self, tmp_path):
         args = self._make_args(tmp_path, no_sync=True, registry_exists=False)

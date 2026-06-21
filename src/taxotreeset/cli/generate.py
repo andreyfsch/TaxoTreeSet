@@ -217,6 +217,29 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "phylogenetic signal; recommended before a Bacteria expansion. Off by "
         "default (no effect on viruses, which have none).",
     )
+    parser.add_argument(
+        "--reject-class",
+        action="store_true",
+        help="Add a 'virtual_reject' class to every head, trained on sequence "
+        "windows sampled from OUTSIDE the head's subtree (near siblings + far "
+        "clades). Teaches each head to reject mis-routed / out-of-distribution "
+        "inputs instead of forcing them into a real class. Off by default.",
+    )
+    parser.add_argument(
+        "--reject-fraction",
+        type=float,
+        default=1.0,
+        help="Size of the reject class relative to n_per_class (1.0 = balanced "
+        "with the real classes). Only used with --reject-class.",
+    )
+    parser.add_argument(
+        "--reject-near-far-ratio",
+        type=float,
+        default=0.5,
+        help="Fraction of reject windows drawn from the nearest ancestor's "
+        "sibling clades (the rest from farther clades). Only used with "
+        "--reject-class.",
+    )
 
 
 def run(args: argparse.Namespace) -> None:
@@ -266,6 +289,9 @@ def run(args: argparse.Namespace) -> None:
             n_workers=args.workers,
             n_gpu_workers=args.gpu_workers,
             exclude_plasmids=args.exclude_plasmids,
+            reject_class=args.reject_class,
+            reject_fraction=args.reject_fraction,
+            reject_near_far_ratio=args.reject_near_far_ratio,
         )
 
         logger.info(

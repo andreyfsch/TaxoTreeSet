@@ -60,12 +60,15 @@ from typing import Any
 from bigtree import Node
 
 from taxotreeset.core.generation import (
+    build_reject_tasks,
     classify_children_by_rank,
     compute_balanced_extraction_plan,
     distribute_n_per_class_across_leaves,
     make_low_capacity_bucket_node,
     make_rare_taxa_bucket_node,
+    make_reject_bucket_node,
     register_virtual_bucket,
+    sample_reject_leaves,
 )
 from taxotreeset.core.generation.capacity import compute_all_capacities
 from taxotreeset.core.generation.constants import (
@@ -225,6 +228,9 @@ class GenerationOrchestrator:
         n_workers: int | None = None,
         n_gpu_workers: int | None = None,
         exclude_plasmids: bool = False,
+        reject_class: bool = False,
+        reject_fraction: float = 1.0,
+        reject_near_far_ratio: float = 0.5,
     ) -> None:
         """Initialize the orchestrator and its collaborating components.
 
@@ -270,6 +276,17 @@ class GenerationOrchestrator:
             n_gpu_workers: GPU worker processes for large leaves (requires
                 CuPy). Defaults to auto-detect (all CUDA devices). Pass 0
                 to disable GPU acceleration.
+            exclude_plasmids: Drop plasmid sequences at ingestion (passed to
+                NCBIDownloader).
+            reject_class: When True, append a ``virtual_reject`` class to every
+                head, trained on sequence leaves sampled from outside the head's
+                subtree (near siblings + far clades). Teaches the head to reject
+                mis-routed / out-of-distribution inputs instead of forcing them
+                into a real class. Opt-in; off leaves generation unchanged.
+            reject_fraction: Size of the reject class relative to ``n_per_class``
+                (1.0 = balanced with the real classes).
+            reject_near_far_ratio: Fraction of reject windows drawn from the
+                nearest ancestor's sibling clades (the rest from farther clades).
         """
         self.registry: Any = registry
         self.config_path: str = config_path
@@ -291,6 +308,9 @@ class GenerationOrchestrator:
         self.use_exact_capacity: bool = use_exact_capacity
         self.min_leaves_per_class: int = min_leaves_per_class
         self.rare_taxa_strategy: str = rare_taxa_strategy
+        self.reject_class: bool = reject_class
+        self.reject_fraction: float = reject_fraction
+        self.reject_near_far_ratio: float = reject_near_far_ratio
         self.selective_download_threshold: int = selective_download_threshold
         self.spill_dir: str | None = spill_dir
         self.tmp_dir: str | None = tmp_dir
@@ -1643,6 +1663,14 @@ class GenerationOrchestrator:
             leaf_cache=leaf_cache,
         )
 
+        retained_children = self._maybe_add_reject_class(
+            current_node=current_node,
+            retained_children=retained_children,
+            per_child_tasks=per_child_tasks,
+            plan=plan,
+            virtual_id_registry=virtual_id_registry,
+        )
+
         job = self._build_extraction_job(
             current_node=current_node,
             retained_children=retained_children,
@@ -1836,6 +1864,66 @@ class GenerationOrchestrator:
             parent_name=parent_name,
         )
         return [*retained_children, bucket_node]
+
+    def _maybe_add_reject_class(
+        self,
+        current_node: Node,
+        retained_children: list,
+        per_child_tasks: dict[str, list[dict]],
+        plan: dict,
+        virtual_id_registry: dict,
+    ) -> list:
+        """Append a reject class of out-of-subtree negatives to the head.
+
+        When ``self.reject_class`` is enabled, samples sequence leaves from
+        outside ``current_node``'s subtree (near siblings + far clades), builds
+        ``round(n_per_class * reject_fraction)`` extraction tasks for them, and
+        appends a detached ``virtual_reject`` node as an extra training label.
+        The reject windows never re-parent any tree node; they are injected
+        directly into ``per_child_tasks`` (mutated). No-op when disabled, at the
+        root (no intra-tree "outside"), or when the budget is zero.
+
+        Args:
+            current_node: Parent node (the head) being scheduled.
+            retained_children: Current list of training labels.
+            per_child_tasks: Per-class extraction tasks (mutated to add reject).
+            plan: Balancing plan (provides ``n_per_class``).
+            virtual_id_registry: Registry to populate (mutated).
+
+        Returns:
+            ``retained_children`` with the reject node appended when created,
+            otherwise the input list unchanged.
+        """
+        if not self.reject_class:
+            return retained_children
+
+        near_leaves, far_leaves = sample_reject_leaves(current_node)
+        n_reject = round(plan["n_per_class"] * self.reject_fraction)
+        reject_tasks = build_reject_tasks(
+            near_leaves=near_leaves,
+            far_leaves=far_leaves,
+            n_reject=n_reject,
+            near_far_ratio=self.reject_near_far_ratio,
+            min_subseq_len=self.min_subseq_len,
+        )
+        if not reject_tasks:
+            return retained_children
+
+        parent_taxid = str(current_node.name)
+        parent_name = getattr(current_node, "scientific_name", parent_taxid)
+        reject_node, reject_meta = make_reject_bucket_node(
+            parent_node=current_node,
+            parent_taxid=parent_taxid,
+            parent_name=parent_name,
+        )
+        register_virtual_bucket(
+            virtual_id_registry=virtual_id_registry,
+            bucket_metadata=reject_meta,
+            parent_taxid=parent_taxid,
+            parent_name=parent_name,
+        )
+        per_child_tasks[str(reject_node.name)] = reject_tasks
+        return [*retained_children, reject_node]
 
     def _build_extraction_job(
         self,
