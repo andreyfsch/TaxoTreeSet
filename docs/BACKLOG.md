@@ -156,18 +156,37 @@ comparable to the canonical classes.
 
 ---
 
-## 🟢 P7 — Decompose `capacity.py` / `generation_orchestrator.py`
+## 🟡 P7 — Decompose `capacity.py` / `generation_orchestrator.py`
 
-**Problem.** `capacity.py` (~2300 lines) and the generation orchestrator are
-large relative to the "modular pipeline" framing, hindering granular review and
-testing.
+**Problem.** `capacity.py` and the generation orchestrator are large relative to
+the "modular pipeline" framing, hindering granular review and testing.
 
 **Approach.** Split into submodules mirroring the glossary concepts (exact vs
-approximate/Bloom capacity, GPU encoding, disk spill, checkpointing). Already
-under way: `_BottomUpCapacityComputer` was extracted from
-`compute_all_capacities` and `run_preflight` was split into helpers.
+approximate/Bloom capacity, GPU encoding, disk spill, checkpointing).
 
-**Effort.** Moderate, low-risk (covered by the 810-test suite).
+**Progress.**
+- **Part A — done (2026-06-22).** Conservative extraction of the pure, patch-free
+  helper groups into submodules, re-exported from `capacity.py` so every existing
+  import/patch keeps working with zero test edits: `_encoding.py` (2-bit packing
+  LUT + window packer), `_bloom.py` (filter sizing + sliding-window insertion +
+  bit ops), `_gpu.py` (CUDA detection + GPU encode/dedup kernels). `capacity.py`
+  2422 → 1893 lines. Earlier work also extracted `_BottomUpCapacityComputer` from
+  `compute_all_capacities` and split `run_preflight` into helpers.
+- **Part B — done (2026-06-22).** Test groundwork for the *later* full split: a
+  real-LMDB vault fixture (`tests/unit/_vault_fixture.py`) + behavioral tests
+  (`test_capacity_behavioral.py`) that drive `_capacity_exact`,
+  `_capacity_approximate`, `compute_node_capacity` through a genuine temp vault
+  with **no monkeypatching**, so they survive the I/O core moving out of
+  `capacity.py`.
+- **Part C — remaining.** Move the I/O core (`_read_single_sequence`/
+  `_read_sequence_cached`/`_SEQUENCE_CACHE`, `_HASHED_*`, `_flush_keys_to_buckets`),
+  `_NodeCapacityKeys`, `_BottomUpCapacityComputer`, checkpoint/spill,
+  exact-capacity, and `_capacity_approximate` into submodules, then migrate/retire
+  the ~45 patch-by-path tests in `test_capacity.py` as the behavioral tests take
+  over. HoreKa-critical; do incrementally on top of the Part B net.
+
+**Effort.** Part C moderate, low-risk now (covered by the 855-test suite +
+behavioral net).
 
 ---
 
