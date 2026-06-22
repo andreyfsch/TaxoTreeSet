@@ -796,61 +796,73 @@ def fig_reject_bucket() -> None:
 
     Unlike the other virtual buckets (which absorb a parent's own
     under-supported children), the reject class is fed by sequences sampled
-    from *outside* the head's subtree: near (nearest-ancestor siblings) + far
-    (the rest). It gives the head an explicit none-of-these label.
+    from *outside* the head's subtree — near (nearest-ancestor sibling clades)
+    and far (clades elsewhere in the tree) — shown here on the taxonomy tree
+    with arrows feeding the head's reject label.
     """
-    fig, ax = _canvas(13, 6.2)
-    ax.text(50, 96, "Reject class: a none-of-these label from out-of-subtree "
-            "sequences", ha="center", fontsize=12.5, weight="bold")
+    fig, ax = _canvas(13.5, 7.4)
+    ax.text(50, 96, "Reject class: out-of-subtree clades feed a none-of-these "
+            "label on the head", ha="center", fontsize=12.5, weight="bold")
 
-    # ---- Left: the head and its labels (real classes + the reject class) ----
-    ax.add_patch(FancyBboxPatch((2, 12), 52, 76,
-                 boxstyle="round,pad=0.3,rounding_size=1.0",
-                 fc="#fcfcfc", ec="#cccccc", lw=1.2))
-    ax.text(28, 84, "One head's labels", ha="center", fontsize=10, weight="bold")
+    def edge(p1, p2, color="#cccccc", lw=1.3):
+        ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color=color, lw=lw, zorder=0)
 
-    _node(ax, 28, 73, "head\n(parent\ntaxon)", BLUE, r=5)
+    # ---- taxonomy tree backbone (head's lineage on the left, a distant
+    #      branch on the right; only the head's own parent is labelled) ----
+    root = (50, 90)
+    par, mid = (22, 78), (72, 78)            # par = head's parent; mid = unrelated branch
+    edge(root, par); edge(root, mid)
+    _node(ax, *root, "root", BLUE, r=3.0)
+    _node(ax, *par, "parent", BLUE, r=3.6)
+    _node(ax, *mid, "", BLUE, r=3.0)
 
-    for cx, lab in [(11, "class\nA"), (21, "class\nB"), (31, "class\nC")]:
-        _node(ax, cx, 52, lab, GREEN, r=3.6)
-        _arrow(ax, (cx, 55.6), (26, 68.5), color="#9bb9d6", lw=1.1)
-    ax.add_patch(FancyBboxPatch((5, 45.5), 31, 13,
-                 boxstyle="round,pad=0.2,rounding_size=0.6",
+    head, sibA, sibB = (9, 61), (22, 61), (32, 61)
+    m1, m2 = (60, 61), (83, 61)
+    for child in (head, sibA, sibB):
+        edge(par, child)
+    for child in (m1, m2):
+        edge(mid, child)
+    _node(ax, *m1, "", BLUE, r=2.8)
+    _node(ax, *m2, "", BLUE, r=2.8)
+    _node(ax, *sibA, "", GREY, r=2.8)
+    _node(ax, *sibB, "", GREY, r=2.8)
+    _node(ax, *head, "head", BLUE, r=4.8)
+
+    f1, f2, f3, f4 = (52, 45), (66, 45), (76, 45), (90, 45)
+    edge(m1, f1); edge(m1, f2); edge(m2, f3); edge(m2, f4)
+    for fc_ in (f1, f2, f3, f4):
+        _node(ax, *fc_, "", GREY, r=2.5)
+
+    ax.text(27, 67, "near — sibling clades", ha="center", fontsize=7, color="#555555")
+    ax.text(71, 51.5, "far — distant clades", ha="center", fontsize=7, color="#555555")
+
+    # ---- head's real classes (genuine, in-subtree) ----
+    for cx, lab in [(3, "A"), (9, "B"), (15, "C")]:
+        _node(ax, cx, 45, lab, GREEN, r=2.5)
+        edge(head, (cx, 47), color="#bcd0e6")
+    ax.add_patch(FancyBboxPatch((0.5, 31), 18.5, 35.5,
+                 boxstyle="round,pad=0.3,rounding_size=0.8",
                  fc="none", ec=GREEN, ls="--", lw=1.1))
-    ax.text(20.5, 42.8, "real classes — genuine members (in-subtree)",
-            ha="center", fontsize=6.6, color="#2e7d32")
+    ax.text(9.5, 35, "head's real classes\n(genuine, in-subtree)",
+            ha="center", va="center", fontsize=6.6, color="#2e7d32")
 
-    _node(ax, 46, 52, "virtual_\nreject", ORANGE, r=4.6, dashed=True)
-    _arrow(ax, (44, 55), (31, 69), color="#f0b070", lw=1.2)
-    ax.text(46, 45.5, "none-of-these", ha="center", fontsize=6.6, color="#9a5a12")
+    # ---- the reject label on the head, fed by near + far clades ----
+    reject = (39, 21)
+    edge(head, reject, color="#f0b070", lw=1.5)   # it is one of the head's labels
+    _node(ax, *reject, "virtual_\nreject", ORANGE, r=5.2, dashed=True)
+    ax.text(39, 13.5, "none-of-these", ha="center", fontsize=6.8, color="#9a5a12")
 
-    # ---- Right: negatives sampled from OUTSIDE the head's subtree ----
-    ax.add_patch(FancyBboxPatch((58, 12), 40, 76,
-                 boxstyle="round,pad=0.3,rounding_size=1.0",
-                 fc="#fcfcfc", ec="#cccccc", lw=1.2))
-    ax.text(78, 84, "Sampled from outside the subtree", ha="center",
-            fontsize=10, weight="bold")
+    _curve(ax, sibA, (35, 24), "#e0902c", rad=-0.22)
+    _curve(ax, sibB, (37, 25), "#e0902c", rad=-0.15)
+    _curve(ax, f2, (43, 22), "#e0902c", rad=0.34)
+    _curve(ax, f3, (44, 20), "#e0902c", rad=0.40)
 
-    def _bars(cx, top_y, n, color):
-        for j in range(n):
-            ax.add_patch(Rectangle((cx - 3, top_y - j * 1.5), 6, 0.95,
-                         fc=LIGHT.get(color, "#eee"), ec=color, lw=0.7))
+    ax.text(74, 26, "windows sampled from the\nnear + far clades  →  reject\n\n"
+            "--reject-near-far-ratio  sets near:far\n"
+            "size ≈ n_per_class  (--reject-fraction)",
+            ha="center", fontsize=7, color="#555555")
 
-    _node(ax, 70, 73, "near", GREY, r=3.4)
-    ax.text(70, 77.6, "sibling clades", ha="center", fontsize=6.4, color="#555")
-    _bars(70, 66, 4, GREY)
-    _curve(ax, (66, 64), (50, 54), "#e0902c", rad=0.28)
-
-    _node(ax, 88, 55, "far", GREY, r=3.4)
-    ax.text(88, 59.6, "distant clades", ha="center", fontsize=6.4, color="#555")
-    _bars(88, 48, 4, GREY)
-    _curve(ax, (84, 46), (50.5, 50.5), "#e0902c", rad=0.2)
-
-    ax.text(78, 28, "near : far  set by --reject-near-far-ratio\n"
-            "size ≈ n_per_class  (--reject-fraction)", ha="center",
-            fontsize=7, color="#555555")
-
-    ax.text(50, 5, "The reject class is a normal head label whose windows come "
+    ax.text(50, 4, "The reject class is a normal head label whose windows come "
             "from sequences OUTSIDE the head's subtree, giving the head an "
             "explicit “none of these” option.   Opt-in: --reject-class.",
             ha="center", fontsize=7.2, style="italic", color="#444444")
