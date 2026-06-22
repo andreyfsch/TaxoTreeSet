@@ -791,11 +791,80 @@ def fig_generate_detail() -> None:
     plt.close(fig)
 
 
+def fig_reject_bucket() -> None:
+    """The reject class: a per-head label trained on out-of-subtree negatives.
+
+    Unlike the other virtual buckets (which absorb a parent's own
+    under-supported children), the reject class is fed by sequences sampled
+    from *outside* the head's subtree: near (nearest-ancestor siblings) + far
+    (the rest). It gives the head an explicit none-of-these label.
+    """
+    fig, ax = _canvas(13, 6.2)
+    ax.text(50, 96, "Reject class: a none-of-these label from out-of-subtree "
+            "sequences", ha="center", fontsize=12.5, weight="bold")
+
+    # ---- Left: the head and its labels (real classes + the reject class) ----
+    ax.add_patch(FancyBboxPatch((2, 12), 52, 76,
+                 boxstyle="round,pad=0.3,rounding_size=1.0",
+                 fc="#fcfcfc", ec="#cccccc", lw=1.2))
+    ax.text(28, 84, "One head's labels", ha="center", fontsize=10, weight="bold")
+
+    _node(ax, 28, 73, "head\n(parent\ntaxon)", BLUE, r=5)
+
+    for cx, lab in [(11, "class\nA"), (21, "class\nB"), (31, "class\nC")]:
+        _node(ax, cx, 52, lab, GREEN, r=3.6)
+        _arrow(ax, (cx, 55.6), (26, 68.5), color="#9bb9d6", lw=1.1)
+    ax.add_patch(FancyBboxPatch((5, 45.5), 31, 13,
+                 boxstyle="round,pad=0.2,rounding_size=0.6",
+                 fc="none", ec=GREEN, ls="--", lw=1.1))
+    ax.text(20.5, 42.8, "real classes — genuine members (in-subtree)",
+            ha="center", fontsize=6.6, color="#2e7d32")
+
+    _node(ax, 46, 52, "virtual_\nreject", ORANGE, r=4.6, dashed=True)
+    _arrow(ax, (44, 55), (31, 69), color="#f0b070", lw=1.2)
+    ax.text(46, 45.5, "none-of-these", ha="center", fontsize=6.6, color="#9a5a12")
+
+    # ---- Right: negatives sampled from OUTSIDE the head's subtree ----
+    ax.add_patch(FancyBboxPatch((58, 12), 40, 76,
+                 boxstyle="round,pad=0.3,rounding_size=1.0",
+                 fc="#fcfcfc", ec="#cccccc", lw=1.2))
+    ax.text(78, 84, "Sampled from outside the subtree", ha="center",
+            fontsize=10, weight="bold")
+
+    def _bars(cx, top_y, n, color):
+        for j in range(n):
+            ax.add_patch(Rectangle((cx - 3, top_y - j * 1.5), 6, 0.95,
+                         fc=LIGHT.get(color, "#eee"), ec=color, lw=0.7))
+
+    _node(ax, 70, 73, "near", GREY, r=3.4)
+    ax.text(70, 77.6, "sibling clades", ha="center", fontsize=6.4, color="#555")
+    _bars(70, 66, 4, GREY)
+    _curve(ax, (66, 64), (50, 54), "#e0902c", rad=0.28)
+
+    _node(ax, 88, 55, "far", GREY, r=3.4)
+    ax.text(88, 59.6, "distant clades", ha="center", fontsize=6.4, color="#555")
+    _bars(88, 48, 4, GREY)
+    _curve(ax, (84, 46), (50.5, 50.5), "#e0902c", rad=0.2)
+
+    ax.text(78, 28, "near : far  set by --reject-near-far-ratio\n"
+            "size ≈ n_per_class  (--reject-fraction)", ha="center",
+            fontsize=7, color="#555555")
+
+    ax.text(50, 5, "The reject class is a normal head label whose windows come "
+            "from sequences OUTSIDE the head's subtree, giving the head an "
+            "explicit “none of these” option.   Opt-in: --reject-class.",
+            ha="center", fontsize=7.2, style="italic", color="#444444")
+
+    fig.savefig(FIG / "reject_bucket.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     fig_taxotreeset()
     fig_generate_detail()
     fig_generate_visual()
     fig_virtual_buckets()
+    fig_reject_bucket()
     fig_capacity_bottomup()
     fig_distribution_split()
     fig_selective_download()

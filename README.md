@@ -193,6 +193,21 @@ mechanisms produce them:
 - **Low-capacity** — the percentile-cutoff tail above merges here so it cannot
   starve the head.
 
+### Reject class (optional)
+
+![The reject class: a per-head none-of-these label whose windows are sampled from outside the head's subtree](docs/figures/reject_bucket.png)
+
+`--reject-class` adds one more label to every head — `virtual_reject` — but,
+unlike the buckets above, it is **not** built from the parent's own diverted
+children. Its windows are sampled from sequences **outside the head's subtree**:
+`near` (the nearest ancestor's sibling clades) plus `far` (the rest of the tree).
+The head therefore sees explicit negatives and gains a *none-of-these* label for
+inputs that match none of its real classes. `--reject-near-far-ratio`
+(default 0.5) sets the near/far mix and `--reject-fraction` (default 1.0) sizes
+the class relative to `n_per_class`; each pool is randomly capped for a flat
+per-head cost. Off by default. The root head gets no reject class — it has no
+in-tree "outside".
+
 ### Splitting: whole genomes, leakage-safe
 
 ![Splitting: assign whole genomes to train/val/test when there are at least three; otherwise slice one sequence positionally](docs/figures/split_distribution.png)
