@@ -99,20 +99,28 @@ Files: `io/downloader.py`, `core/generation_orchestrator.py`, `cli/generate.py`.
 
 ---
 
-## 🟡 P4 — OOD routing validation protocol
+## 🟠 P4 — OOD routing: reject class (done, intra-virus) + validation + non-virus gate
 
-**Problem.** The virtual buckets (`virtual_rare_taxa`, `virtual_misc`) are
-intended to absorb rare/unplaceable taxa, but whether a genuinely novel
-(held-out) taxon is actually routed there — rather than forced into a real
-class — is not measured. The separability diagnostic only assesses
-in-distribution separability within a head. (Note: the current README makes no
-"OOD-aware" claim; this would substantiate one if desired.)
+**Update (2026-06-21).** This was the decisive finding of the pilot inference work.
+Closed-set heads **confidently mis-accept** out-of-subtree inputs (a SARS-CoV-2
+sequence forced down the wrong Bamfordvirae subtree scored 0.94–1.00 at every
+level), so uncertainty alone cannot route a foreign input to a fallback. The fix —
+an explicit **reject class** of out-of-subtree negatives per head — is now
+implemented (`generate --reject-class`; near siblings + far clades) and validated
+on one head (rejects near 97% / far 99%, 7% false-reject, ~0 accuracy cost). The
+downstream **dominant-reject termination** lives in PhyloCascadeGLM's `_traverser.py`.
 
-**Approach.** Held-out-taxa protocol: exclude whole taxa from `discover`, then
-check the cascade routes them to the correct bucket. Spans generation (bucket
-construction, TaxoTreeSet) and routing (inference, PhyloCascadeGLM).
+**Remaining.**
+- **Validate end-to-end** on the reject-trained pilot (held-out-taxa protocol:
+  exclude whole taxa from `discover`, confirm the cascade rejects them).
+- **Phase 2 — non-virus domain gate:** the intra-virus reject covers "not in this
+  clade", not "not a virus at all". The root/shallow heads need **non-virus
+  negatives** (Bacteria/Archaea/Eukaryota RefSeq) — a new cross-domain sampling
+  capability in generation (discover/download outside Viruses).
 
-**Effort.** Moderate.
+**Effort.** Reject class: done. Non-virus gate: moderate (new data acquisition).
+
+Files: `core/generation/reject_bucket.py`, `core/generation_orchestrator.py`.
 
 ---
 
@@ -165,6 +173,9 @@ under way: `_BottomUpCapacityComputer` was extracted from
 
 ## Cross-repo — PhyloCascadeGLM
 
-Inference/evaluation items — hierarchy-aware eval metric, OOD routing validation,
-and the classification-depth vs. theta script — live in the PhyloCascadeGLM
-repo's own `docs/BACKLOG.md`, since they belong to that project.
+Inference/evaluation items live in the PhyloCascadeGLM repo's own `docs/BACKLOG.md`.
+As of 2026-06-21 the decision policy is implemented there (depth-normalized "mean"
+ranking + dominant-reject termination); what remains is end-to-end validation on
+the reject-trained pilot, theta/temperature calibration, the two weak heads
+(kingdom; collapsed `694009`), and a hierarchy-aware eval metric. The non-virus
+domain gate (P4 Phase 2) is the TaxoTreeSet-side follow-up.
