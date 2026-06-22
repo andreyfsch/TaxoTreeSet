@@ -56,19 +56,31 @@ Typical usage::
 
 import contextlib
 import logging
-import math
-from typing import TYPE_CHECKING
 
 from tqdm import tqdm
 
+from taxotreeset.core.generation._bloom import (  # re-exported for callers/tests
+    _bloom_get_bit as _bloom_get_bit,
+    _bloom_set_bit as _bloom_set_bit,
+    _build_bloom_filter,
+    _consume_sequence_into_bloom as _consume_sequence_into_bloom,
+    _consume_sequence_into_bloom_vectorized,
+    _generate_bloom_hashes as _generate_bloom_hashes,
+)
+from taxotreeset.core.generation._encoding import (
+    _BASES_PER_BYTE,
+    _HASHED_PREFIX_BUCKETS,
+    _encode_windows_2bit,
+)
+from taxotreeset.core.generation._gpu import (
+    _detect_cuda_device_count,
+    _gpu_encode_unique,
+)
 from taxotreeset.core.generation.constants import (
     BLOOM_EXPECTED_INSERTIONS,
     BLOOM_FALSE_POSITIVE_RATE,
 )
 from taxotreeset.dataset.utils import _read_single_sequence
-
-if TYPE_CHECKING:
-    import numpy as np
 
 logger = logging.getLogger("TaxoTreeSet.Core.Generation.Capacity")
 
@@ -78,10 +90,6 @@ _SEQUENCE_CACHE_MAX_ENTRIES: int = 30_000
 _EARLY_STOP_SAFETY_MULTIPLIER: int = 5
 _PROGRESS_LOG_INTERVAL: int = 200
 
-# Exact-hashed encoding: each ACGT base packs into 2 bits, 4 bases per byte.
-# The packed key length in bytes is derived from min_len at call time as
-# ceil(min_len / _BASES_PER_BYTE), so the method holds for any window size.
-_BASES_PER_BYTE: int = 4
 # Raw pure-ACGT keys accumulate until this many are pending, then a single
 # np.unique compacts them. A large threshold keeps the number of (costly)
 # unique passes tiny while bounding the peak by the pending-buffer size.
@@ -94,7 +102,8 @@ _HASHED_FLUSH_THRESHOLD: int = 8_000_000
 # uniqued independently and the unique counts summed. Keys in different buckets
 # can never be equal, so the sum is exact.
 _HASHED_DISK_THRESHOLD: int = 30_000_000
-_HASHED_PREFIX_BUCKETS: int = 256
+# _HASHED_PREFIX_BUCKETS (256, by first packed byte) moved to ._encoding and
+# imported above (shared with _gpu, cycle-free).
 
 # The bottom-up capacity pass keeps several nodes' key sets alive at once
 # (the recursion frontier), unlike the single-node _capacity_exact, so its
@@ -1522,317 +1531,13 @@ def _flush_keys_to_buckets(keys, bucket_files, key_bytes: int) -> None:
         bucket_files[bucket].write(sorted_bytes[start:end].tobytes())
 
 
-_ACGT_LUT_CACHE = None
+# 2-bit window encoding (_get_acgt_lut, _encode_windows_2bit, _BASES_PER_BYTE)
+# moved to ._encoding and imported at the top of this module.
 
 
-def _get_acgt_lut():
-    """Return the cached 256-entry ACGT-to-2-bit lookup table, building it once.
-
-    Non-ACGT bytes map to the sentinel 255, which marks a window as
-    ambiguous (containing IUPAC ambiguity codes or N) so it is routed to
-    the exact string-set path rather than the 2-bit-packed path. The table
-    is built lazily on first use because numpy is imported lazily within
-    this module.
-
-    Returns:
-        numpy uint8 array of length 256; index by ASCII byte value.
-    """
-    global _ACGT_LUT_CACHE
-    if _ACGT_LUT_CACHE is None:
-        import numpy as np
-
-        lut = np.full(256, 255, dtype=np.uint8)
-        for code, base in enumerate(b"ACGT"):
-            lut[base] = code
-        _ACGT_LUT_CACHE = lut
-    return _ACGT_LUT_CACHE
-
-
-def _encode_windows_2bit(windows, min_len: int):
-    """Pack pure-ACGT sliding windows into fixed-length 2-bit byte keys.
-
-    Each base occupies 2 bits and four bases pack into one byte, so a
-    window of ``min_len`` bases packs into ceil(min_len / 4) bytes. The
-    key length is derived from ``min_len`` here, so the encoding is valid
-    for any window size, not just the default of 100.
-
-    Windows containing any non-ACGT symbol are not encoded; the returned
-    boolean mask marks which windows were pure ACGT. Ambiguous windows are
-    handled separately by the caller via an exact string set, keeping the
-    two domains disjoint so their unique counts sum without double counting.
-
-    Args:
-        windows: (N, min_len) uint8 array of ASCII base values, typically
-            a ``sliding_window_view`` over one sequence.
-        min_len: Window size in bases; determines the packed key length.
-
-    Returns:
-        Two-tuple ``(packed_keys, pure_mask)``:
-            - packed_keys: (M,) array of void-typed keys of width
-              ceil(min_len / 4) bytes, one per pure-ACGT window (M <= N).
-            - pure_mask: (N,) boolean array, True where the window was
-              pure ACGT.
-    """
-    import numpy as np
-
-    codes = _get_acgt_lut()[windows]
-    pure_mask = np.all(codes != np.uint8(255), axis=1)
-    pure = codes[pure_mask]
-    n_pure = pure.shape[0]
-    key_bytes = (min_len + _BASES_PER_BYTE - 1) // _BASES_PER_BYTE
-    if n_pure == 0:
-        empty = np.empty((0,), dtype=np.dtype((np.void, key_bytes)))
-        return empty, pure_mask
-
-    # Pad the base axis up to a multiple of 4 with zeros so it reshapes
-    # cleanly into groups of four 2-bit codes. The padding is identical for
-    # every window, so it cannot introduce a spurious collision.
-    pad = (-min_len) % _BASES_PER_BYTE
-    if pad:
-        pure = np.concatenate(
-            [pure, np.zeros((n_pure, pad), dtype=np.uint8)], axis=1
-        )
-    groups = pure.reshape(n_pure, key_bytes, _BASES_PER_BYTE)
-    packed = (
-        groups[:, :, 0]
-        | (groups[:, :, 1] << np.uint8(2))
-        | (groups[:, :, 2] << np.uint8(4))
-        | (groups[:, :, 3] << np.uint8(6))
-    ).astype(np.uint8)
-    keys = np.ascontiguousarray(packed).view(
-        np.dtype((np.void, key_bytes))
-    ).reshape(n_pure)
-    return keys, pure_mask
-
-
-# ---------------------------------------------------------------------------
-# GPU-accelerated leaf processing (requires CuPy + CUDA)
-# ---------------------------------------------------------------------------
-
-
-def _detect_cuda_device_count() -> int:
-    """Return the number of available CUDA devices, or 0 if CuPy is absent."""
-    try:
-        import cupy as cp
-        return int(cp.cuda.runtime.getDeviceCount())
-    except Exception:
-        return 0
-
-
-def _gpu_sliding_window_view(seq_gpu, window_len: int):
-    """Sliding-window view over a 1-D CuPy uint8 array.
-
-    Uses ``sliding_window_view`` when available (CuPy ≥ 12) and falls
-    back to ``as_strided`` for older releases.
-    """
-    import cupy as cp
-
-    try:
-        return cp.lib.stride_tricks.sliding_window_view(seq_gpu, window_len)
-    except AttributeError:
-        n = seq_gpu.shape[0]
-        n_windows = n - window_len + 1
-        strides = (seq_gpu.strides[0], seq_gpu.strides[0])
-        return cp.lib.stride_tricks.as_strided(
-            seq_gpu, shape=(n_windows, window_len), strides=strides,
-        )
-
-
-def _gpu_unique_rows(packed_gpu):
-    """Return deduplicated rows of a 2-D uint8 CuPy array.
-
-    Uses ``cp.lexsort`` (GPU radix sort column-by-column) rather than
-    ``cp.unique(axis=0)``.  On CuPy ≥ 14 the latter silently calls
-    ``numpy.unique`` on the host for void-typed keys, turning a 50 ms GPU
-    operation into a multi-minute CPU sort for large arrays.
-    ``cp.lexsort`` dispatches to thrust and stays on the device.
-    """
-    import cupy as cp
-
-    n = packed_gpu.shape[0]
-    if n <= 1:
-        return packed_gpu
-    # cp.lexsort requires a 2-D CuPy ndarray, not a Python sequence.
-    # Transposing gives shape (key_bytes, n); reversing columns puts
-    # column-0 (most significant byte) on the last row, which lexsort
-    # treats as the primary sort key.
-    keys_2d = cp.ascontiguousarray(packed_gpu[:, ::-1].T)
-    idx = cp.lexsort(keys_2d)
-    del keys_2d
-    sorted_arr = packed_gpu[idx]
-    diff = cp.any(sorted_arr[1:] != sorted_arr[:-1], axis=1)
-    mask = cp.concatenate([cp.array([True]), diff])
-    return sorted_arr[mask]
-
-
-def _gpu_encode_unique(
-    seq_arr: "np.ndarray",
-    min_len: int,
-    device_id: int,
-    key_bytes: int,
-) -> "np.ndarray":
-    """Encode and globally deduplicate a sequence's k-mers entirely on GPU.
-
-    Processes the sequence in VRAM-sized chunks, deduplicates each chunk
-    on the GPU, then performs a final cross-chunk dedup.  Only the unique
-    packed keys are transferred back to the host — a small fraction of all
-    windows for repetitive sequences.
-
-    Ambiguous windows (non-ACGT bases) are intentionally not tracked; the
-    returned count is therefore exact for pure-ACGT sequences and an
-    under-estimate otherwise.  This matches ``_from_chunked_sequence``.
-
-    Args:
-        seq_arr: Host-side uint8 array of ASCII-encoded sequence bases.
-        min_len: Sliding-window size in bases.
-        device_id: CUDA device index.
-        key_bytes: Packed key width = ceil(min_len / 4).
-
-    Returns:
-        (M,) void-dtype numpy array of unique 2-bit-packed keys.
-    """
-    import numpy as np
-    import cupy as cp
-
-    cp.cuda.Device(device_id).use()
-    lut_gpu = cp.array(_get_acgt_lut())
-
-    n = seq_arr.shape[0]
-    n_windows = n - min_len + 1
-
-    # Budget 30 % of free VRAM per chunk.  Peak per window: codes array
-    # (min_len bytes) + filtered pure (≈ 0.9 × min_len) + packed (key_bytes).
-    free_vram, _ = cp.cuda.runtime.memGetInfo()
-    bytes_per_window = int(min_len * 2.0 + key_bytes)
-    chunk_size = max(500_000, int(free_vram * 0.30 / bytes_per_window))
-
-    # Upload the full sequence to VRAM once.  For sequences larger than
-    # available VRAM this raises cupy.cuda.memory.OutOfMemoryError, which
-    # propagates out of _gpu_encode_unique and is caught by
-    # _leaf_worker_task_auto, routing the leaf to the CPU disk-spill path.
-    # This is the correct filter: only sequences that genuinely fit in VRAM
-    # are processed on GPU; everything else goes to CPU automatically.
-    seq_gpu = cp.asarray(seq_arr)
-
-    # Accumulate per-chunk unique arrays on CPU (not GPU) to avoid exhausting
-    # VRAM on GPUs with small memory budgets (e.g. GTX 1650 with 4 GB).
-    # Guard: if accumulated data exceeds 30 % of *currently* available RAM,
-    # raise MemoryError to trigger CPU fallback before the host OOMs.
-    # psutil.available adapts automatically: ~2 GB locally, ~75 GB on
-    # HoreKa Green, so large chromosomes are handled in-memory on big nodes
-    # without unnecessary spill.
-    import psutil as _psutil
-    _ACCUM_LIMIT = int(_psutil.virtual_memory().available * 0.30)
-    all_unique_cpu: list = []
-    _accumulated_bytes = 0
-
-    for chunk_start in range(0, n_windows, chunk_size):
-        chunk_end = min(chunk_start + chunk_size, n_windows)
-
-        sub = seq_gpu[chunk_start: chunk_end + min_len - 1]
-        windows = _gpu_sliding_window_view(sub, min_len)
-
-        codes = lut_gpu[windows]                              # (N, min_len) uint8
-        del windows
-        pure_mask = cp.all(codes != cp.uint8(255), axis=1)   # (N,) bool
-        pure = codes[pure_mask]
-        n_pure = int(pure.shape[0])
-        del codes, pure_mask
-
-        if n_pure == 0:
-            del pure
-            cp.get_default_memory_pool().free_all_blocks()
-            continue
-
-        pad = (-min_len) % _BASES_PER_BYTE
-        if pad:
-            pure = cp.concatenate(
-                [pure, cp.zeros((n_pure, pad), dtype=cp.uint8)], axis=1,
-            )
-        groups = pure.reshape(n_pure, key_bytes, _BASES_PER_BYTE)
-        packed = (
-            groups[:, :, 0]
-            | (groups[:, :, 1] << cp.uint8(2))
-            | (groups[:, :, 2] << cp.uint8(4))
-            | (groups[:, :, 3] << cp.uint8(6))
-        ).astype(cp.uint8)                                    # (n_pure, key_bytes)
-        del pure, groups
-
-        # Dedup this chunk on GPU, transfer only unique keys to CPU, then
-        # release the slab once per chunk.
-        unique_chunk_gpu = _gpu_unique_rows(packed)
-        unique_cpu = cp.asnumpy(unique_chunk_gpu)
-        del packed, unique_chunk_gpu
-        cp.get_default_memory_pool().free_all_blocks()  # one sync per chunk
-
-        _accumulated_bytes += unique_cpu.nbytes
-        if _accumulated_bytes > _ACCUM_LIMIT:
-            del seq_gpu, lut_gpu, all_unique_cpu, unique_cpu
-            cp.get_default_memory_pool().free_all_blocks()
-            raise MemoryError(
-                f"GPU encode accumulation reached "
-                f"{_accumulated_bytes / 1024**3:.1f} GB — "
-                "routing to CPU spill path"
-            )
-        all_unique_cpu.append(unique_cpu)
-
-    del seq_gpu, lut_gpu
-    cp.get_default_memory_pool().free_all_blocks()
-
-    void_dtype = np.dtype((np.void, key_bytes))
-
-    if not all_unique_cpu:
-        return np.empty((0,), dtype=void_dtype)
-
-    # Final cross-chunk dedup.  If the concatenated unique-per-chunk data fits
-    # in VRAM (3× for sort scratch), run it on GPU.  Otherwise fall back to a
-    # CPU bucket sort, which is the same O(N/256) per-bucket np.unique the CPU
-    # leaf worker uses.
-    all_cpu = np.concatenate(all_unique_cpu, axis=0)          # (total, key_bytes) uint8
-    del all_unique_cpu
-
-    try:
-        free_vram, _ = cp.cuda.runtime.memGetInfo()
-        if all_cpu.nbytes * 3 < free_vram:
-            merged_gpu = cp.asarray(all_cpu)
-            del all_cpu
-            unique_gpu = _gpu_unique_rows(merged_gpu)
-            del merged_gpu
-            cp.get_default_memory_pool().free_all_blocks()
-            result_cpu = cp.asnumpy(unique_gpu)
-            del unique_gpu
-            return np.ascontiguousarray(result_cpu).view(void_dtype).reshape(-1)
-    except Exception:
-        pass
-
-    # CPU bucket-based dedup: mirror of _flush_keys_to_buckets / _from_chunked_sequence.
-    n_buckets = _HASHED_PREFIX_BUCKETS
-    cpu_buckets: list[list] = [[] for _ in range(n_buckets)]
-    first_byte = all_cpu[:, 0]
-    order = np.argsort(first_byte, kind="stable")
-    sb = all_cpu[order]
-    sf = first_byte[order]
-    del all_cpu, order, first_byte
-
-    split_pts = np.flatnonzero(np.diff(sf)) + 1
-    starts = np.concatenate([[0], split_pts])
-    ends = np.concatenate([split_pts, [len(sf)]])
-    for s, e in zip(starts, ends):
-        b = int(sf[s])
-        cpu_buckets[b].append(sb[s:e])
-    del sb, sf
-
-    result_parts = []
-    for bucket_arrs in cpu_buckets:
-        if not bucket_arrs:
-            continue
-        merged = np.concatenate(bucket_arrs, axis=0)
-        keys_v = np.ascontiguousarray(merged).view(void_dtype).reshape(-1)
-        result_parts.append(np.unique(keys_v))
-
-    if not result_parts:
-        return np.empty((0,), dtype=void_dtype)
-    return np.concatenate(result_parts)
+# GPU-accelerated kernels (_detect_cuda_device_count, _gpu_sliding_window_view,
+# _gpu_unique_rows, _gpu_encode_unique) moved to ._gpu and imported at the top of
+# this module. The CPU/GPU leaf workers below call _gpu_encode_unique.
 
 
 def _leaf_pool_initializer(counter, lock, n_gpus: int) -> None:
@@ -2183,240 +1888,6 @@ def _capacity_approximate(
     return unique_count
 
 
-def _build_bloom_filter(
-    expected_insertions: int,
-    false_positive_rate: float,
-) -> tuple[bytearray, int]:
-    """Size and allocate a Bloom filter for given target parameters.
-
-    Computes the optimal bit array size m and hash count k from the
-    expected insertion count n and false-positive rate p::
-
-        m = -n * ln(p) / (ln(2)^2)
-        k = (m / n) * ln(2)
-
-    Args:
-        expected_insertions: Maximum number of distinct items.
-        false_positive_rate: Target false-positive probability.
-
-    Returns:
-        Two-tuple ``(bit_array, hash_count)``:
-            - bit_array: bytearray of size ceil(m/8) bytes.
-            - hash_count: optimal number of hash functions k.
-    """
-    bit_count = int(
-        -expected_insertions * math.log(false_positive_rate) / (math.log(2) ** 2)
-    )
-    hash_count = max(1, int((bit_count / expected_insertions) * math.log(2)))
-    bit_array = bytearray((bit_count + 7) // 8)
-    return bit_array, hash_count
-
-
-def _consume_sequence_into_bloom(
-    sequence: str,
-    min_len: int,
-    bit_array: bytearray,
-    bit_array_size: int,
-    hash_count: int,
-) -> int:
-    """Reference implementation of Bloom insertion, kept for debugging.
-
-    No longer called by the production pipeline; ``_capacity_approximate``
-    routes through ``_consume_sequence_into_bloom_vectorized``, which is
-    7-10x faster on real viral sequences. This sequential implementation
-    is retained because:
-
-    1. It serves as the readable specification against which the
-       vectorized implementation is validated.
-    2. It produces a bit-identical bit_array for the same inputs, so
-       any future regression in the vectorized path can be caught by
-       comparing against this baseline.
-    3. Its semantics are exact ("sequential snapshot"): each window
-       sees the bit array updated by prior windows. The vectorized
-       implementation processes chunks of 2048 windows, which can
-       lead to a ~0.005% over-count when duplicate k-mers appear
-       within the same chunk. The bit array remains identical
-       regardless because bit-set is idempotent.
-
-    Args:
-        sequence: DNA sequence to scan.
-        min_len: Sliding window size.
-        bit_array: Bloom filter bit array (mutated in place).
-        bit_array_size: Total bit count of the array.
-        hash_count: Number of hash functions to apply per item.
-
-    Returns:
-        Exact count of items not already present in the filter when
-        scanned (the increment in unique count).
-    """
-    new_items_count = 0
-    sequence_length = len(sequence)
-
-    for window_start in range(sequence_length - min_len + 1):
-        subseq_bytes = sequence[window_start : window_start + min_len].encode("ascii")
-        bit_positions = list(
-            _generate_bloom_hashes(subseq_bytes, bit_array_size, hash_count)
-        )
-
-        already_present = all(
-            _bloom_get_bit(bit_array, position) for position in bit_positions
-        )
-        if not already_present:
-            new_items_count += 1
-            for position in bit_positions:
-                _bloom_set_bit(bit_array, position)
-
-    return new_items_count
-
-
-
-def _consume_sequence_into_bloom_vectorized(
-    sequence: str,
-    min_len: int,
-    bit_array: bytearray,
-    bit_array_size: int,
-    hash_count: int,
-    chunk_size: int = 2048,
-) -> int:
-    """Vectorized batch insertion of sliding-window subseqs into a Bloom filter.
-
-    Functionally equivalent to ``_consume_sequence_into_bloom`` but ~20-50x
-    faster on long sequences. Uses numpy to compute all hash positions in
-    parallel, process bit reads/writes in batch, and avoid the Python loop.
-
-    Operates on chunks of ``chunk_size`` windows at a time to bound the
-    error introduced by snapshot semantics: within a chunk, bit reads
-    happen before any writes, so duplicate windows in the same chunk
-    each count as new (vs. sequential semantics where only the first
-    counts). The chunk size keeps this drift small relative to the
-    Bloom filter's intrinsic ~1% false-positive rate.
-
-    Args:
-        sequence: DNA sequence to scan.
-        min_len: Sliding window size.
-        bit_array: Bloom filter bit array (mutated in place via numpy
-            buffer view).
-        bit_array_size: Total bit count of the array.
-        hash_count: Number of hash functions per item.
-        chunk_size: Number of windows processed per batch. Smaller
-            chunks reduce snapshot drift at the cost of marginal
-            speed. The default 2048 yields drift < 0.1% in practice.
-
-    Returns:
-        Approximate count of items not already present in the filter.
-        May slightly overestimate vs the sequential implementation when
-        the sequence contains duplicate k-mers within the same chunk.
-    """
-    import numpy as np
-    from numpy.lib.stride_tricks import sliding_window_view
-
-    seq_bytes = sequence.encode("ascii")
-    seq_len = len(seq_bytes)
-    if seq_len < min_len:
-        return 0
-
-    seq_arr = np.frombuffer(seq_bytes, dtype=np.uint8)
-    windows = sliding_window_view(seq_arr, min_len)
-    n_windows = windows.shape[0]
-
-    # numpy-aliased view of the Bloom bit array (mutations reflect back)
-    bit_view = np.frombuffer(bit_array, dtype=np.uint8)
-    k_offsets = np.arange(hash_count, dtype=np.uint64)
-    bit_array_size_u64 = np.uint64(bit_array_size)
-
-    new_items_total = 0
-
-    for chunk_start in range(0, n_windows, chunk_size):
-        chunk_end = min(chunk_start + chunk_size, n_windows)
-        chunk = windows[chunk_start:chunk_end]
-
-        # Extract h1 (first 8 bytes) and h2 (last 8 bytes) of each window
-        # If min_len < 8, pad windows with zeros to enable view as uint64
-        if min_len >= 8:
-            h1_bytes = np.ascontiguousarray(chunk[:, :8])
-            h2_bytes = np.ascontiguousarray(chunk[:, -8:])
-        else:
-            padded = np.zeros((chunk.shape[0], 8), dtype=np.uint8)
-            padded[:, :min_len] = chunk
-            h1_bytes = padded
-            h2_bytes = padded
-
-        h1 = h1_bytes.view(np.uint64).reshape(-1) & np.uint64(0x7FFFFFFFFFFFFFFF)
-        h2 = h2_bytes.view(np.uint64).reshape(-1) & np.uint64(0x7FFFFFFFFFFFFFFF)
-
-        # positions[i, k] = (h1[i] + k * h2[i]) % bit_array_size
-        # Apply mod m BEFORE the product to avoid uint64 overflow, which
-        # would silently diverge from the sequential implementation's
-        # arbitrary-precision Python integer semantics. Since
-        # m < 2^27 in practice, h1_mod * hash_count + h2_mod stays
-        # well below 2^32 with hash_count = 6.
-        h1_mod = h1 % bit_array_size_u64
-        h2_mod = h2 % bit_array_size_u64
-        positions = (h1_mod[:, None] + k_offsets[None, :] * h2_mod[:, None]) % bit_array_size_u64
-
-        byte_idx = (positions >> np.uint64(3)).astype(np.int64)  # // 8
-        bit_offset = (positions & np.uint64(7)).astype(np.uint8)  # % 8
-
-        # already_present[i] = all(bit_array[byte_idx[i, k]] bit bit_offset[i, k] set)
-        bit_masks = np.uint8(1) << bit_offset
-        existing = bit_view[byte_idx] & bit_masks
-        already_present = (existing == bit_masks).all(axis=1)
-
-        new_items_total += int((~already_present).sum())
-
-        # Set all bits for this chunk (idempotent on already-set bits)
-        np.bitwise_or.at(bit_view, byte_idx.ravel(), bit_masks.ravel())
-
-    return new_items_total
-
-
-def _bloom_set_bit(bit_array: bytearray, index: int) -> None:
-    """Set the bit at the given index in the bit array.
-
-    Args:
-        bit_array: Backing bytearray.
-        index: Zero-based bit position.
-    """
-    bit_array[index // 8] |= 1 << (index % 8)
-
-
-def _bloom_get_bit(bit_array: bytearray, index: int) -> int:
-    """Get the bit value at the given index in the bit array.
-
-    Args:
-        bit_array: Backing bytearray.
-        index: Zero-based bit position.
-
-    Returns:
-        0 if the bit is unset, non-zero if it is set.
-    """
-    return (bit_array[index // 8] >> (index % 8)) & 1
-
-
-def _generate_bloom_hashes(
-    item_bytes: bytes,
-    bit_array_size: int,
-    hash_count: int,
-):
-    """Yield k hash positions for an item using double-hashing.
-
-    Combines two 64-bit pseudo-random values extracted from the
-    item's byte representation as ``(h1 + i * h2) mod m`` to obtain
-    k positions cheaply. This is a standard Bloom filter optimization
-    that approximates k independent hash functions.
-
-    Args:
-        item_bytes: Byte representation of the item.
-        bit_array_size: Modulus for the position projection (total
-            bit count of the filter).
-        hash_count: Number of positions to yield.
-
-    Yields:
-        Sequence of integer positions in [0, bit_array_size).
-    """
-    h1 = int.from_bytes(item_bytes[:8].ljust(8, b"\x00"), "little") & 0x7FFFFFFFFFFFFFFF
-    h2 = (
-        int.from_bytes(item_bytes[-8:].ljust(8, b"\x00"), "little") & 0x7FFFFFFFFFFFFFFF
-    )
-    for index in range(hash_count):
-        yield (h1 + index * h2) % bit_array_size
+# Bloom-filter primitives (_build_bloom_filter, _consume_sequence_into_bloom[_vectorized],
+# _bloom_set_bit, _bloom_get_bit, _generate_bloom_hashes) moved to ._bloom and
+# imported at the top of this module. _capacity_approximate (above) calls them.
