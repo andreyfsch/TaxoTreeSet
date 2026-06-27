@@ -160,18 +160,24 @@ class TestExtractSubseqsFlankedBlocks:
 
     def test_returns_at_most_n_samples(self):
         seq = self._medium_seq(n=5, max_len=100)
-        samples = _sample_flanked_blocks(seq, n=5, max_len=100)
+        samples = _sample_flanked_blocks(
+            seq, n=5, min_len=50, max_len=100, rng=random.Random(0)
+        )
         assert len(samples) <= 5
 
     def test_samples_are_substrings_of_parent(self):
         seq = self._medium_seq(n=5, max_len=100)
-        samples = _sample_flanked_blocks(seq, n=5, max_len=100)
+        samples = _sample_flanked_blocks(
+            seq, n=5, min_len=50, max_len=100, rng=random.Random(0)
+        )
         for s in samples:
             assert s in seq
 
     def test_odd_n_produces_middle_sample(self):
         seq = self._medium_seq(n=3, max_len=100)
-        samples = _sample_flanked_blocks(seq, n=3, max_len=100)
+        samples = _sample_flanked_blocks(
+            seq, n=3, min_len=50, max_len=100, rng=random.Random(0)
+        )
         assert len(samples) == 3
 
 
@@ -204,14 +210,83 @@ class TestExtractSubseqsBoundedRandom:
 
 
 class TestSampleNonOverlapping:
-    def test_no_overlapping_intervals(self):
+    def test_returns_exactly_n_samples(self):
         rng = random.Random(42)
         seq = "ACGT" * 10000
-        samples = _sample_non_overlapping(seq, n=50, max_len=100, rng=rng)
+        samples = _sample_non_overlapping(seq, n=50, min_len=50, max_len=100, rng=rng)
         assert len(samples) == 50
 
-    def test_all_samples_are_same_length(self):
+    def test_intervals_do_not_overlap(self):
+        # A non-repetitive sequence makes every variable-length window locatable
+        # by its (unique) first occurrence, so we can verify the spans are
+        # genuinely disjoint even though lengths now vary.
+        gen = random.Random(1)
+        seq = "".join(gen.choice("ACGT") for _ in range(8000))
+        rng = random.Random(42)
+        samples = _sample_non_overlapping(seq, n=30, min_len=50, max_len=100, rng=rng)
+        assert len(samples) == 30
+        spans = sorted((seq.index(s), seq.index(s) + len(s)) for s in samples)
+        for (_, prev_end), (next_start, _) in zip(spans, spans[1:]):
+            assert next_start >= prev_end
+
+    def test_samples_within_length_bounds(self):
         rng = random.Random(42)
         seq = "ACGT" * 10000
-        samples = _sample_non_overlapping(seq, n=10, max_len=100, rng=rng)
-        assert all(len(s) == 100 for s in samples)
+        samples = _sample_non_overlapping(seq, n=10, min_len=50, max_len=100, rng=rng)
+        assert all(50 <= len(s) <= 100 for s in samples)
+
+
+# ---------------------------------------------------------------------------
+# Regression: emitted length distribution must not depend on n / strategy
+# ---------------------------------------------------------------------------
+
+
+def _mean(xs):
+    return sum(xs) / len(xs)
+
+
+class TestLengthIndependentOfStrategy:
+    """The reject-class length confound: long-sequence tiling strategies used to
+    emit only ``max_len`` windows while the short-sequence branch emitted random
+    lengths, so a class's per-leaf window budget leaked into the sequence length
+    (reject negatives, spread thin over many leaves, came out almost all 2000 bp).
+    After the fix every strategy draws a random length in ``[min_len, max_len]``.
+    """
+
+    def _random_seq(self, n_bp: int, seed: int) -> str:
+        return "".join(random.Random(seed).choices("ACGT", k=n_bp))
+
+    def test_non_overlapping_branch_is_not_pinned_to_max_len(self):
+        # Long sequence + small-ish n routes to _sample_non_overlapping (here
+        # 600000 >= 2 * 150 * 2000), which used to return only max_len (2000 bp)
+        # windows — the exact source of the confound.
+        seq = self._random_seq(600_000, seed=2)
+        samples = extract_subseqs(
+            seq, n=150, min_len=100, max_len=2000, rng=random.Random(0)
+        )
+        lengths = [len(s) for s in samples]
+        assert all(100 <= L <= 2000 for L in lengths)
+        assert len(set(lengths)) > 1            # not a single fixed length
+        assert _mean(lengths) < 1500            # not pinned near max_len (was 2000)
+
+    def test_distribution_comparable_across_branches(self):
+        # Same parent, two budgets routing to different strategies: n=150 windows
+        # -> non-overlapping; n=500 windows -> bounded-random. The emitted length
+        # distributions should now be comparable (both ~uniform[100, 2000]).
+        seq = self._random_seq(600_000, seed=3)
+        few = [
+            len(s)
+            for s in extract_subseqs(
+                seq, n=150, min_len=100, max_len=2000, rng=random.Random(0)
+            )
+        ]
+        many = [
+            len(s)
+            for s in extract_subseqs(
+                seq, n=500, min_len=100, max_len=2000, rng=random.Random(0)
+            )
+        ]
+        # Both means land near the [100, 2000] midpoint (~1050), within a generous
+        # tolerance — the key point is that neither branch is pinned to an extreme.
+        assert abs(_mean(few) - 1050) < 200
+        assert abs(_mean(many) - 1050) < 200

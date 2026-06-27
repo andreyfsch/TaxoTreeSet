@@ -23,6 +23,13 @@ diversity:
    complements are added when budget remains, doubling the effective
    diversity of short sequences such as viroids.
 
+In **all three** scenarios the length of each emitted subsequence is drawn
+independently in ``[min_len, max_len]`` (see :func:`_draw_subseq_length`); the
+scenarios differ only in *placement*. This keeps the emitted length distribution
+identical regardless of which scenario runs — and the scenario is selected from
+the per-leaf window budget ``n`` — so sequence length never becomes a spurious
+signal for the class a window belongs to.
+
 The module also exposes the IUPAC reverse-complement transformation
 table as a precomputed translation lookup, which is faster than calling
 ``str.replace`` repeatedly. The table supports the complete IUPAC
@@ -175,12 +182,47 @@ def extract_subseqs(
         return []
 
     if len(seq) >= 2 * n * max_len:
-        return _sample_non_overlapping(seq, n, max_len, rng)
+        return _sample_non_overlapping(seq, n, min_len, max_len, rng)
 
     if len(seq) >= n * max_len:
-        return _sample_flanked_blocks(seq, n, max_len)
+        return _sample_flanked_blocks(seq, n, min_len, max_len, rng)
 
     return _sample_bounded_random_with_complement(seq, n, min_len, max_len, rng)
+
+
+def _draw_subseq_length(
+    rng: random.Random, min_len: int, max_len: int, available: int
+) -> int:
+    """Draw a random subsequence length in ``[min_len, max_len]``.
+
+    The result is clamped to the ``available`` base pairs remaining at the chosen
+    position. Drawing the length *per window* — instead of always emitting a
+    ``max_len`` block — is what keeps the emitted length distribution identical
+    across every sampling strategy, so the strategy actually used (which is
+    chosen from the per-leaf window budget ``n``) never leaks into the sequence
+    length.
+
+    Without this, leaves contributing few windows each (e.g. the externally
+    sampled reject negatives, whose budget is spread across hundreds of leaves)
+    would fall into the long-sequence tiling strategies and emit only ``max_len``
+    windows, while leaves contributing many windows fall into the random branch
+    and emit short ones — baking a spurious length-to-class signal into training.
+
+    Args:
+        rng: Random source.
+        min_len: Lower bound on the length.
+        max_len: Upper bound on the length.
+        available: Base pairs available from the chosen start to the end of the
+            sequence; the drawn length never exceeds this.
+
+    Returns:
+        A length in ``[min_len, min(max_len, available)]``. When ``available`` is
+        at or below ``min_len`` the available count is returned as-is.
+    """
+    upper = min(max_len, available)
+    if upper <= min_len:
+        return upper
+    return rng.randint(min_len, upper)
 
 
 def _validate_extraction_parameters(n: int, min_len: int, max_len: int) -> None:
@@ -203,32 +245,37 @@ def _validate_extraction_parameters(n: int, min_len: int, max_len: int) -> None:
 def _sample_non_overlapping(
     seq: str,
     n: int,
+    min_len: int,
     max_len: int,
     rng: random.Random,
 ) -> list[str]:
     """Sample n non-overlapping subsequences from a long parent sequence.
 
-    Uses a sorted blacklist of (start, end) intervals and binary search
-    to detect collisions in O(log n) per candidate. The strategy is
-    applicable when the parent sequence is at least twice the total
-    sampling budget (``len(seq) >= 2 * n * max_len``).
+    Each window's length is drawn independently in ``[min_len, max_len]`` (see
+    :func:`_draw_subseq_length`); only the start position is constrained so the
+    reserved ``[start, start + length)`` intervals never overlap. Uses a sorted
+    blacklist of intervals and binary search to detect collisions in O(log n) per
+    candidate. The strategy is applicable when the parent sequence is at least
+    twice the total sampling budget (``len(seq) >= 2 * n * max_len``), which
+    leaves ample room even at the maximum length.
 
     Args:
         seq: Parent DNA sequence.
         n: Number of samples to draw.
-        max_len: Fixed length of each sample.
+        min_len: Minimum length of each sample.
+        max_len: Maximum length of each sample.
         rng: Random number generator.
 
     Returns:
-        A list of n non-overlapping subsequences.
+        A list of n non-overlapping subsequences of varying length.
     """
     samples: list[str] = []
     occupied_intervals: list[tuple[int, int]] = []
-    max_start = len(seq) - max_len + 1
 
     while len(samples) < n:
-        candidate_start = rng.randrange(0, max_start)
-        candidate_end = candidate_start + max_len
+        length = _draw_subseq_length(rng, min_len, max_len, len(seq))
+        candidate_start = rng.randrange(0, len(seq) - length + 1)
+        candidate_end = candidate_start + length
         candidate = (candidate_start, candidate_end)
 
         insertion_point = bisect.bisect_left(occupied_intervals, candidate)
@@ -249,30 +296,37 @@ def _sample_non_overlapping(
     return samples
 
 
-def _sample_flanked_blocks(seq: str, n: int, max_len: int) -> list[str]:
+def _sample_flanked_blocks(
+    seq: str, n: int, min_len: int, max_len: int, rng: random.Random
+) -> list[str]:
     """Sample n quasi-non-overlapping blocks from a moderate-length sequence.
 
-    Distributes samples evenly between the left and right margins of
-    the sequence with uniform spacing between consecutive blocks. When
-    ``n`` is odd, an extra middle block is centered on the sequence.
+    Distributes samples evenly between the left and right margins of the
+    sequence, advancing each cursor by ``max_len`` plus a uniform spacing so the
+    blocks stay quasi-non-overlapping even at the maximum length. The window
+    *length* emitted at each cursor is drawn in ``[min_len, max_len]`` (see
+    :func:`_draw_subseq_length`); a shorter draw simply leaves a wider gap, never
+    an overlap. When ``n`` is odd, an extra block is centered on the sequence.
 
     Applicable when the parent sequence cannot accommodate strictly
     non-overlapping blocks but is still long enough to space them
-    deterministically (``n * max_len <= len(seq) < 2 * n * max_len``).
+    (``n * max_len <= len(seq) < 2 * n * max_len``).
 
     Args:
         seq: Parent DNA sequence.
         n: Number of samples to draw.
-        max_len: Fixed length of each sample.
+        min_len: Minimum length of each sample.
+        max_len: Maximum length of each sample.
+        rng: Random number generator (drives the per-window length).
 
     Returns:
-        A list of n subsequences with deterministic positions.
+        A list of n subsequences of varying length at spaced positions.
     """
     samples: list[str] = []
     remaining_budget = (len(seq) // max_len) - n
 
     if remaining_budget <= 0:
-        return _sample_contiguous_blocks(seq, n, max_len)
+        return _sample_contiguous_blocks(seq, n, min_len, max_len, rng)
 
     spacing = max(0, (len(seq) - n * max_len) // (n + 1))
     left_cursor = 0
@@ -280,38 +334,48 @@ def _sample_flanked_blocks(seq: str, n: int, max_len: int) -> list[str]:
     paired_blocks = n // 2
 
     for _ in range(paired_blocks):
-        samples.append(seq[left_cursor : left_cursor + max_len])
+        left_len = _draw_subseq_length(rng, min_len, max_len, len(seq) - left_cursor)
+        samples.append(seq[left_cursor : left_cursor + left_len])
         left_cursor += max_len + spacing
-        samples.append(seq[right_cursor : right_cursor + max_len])
+        right_len = _draw_subseq_length(rng, min_len, max_len, len(seq) - right_cursor)
+        samples.append(seq[right_cursor : right_cursor + right_len])
         right_cursor -= max_len + spacing
 
     if n % 2 != 0:
         center = len(seq) // 2
-        half_window = max_len // 2
-        samples.append(seq[center - half_window : center + half_window])
+        center_len = _draw_subseq_length(rng, min_len, max_len, len(seq))
+        start = min(max(0, center - center_len // 2), len(seq) - center_len)
+        samples.append(seq[start : start + center_len])
 
     return samples
 
 
-def _sample_contiguous_blocks(seq: str, n: int, max_len: int) -> list[str]:
+def _sample_contiguous_blocks(
+    seq: str, n: int, min_len: int, max_len: int, rng: random.Random
+) -> list[str]:
     """Sample n contiguous blocks starting from the left of the sequence.
 
-    Used as a fallback when ``_sample_flanked_blocks`` lacks budget for
-    its spacing strategy. Produces strictly adjacent samples without
-    gaps.
+    Used as a fallback when ``_sample_flanked_blocks`` lacks budget for its
+    spacing strategy. Each cursor advances by ``max_len`` (keeping the blocks
+    adjacent and within the sequence, since this path is reached only when
+    ``len(seq) >= n * max_len``), while the emitted length is drawn in
+    ``[min_len, max_len]`` per block.
 
     Args:
         seq: Parent DNA sequence.
         n: Number of samples to draw.
-        max_len: Fixed length of each sample.
+        min_len: Minimum length of each sample.
+        max_len: Maximum length of each sample.
+        rng: Random number generator (drives the per-window length).
 
     Returns:
-        A list of n contiguous subsequences.
+        A list of n subsequences of varying length at contiguous positions.
     """
     samples: list[str] = []
     cursor = 0
     for _ in range(n):
-        samples.append(seq[cursor : cursor + max_len])
+        length = _draw_subseq_length(rng, min_len, max_len, len(seq) - cursor)
+        samples.append(seq[cursor : cursor + length])
         cursor += max_len
     return samples
 
