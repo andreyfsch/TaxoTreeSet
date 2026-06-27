@@ -194,6 +194,22 @@ class TestPrepareStratifiedSplit:
         assert len(splits["val"]) == 2
         assert len(splits["test"]) == 2
 
+    def test_three_leaves_still_populate_test(self, builder):
+        # Regression: exactly 3 leaves used to yield train=2, val=1, test=0,
+        # producing a class with zero test support (degenerate, undefined metrics).
+        parent = make_parent_with_leaves("sp", n_leaves=3)
+        splits = builder.prepare_stratified_split([parent])
+        assert len(splits["train"]) == 1
+        assert len(splits["val"]) == 1
+        assert len(splits["test"]) == 1
+
+    @pytest.mark.parametrize("n_leaves", [3, 4, 5, 6, 7, 8, 9, 10, 20])
+    def test_distinct_split_never_leaves_a_split_empty(self, builder, n_leaves):
+        parent = make_parent_with_leaves("sp", n_leaves=n_leaves)
+        splits = builder.prepare_stratified_split([parent])
+        assert all(len(splits[s]) >= 1 for s in ("train", "val", "test"))
+        assert sum(len(v) for v in splits.values()) == n_leaves
+
     def test_single_leaf_fraction_split(self, builder):
         parent = make_parent_with_leaves("sp", n_leaves=1)
         splits = builder.prepare_stratified_split([parent])

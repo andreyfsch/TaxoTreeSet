@@ -359,6 +359,13 @@ class DatasetBuilder:
 
         train_cut = max(1, int(leaf_count * train_ratio))
         val_cut = train_cut + max(1, int(leaf_count * (val_ratio - train_ratio)))
+        # Guarantee test receives at least one leaf: the two max(1, ...) floors
+        # otherwise consume all three leaves at leaf_count == 3 (train=2, val=1,
+        # test=0), producing a class with zero test support.
+        if val_cut >= leaf_count:
+            val_cut = leaf_count - 1
+            if train_cut >= val_cut:
+                train_cut = val_cut - 1
 
         for index, leaf in enumerate(all_leaves):
             task = (

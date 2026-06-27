@@ -128,6 +128,35 @@ _STRATIFIED_VAL_RATIO: float = 0.15
 _SPLITS: tuple[str, ...] = ("train", "val", "test")
 
 
+def _stratified_cuts(leaf_count: int) -> tuple[int, int]:
+    """Return ``(train_cut, val_cut)`` index boundaries for a leaf-level split.
+
+    The naive ``max(1, int(L * ratio))`` boundaries leave **test empty at exactly
+    three leaves** (train=2, val=1, test=0), because the two ``max(1, ...)`` floors
+    consume all three leaves before test gets one. That produced degenerate
+    classes — present in the label set and trained, but with zero test support, so
+    their per-class metrics are undefined and they drag down macro-F1. This clamp
+    pulls ``val_cut`` back so test always receives at least one leaf (and then
+    protects train from being emptied), guaranteeing every split gets >= 1 leaf
+    whenever ``leaf_count >= 3``.
+
+    Args:
+        leaf_count: Number of sequence leaves in the class (assumed >= 3; the
+            scarcity path handles 1-2 leaves via disjoint within-sequence regions).
+
+    Returns:
+        ``(train_cut, val_cut)`` such that train = ``[0, train_cut)``,
+        val = ``[train_cut, val_cut)``, test = ``[val_cut, leaf_count)``.
+    """
+    train_cut = max(1, int(leaf_count * _STRATIFIED_TRAIN_RATIO))
+    val_cut = train_cut + max(1, int(leaf_count * _STRATIFIED_VAL_RATIO))
+    if val_cut >= leaf_count:
+        val_cut = leaf_count - 1
+        if train_cut >= val_cut:
+            train_cut = val_cut - 1
+    return train_cut, val_cut
+
+
 def _capture_tool_versions() -> dict[str, str]:
     """Capture versions of the external tools that determine the data snapshot.
 
@@ -1518,8 +1547,7 @@ class GenerationOrchestrator:
             The populated splits dict.
         """
         leaf_count = len(shuffled_leaves)
-        train_cut = max(1, int(leaf_count * _STRATIFIED_TRAIN_RATIO))
-        val_cut = train_cut + max(1, int(leaf_count * _STRATIFIED_VAL_RATIO))
+        train_cut, val_cut = _stratified_cuts(leaf_count)
 
         for index, leaf in enumerate(shuffled_leaves):
             if index < train_cut:
@@ -2045,8 +2073,7 @@ class GenerationOrchestrator:
         rng.shuffle(shuffled)
 
         if len(shuffled) >= 3:
-            train_cut = max(1, int(len(shuffled) * _STRATIFIED_TRAIN_RATIO))
-            val_cut = train_cut + max(1, int(len(shuffled) * _STRATIFIED_VAL_RATIO))
+            train_cut, val_cut = _stratified_cuts(len(shuffled))
 
             for index, task in enumerate(shuffled):
                 enriched = self._enrich_task(task, class_index, 0.0, 1.0)

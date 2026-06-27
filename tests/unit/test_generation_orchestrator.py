@@ -5,7 +5,38 @@ from unittest.mock import MagicMock, patch
 import pytest
 from bigtree import Node
 
-from taxotreeset.core.generation_orchestrator import GenerationOrchestrator
+from taxotreeset.core.generation_orchestrator import (
+    GenerationOrchestrator,
+    _stratified_cuts,
+)
+
+
+# ---------------------------------------------------------------------------
+# _stratified_cuts — leaf-level split boundaries (>=1 leaf per split)
+# ---------------------------------------------------------------------------
+
+
+class TestStratifiedCuts:
+    @pytest.mark.parametrize("leaf_count", list(range(3, 25)))
+    def test_every_split_gets_at_least_one_leaf(self, leaf_count):
+        train_cut, val_cut = _stratified_cuts(leaf_count)
+        train = train_cut
+        val = val_cut - train_cut
+        test = leaf_count - val_cut
+        assert train >= 1
+        assert val >= 1
+        assert test >= 1
+        assert train + val + test == leaf_count
+
+    def test_three_leaves_split_one_each(self):
+        # The exact case that previously yielded test=0.
+        assert _stratified_cuts(3) == (1, 2)
+
+    def test_large_count_keeps_70_15_15_shape(self):
+        train_cut, val_cut = _stratified_cuts(100)
+        assert train_cut == 70
+        assert val_cut - train_cut == 15
+        assert 100 - val_cut == 15
 
 
 # ---------------------------------------------------------------------------
