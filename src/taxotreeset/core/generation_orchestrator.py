@@ -259,7 +259,8 @@ class GenerationOrchestrator:
         exclude_plasmids: bool = False,
         reject_class: bool = False,
         reject_fraction: float = 1.0,
-        reject_near_far_ratio: float = 0.5,
+        reject_near_far_start: float = 0.5,
+        reject_near_far_end: float = 0.9,
     ) -> None:
         """Initialize the orchestrator and its collaborating components.
 
@@ -314,8 +315,16 @@ class GenerationOrchestrator:
                 into a real class. Opt-in; off leaves generation unchanged.
             reject_fraction: Size of the reject class relative to ``n_per_class``
                 (1.0 = balanced with the real classes).
-            reject_near_far_ratio: Fraction of reject windows drawn from the
-                nearest ancestor's sibling clades (the rest from farther clades).
+            reject_near_far_start: Fraction of reject windows drawn from the
+                nearest ancestor's sibling clades (near; the rest from farther
+                clades) at the SHALLOWEST reject-eligible head (the root's
+                children). Shallow heads see diverse intruders, so this is low.
+            reject_near_far_end: The same fraction at the DEEPEST head. Upstream
+                heads prune distant intruders, so a deep head mostly meets near
+                (sibling) intruders — this is high (near-heavy). The near fraction
+                is linearly interpolated between start and end by the head's depth
+                (relative to the tree's depth). Set ``end == start`` for a flat,
+                depth-independent ratio.
         """
         self.registry: Any = registry
         self.config_path: str = config_path
@@ -339,7 +348,8 @@ class GenerationOrchestrator:
         self.rare_taxa_strategy: str = rare_taxa_strategy
         self.reject_class: bool = reject_class
         self.reject_fraction: float = reject_fraction
-        self.reject_near_far_ratio: float = reject_near_far_ratio
+        self.reject_near_far_start: float = reject_near_far_start
+        self.reject_near_far_end: float = reject_near_far_end
         self.selective_download_threshold: int = selective_download_threshold
         self.spill_dir: str | None = spill_dir
         self.tmp_dir: str | None = tmp_dir
@@ -1893,6 +1903,31 @@ class GenerationOrchestrator:
         )
         return [*retained_children, bucket_node]
 
+    def _reject_near_ratio(self, node: Node) -> float:
+        """Depth-scaled near fraction of the reject bucket for ``node``'s head.
+
+        Distant intruders are pruned by upstream heads, so the intruders a deep
+        head actually faces are near-heavy (siblings/cousins). The near fraction
+        is therefore linearly interpolated from ``reject_near_far_start`` at the
+        shallowest reject-eligible head (the root's children, depth 2) to
+        ``reject_near_far_end`` at the deepest node in the tree. ``end == start``
+        gives a flat, depth-independent ratio.
+
+        Args:
+            node: The head (parent) node being scheduled.
+
+        Returns:
+            Near fraction in ``[start, end]`` for this head's depth.
+        """
+        start, end = self.reject_near_far_start, self.reject_near_far_end
+        d_min = 2                         # root (depth 1) has no reject
+        d_max = node.root.max_depth
+        if d_max <= d_min:
+            return start
+        frac = (node.depth - d_min) / (d_max - d_min)
+        frac = min(1.0, max(0.0, frac))
+        return start + (end - start) * frac
+
     def _maybe_add_reject_class(
         self,
         current_node: Node,
@@ -1933,7 +1968,7 @@ class GenerationOrchestrator:
             near_leaves=near_leaves,
             far_leaves=far_leaves,
             n_reject=n_reject,
-            near_far_ratio=self.reject_near_far_ratio,
+            near_far_ratio=self._reject_near_ratio(current_node),
             min_subseq_len=self.min_subseq_len,
         )
         if not reject_tasks:

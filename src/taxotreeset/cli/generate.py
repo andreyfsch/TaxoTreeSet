@@ -233,12 +233,21 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "with the real classes). Only used with --reject-class.",
     )
     parser.add_argument(
-        "--reject-near-far-ratio",
+        "--reject-near-far-start",
         type=float,
         default=0.5,
-        help="Fraction of reject windows drawn from the nearest ancestor's "
-        "sibling clades (the rest from farther clades). Only used with "
-        "--reject-class.",
+        help="Near fraction of reject windows (nearest sibling clades vs farther "
+        "clades) at the SHALLOWEST head. Deeper heads interpolate toward "
+        "--reject-near-far-end. Only used with --reject-class.",
+    )
+    parser.add_argument(
+        "--reject-near-far-end",
+        type=float,
+        default=0.9,
+        help="Near fraction of reject windows at the DEEPEST head. Distant "
+        "intruders are pruned upstream, so deep heads face near-heavy intruders. "
+        "Set equal to --reject-near-far-start for a flat ratio. "
+        "Only used with --reject-class.",
     )
 
 
@@ -291,7 +300,8 @@ def run(args: argparse.Namespace) -> None:
             exclude_plasmids=args.exclude_plasmids,
             reject_class=args.reject_class,
             reject_fraction=args.reject_fraction,
-            reject_near_far_ratio=args.reject_near_far_ratio,
+            reject_near_far_start=args.reject_near_far_start,
+            reject_near_far_end=args.reject_near_far_end,
         )
 
         logger.info(

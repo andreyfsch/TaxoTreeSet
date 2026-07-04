@@ -219,7 +219,8 @@ class TestGenerateRun:
             exclude_plasmids=False,
             reject_class=False,
             reject_fraction=1.0,
-            reject_near_far_ratio=0.5,
+            reject_near_far_start=0.5,
+            reject_near_far_end=0.9,
             log_level="INFO",
         )
 
@@ -238,7 +239,8 @@ class TestGenerateRun:
         args = self._make_args(tmp_path)
         args.reject_class = True
         args.reject_fraction = 0.5
-        args.reject_near_far_ratio = 0.25
+        args.reject_near_far_start = 0.25
+        args.reject_near_far_end = 0.8
         with (
             patch("taxotreeset.cli.generate.setup_logging"),
             patch("taxotreeset.cli.generate.NCBIRegistry"),
@@ -249,7 +251,8 @@ class TestGenerateRun:
         kwargs = mock_orch.call_args.kwargs
         assert kwargs["reject_class"] is True
         assert kwargs["reject_fraction"] == 0.5
-        assert kwargs["reject_near_far_ratio"] == 0.25
+        assert kwargs["reject_near_far_start"] == 0.25
+        assert kwargs["reject_near_far_end"] == 0.8
 
     def test_no_sync_with_missing_registry_exits(self, tmp_path):
         args = self._make_args(tmp_path, no_sync=True, registry_exists=False)

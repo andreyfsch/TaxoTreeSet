@@ -520,7 +520,8 @@ class TestMaybeAddRejectClass:
     def test_enabled_appends_reject_from_external_leaves(self, _mock, orchestrator):
         orchestrator.reject_class = True
         orchestrator.reject_fraction = 1.0
-        orchestrator.reject_near_far_ratio = 0.5
+        orchestrator.reject_near_far_start = 0.5
+        orchestrator.reject_near_far_end = 0.5
         node_a, child_a = _reject_tree()
         per_child_tasks = {"20": []}
         registry: dict = {}
@@ -540,3 +541,20 @@ class TestMaybeAddRejectClass:
         assert headers <= {"b1", "b2"}            # external leaves only
         assert not (headers & {"a1", "a2"})       # never the head's own leaves
         assert registry[reject_taxid]["purpose"] == "reject"
+
+    def test_near_ratio_interpolates_start_to_end_by_depth(self, orchestrator):
+        # _reject_tree: A (kingdom, depth 2) → CA (family, depth 3) → seq leaves
+        # (depth 4). d_min=2, tree max_depth=4, so the near fraction runs from
+        # start (shallowest head) to end (deepest) linearly over depth.
+        orchestrator.reject_near_far_start = 0.4
+        orchestrator.reject_near_far_end = 0.9
+        node_a, child_a = _reject_tree()
+        assert orchestrator._reject_near_ratio(node_a) == pytest.approx(0.4)     # d2
+        assert orchestrator._reject_near_ratio(child_a) == pytest.approx(0.65)   # d3
+
+    def test_near_ratio_flat_when_start_equals_end(self, orchestrator):
+        orchestrator.reject_near_far_start = 0.6
+        orchestrator.reject_near_far_end = 0.6
+        node_a, child_a = _reject_tree()
+        assert orchestrator._reject_near_ratio(node_a) == pytest.approx(0.6)
+        assert orchestrator._reject_near_ratio(child_a) == pytest.approx(0.6)
