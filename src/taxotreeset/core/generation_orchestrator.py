@@ -1186,9 +1186,7 @@ class GenerationOrchestrator:
             }
 
         children_list = self._collect_real_children(domain_node)
-        self._schedule_pbar = tqdm(
-            desc="Computing node capacities", unit=" nodes"
-        )
+        self._schedule_pbar = None
         try:
             if self.binary_only:
                 self._schedule_binary_heads(
@@ -1198,6 +1196,9 @@ class GenerationOrchestrator:
                     leaf_cache=leaf_cache,
                 )
             else:
+                self._schedule_pbar = tqdm(
+                    desc="Computing node capacities", unit=" nodes"
+                )
                 self._schedule_decision_point(
                     current_node=domain_node,
                     children_list=children_list,
@@ -1210,7 +1211,8 @@ class GenerationOrchestrator:
                     leaf_cache=leaf_cache,
                 )
         finally:
-            self._schedule_pbar.close()
+            if self._schedule_pbar is not None:
+                self._schedule_pbar.close()
             self._schedule_pbar = None
 
         return {
@@ -1656,12 +1658,25 @@ class GenerationOrchestrator:
             n for n in domain_node.descendants
             if getattr(n, "rank", "") != "sequence"
         ]
-        pbar = tqdm(nodes, desc="Scheduling binary heads", unit=" nodes")
-        for node in pbar:
+        total = len(nodes)
+        ui_logger.info(
+            "Scheduling binary heads over %s taxonomic nodes "
+            "(one belongs/not-belongs head per node)...", f"{total:,}")
+        skipped = 0
+        last_log = time.monotonic()
+        for i, node in enumerate(nodes):
+            now = time.monotonic()
+            if now - last_log >= 15.0:
+                ui_logger.info(
+                    "  scheduling binary heads: %s/%s nodes  ->  %s heads  "
+                    "(%s skipped)", f"{i:,}", f"{total:,}",
+                    f"{len(extraction_jobs):,}", f"{skipped:,}")
+                last_log = now
             taxid = str(node.name)
             cap = caps.get(taxid, 0)
             budget = min(self.binary_budget, cap) if cap else self.binary_budget
             if budget <= 0:
+                skipped += 1
                 continue
             name = getattr(node, "scientific_name", taxid)
 
@@ -1677,6 +1692,7 @@ class GenerationOrchestrator:
                 min_subseq_len=self.min_subseq_len,
             )
             if not pos_tasks or not neg_tasks:
+                skipped += 1
                 continue
 
             rng = random.Random(self.seed)
@@ -1686,6 +1702,7 @@ class GenerationOrchestrator:
                 neg_tasks, 0, rng, min_genomes_for_genome_split=4)
             parent_tasks = {s: pos_split[s] + neg_split[s] for s in _SPLITS}
             if not any(parent_tasks[s] for s in _SPLITS):
+                skipped += 1
                 continue
 
             path_parts = [p for p in node.path_name.split("/") if p]
@@ -1720,7 +1737,10 @@ class GenerationOrchestrator:
                 taxid, target_dir, parent_tasks,
                 self.max_subseq_len, self.seed, self.output_format,
             ))
-        pbar.close()
+        ui_logger.info(
+            "Scheduled %s binary heads (%s of %s nodes skipped: no data or no "
+            "external negatives).", f"{len(extraction_jobs):,}", f"{skipped:,}",
+            f"{total:,}")
 
     def _schedule_decision_point(
         self,
