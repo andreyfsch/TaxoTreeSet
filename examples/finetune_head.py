@@ -192,6 +192,9 @@ def parse_args() -> argparse.Namespace:
                    help="Per-device batch size")
     p.add_argument("--grad-accum", type=int, default=1,
                    help="Gradient accumulation steps")
+    p.add_argument("--learning-rate", type=float, default=LEARNING_RATE,
+                   help="Peak LR (default %(default)s; balanced 2-class binary "
+                        "heads need a lower value, e.g. 2e-4, to avoid collapse)")
     p.add_argument("--fp16", action="store_true", default=True,
                    help="Use mixed-precision (default: on if CUDA available)")
     p.add_argument("--no-fp16", dest="fp16", action="store_false")
@@ -279,7 +282,7 @@ def main():
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size // 2,
         gradient_accumulation_steps=args.grad_accum,
-        learning_rate=LEARNING_RATE,
+        learning_rate=args.learning_rate,
         warmup_ratio=WARMUP_RATIO,
         weight_decay=WEIGHT_DECAY,
         lr_scheduler_type="cosine",
@@ -366,7 +369,7 @@ def main():
         "lora_alpha": LORA_ALPHA,
         "lora_dropout": LORA_DROPOUT,
         "lora_target_modules": LORA_TARGET_MODULES,
-        "learning_rate": LEARNING_RATE,
+        "learning_rate": args.learning_rate,
         "num_epochs": NUM_EPOCHS,
         "batch_size": args.batch_size,
         "grad_accum": args.grad_accum,

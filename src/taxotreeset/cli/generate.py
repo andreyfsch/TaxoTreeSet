@@ -249,6 +249,22 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "Set equal to --reject-near-far-start for a flat ratio. "
         "Only used with --reject-class.",
     )
+    parser.add_argument(
+        "--binary-only",
+        action="store_true",
+        help="Generate one BINARY belongs/not-belongs head per taxonomic node "
+        "(positive = the node's subtree, not-belongs = out-of-subtree near/far "
+        "windows balanced to it) instead of multi-class+reject heads. Uses the "
+        "same depth-scaled near/far ratio (--reject-near-far-start/end).",
+    )
+    parser.add_argument(
+        "--binary-budget",
+        type=int,
+        default=30000,
+        help="Windows per class (belongs and not-belongs) for --binary-only "
+        "heads, capped by each node's extraction capacity. Decoupled from "
+        "--max-n-per-class (the multi-class cap). Default 30000.",
+    )
 
 
 def run(args: argparse.Namespace) -> None:
@@ -302,6 +318,8 @@ def run(args: argparse.Namespace) -> None:
             reject_fraction=args.reject_fraction,
             reject_near_far_start=args.reject_near_far_start,
             reject_near_far_end=args.reject_near_far_end,
+            binary_only=args.binary_only,
+            binary_budget=args.binary_budget,
         )
 
         logger.info(

@@ -261,6 +261,8 @@ class GenerationOrchestrator:
         reject_fraction: float = 1.0,
         reject_near_far_start: float = 0.5,
         reject_near_far_end: float = 0.9,
+        binary_only: bool = False,
+        binary_budget: int = 30000,
     ) -> None:
         """Initialize the orchestrator and its collaborating components.
 
@@ -350,6 +352,8 @@ class GenerationOrchestrator:
         self.reject_fraction: float = reject_fraction
         self.reject_near_far_start: float = reject_near_far_start
         self.reject_near_far_end: float = reject_near_far_end
+        self.binary_only: bool = binary_only
+        self.binary_budget: int = binary_budget
         self.selective_download_threshold: int = selective_download_threshold
         self.spill_dir: str | None = spill_dir
         self.tmp_dir: str | None = tmp_dir
@@ -1182,17 +1186,25 @@ class GenerationOrchestrator:
             desc="Computing node capacities", unit=" nodes"
         )
         try:
-            self._schedule_decision_point(
-                current_node=domain_node,
-                children_list=children_list,
-                accumulated_path=domain_node.name,
-                abundance_threshold=abundance_threshold,
-                extraction_jobs=extraction_jobs,
-                master_manifest=master_manifest,
-                passthrough_map=passthrough_map,
-                virtual_id_registry=virtual_id_registry,
-                leaf_cache=leaf_cache,
-            )
+            if self.binary_only:
+                self._schedule_binary_heads(
+                    domain_node=domain_node,
+                    extraction_jobs=extraction_jobs,
+                    master_manifest=master_manifest,
+                    leaf_cache=leaf_cache,
+                )
+            else:
+                self._schedule_decision_point(
+                    current_node=domain_node,
+                    children_list=children_list,
+                    accumulated_path=domain_node.name,
+                    abundance_threshold=abundance_threshold,
+                    extraction_jobs=extraction_jobs,
+                    master_manifest=master_manifest,
+                    passthrough_map=passthrough_map,
+                    virtual_id_registry=virtual_id_registry,
+                    leaf_cache=leaf_cache,
+                )
         finally:
             self._schedule_pbar.close()
             self._schedule_pbar = None
@@ -1401,6 +1413,12 @@ class GenerationOrchestrator:
                 "stop_at": self._depth_boundary,
                 "single_level": self._single_level,
                 "output_format": self.output_format,
+                "reject_class": self.reject_class,
+                "reject_fraction": self.reject_fraction,
+                "reject_near_far_start": self.reject_near_far_start,
+                "reject_near_far_end": self.reject_near_far_end,
+                "binary_only": self.binary_only,
+                "binary_budget": self.binary_budget,
             },
             "summary": {
                 "n_heads": n_heads,
@@ -1596,6 +1614,108 @@ class GenerationOrchestrator:
         """Advance the scheduling progress bar by one capacity computation."""
         if self._schedule_pbar is not None:
             self._schedule_pbar.update(1)
+
+    def _schedule_binary_heads(
+        self,
+        domain_node: Node,
+        extraction_jobs: list,
+        master_manifest: dict,
+        leaf_cache: dict,
+    ) -> None:
+        """Schedule a binary belongs/not-belongs head for every taxonomic node.
+
+        ``--binary-only`` mode. For each non-root taxonomic node ``N`` (a real
+        taxon, not an individual genome), emit a 2-class dataset:
+
+        - **belongs** (label 1): up to ``binary_budget`` windows spread across
+          ``N``'s subtree genomes.
+        - **not-belongs** (label 0): an equal budget of out-of-subtree windows
+          (near siblings + far clades, split by the depth-scaled near/far ratio),
+          reusing the same reject sampler the multi-class head uses.
+
+        Train/val/test split is by genome, with the window-slicing fallback
+        (``min_genomes_for_genome_split=4``) so data-poor nodes still yield a
+        valid non-empty split — no viability gating. Nodes with no external
+        negatives (e.g. directly under the domain root) or no extractable
+        positives are skipped, since a 2-class head cannot be formed there. The
+        learning auditor/monitor certify which trained heads actually learn.
+
+        Args:
+            domain_node: The domain anchor node (its descendants get heads).
+            extraction_jobs: Job list to append to (mutated).
+            master_manifest: Manifest to populate (mutated).
+            leaf_cache: Per-node sequence-leaf cache.
+        """
+        caps = self._all_capacities or {}
+        nodes = [
+            n for n in domain_node.descendants
+            if getattr(n, "rank", "") != "sequence"
+        ]
+        pbar = tqdm(nodes, desc="Scheduling binary heads", unit=" nodes")
+        for node in pbar:
+            taxid = str(node.name)
+            cap = caps.get(taxid, 0)
+            budget = min(self.binary_budget, cap) if cap else self.binary_budget
+            if budget <= 0:
+                continue
+            name = getattr(node, "scientific_name", taxid)
+
+            pos_tasks = distribute_n_per_class_across_leaves(
+                n_per_class=budget, children=[node], parent_taxid=taxid,
+                parent_name=name, leaf_cache=leaf_cache,
+                min_subseq_len=self.min_subseq_len,
+            ).get(taxid, [])
+            near, far = sample_reject_leaves(node, rng=random.Random(self.seed))
+            neg_tasks = build_reject_tasks(
+                near_leaves=near, far_leaves=far, n_reject=budget,
+                near_far_ratio=self._reject_near_ratio(node),
+                min_subseq_len=self.min_subseq_len,
+            )
+            if not pos_tasks or not neg_tasks:
+                continue
+
+            rng = random.Random(self.seed)
+            pos_split = self._materialize_leaf_split(
+                pos_tasks, 1, rng, min_genomes_for_genome_split=4)
+            neg_split = self._materialize_leaf_split(
+                neg_tasks, 0, rng, min_genomes_for_genome_split=4)
+            parent_tasks = {s: pos_split[s] + neg_split[s] for s in _SPLITS}
+            if not any(parent_tasks[s] for s in _SPLITS):
+                continue
+
+            path_parts = [p for p in node.path_name.split("/") if p]
+            target_dir = os.path.join(self.output_dir, *path_parts)
+            os.makedirs(target_dir, exist_ok=True)
+            num_leaves = sum(
+                1 for leaf in node.leaves
+                if getattr(leaf, "rank", "") == "sequence"
+            )
+            master_manifest[taxid] = {
+                "directory_path": target_dir,
+                "scientific_name": name,
+                "rank": getattr(node, "rank", "unknown"),
+                "scenario": "binary_belongs",
+                "n_per_class": budget,
+                "num_leaves": num_leaves,
+                "labels": {
+                    f"not_belongs_{taxid}": {
+                        "class_idx": 0, "taxid": f"not_belongs_{taxid}",
+                        "name": f"not_belongs_{name}",
+                        "rank": "virtual_not_belongs", "fallback": True,
+                        "capacity": 0,
+                    },
+                    taxid: {
+                        "class_idx": 1, "taxid": taxid, "name": name,
+                        "rank": getattr(node, "rank", "unknown"),
+                        "fallback": False, "capacity": cap,
+                    },
+                },
+            }
+            extraction_jobs.append((
+                taxid, target_dir, parent_tasks,
+                self.max_subseq_len, self.seed, self.output_format,
+            ))
+        pbar.close()
 
     def _schedule_decision_point(
         self,
@@ -2085,14 +2205,23 @@ class GenerationOrchestrator:
         leaf_tasks: list[dict],
         class_index: int,
         rng: random.Random,
+        min_genomes_for_genome_split: int = 3,
     ) -> dict[str, list[dict]]:
         """Split a single child's per-leaf tasks into train/val/test.
+
+        With ``>= min_genomes_for_genome_split`` genomes the split is by genome
+        (leakage-safe: a genome's windows never straddle splits); below it, the
+        window-slicing fallback splits each genome positionally so a data-poor
+        class still yields non-empty train/val/test. Binary heads pass 4 (rather
+        than 3), because a 3-genome genome-level split leaves the test empty.
 
         Args:
             leaf_tasks: Per-leaf task dicts from
                 ``distribute_n_per_class_across_leaves``.
             class_index: Numeric label index for this child.
             rng: Random instance for deterministic shuffling.
+            min_genomes_for_genome_split: Threshold below which to use the
+                window-slicing fallback (default 3 = the multi-class behaviour).
 
         Returns:
             Dictionary with 'train', 'val', 'test' keys; each value
@@ -2107,7 +2236,7 @@ class GenerationOrchestrator:
         shuffled = list(leaf_tasks)
         rng.shuffle(shuffled)
 
-        if len(shuffled) >= 3:
+        if len(shuffled) >= min_genomes_for_genome_split:
             train_cut, val_cut = _stratified_cuts(len(shuffled))
 
             for index, task in enumerate(shuffled):

@@ -318,6 +318,61 @@ def pipeline_output(synthetic_env, tmp_path_factory):
     return {"output_dir": output_dir}
 
 
+@pytest.fixture(scope="module")
+def binary_pipeline_output(synthetic_env, tmp_path_factory):
+    """Run the full pipeline in --binary-only mode and return output paths."""
+    from taxotreeset.core.generation_orchestrator import GenerationOrchestrator
+    from taxotreeset.io.registry import NCBIRegistry
+
+    output_dir = str(tmp_path_factory.mktemp("binary_out"))
+    registry = NCBIRegistry(registry_path=synthetic_env["registry_path"])
+    orch = GenerationOrchestrator(
+        registry=registry,
+        vault_path=synthetic_env["vault_dir"],
+        output_dir=output_dir,
+        config_path=synthetic_env["mapping_path"],
+        min_subseq_len=_MIN_LEN,
+        max_subseq_len=200,
+        max_n_per_class=100,
+        min_leaves_per_class=1,
+        rare_taxa_strategy="keep",
+        n_gpu_workers=0,
+        n_workers=1,
+        binary_only=True,
+        binary_budget=60,
+    )
+    orch.run_pipeline(target_group="viruses", sync=False, abundance_threshold=1)
+    return {"output_dir": output_dir}
+
+
+class TestBinaryOnlyGeneration:
+    def test_metadata_records_binary(self, binary_pipeline_output):
+        meta = json.loads((Path(binary_pipeline_output["output_dir"])
+                           / "run_metadata_viruses.json").read_text())
+        assert meta["parameters"]["binary_only"] is True
+        assert meta["parameters"]["binary_budget"] == 60
+
+    def test_heads_are_two_class(self, binary_pipeline_output):
+        import pandas as pd
+        out = Path(binary_pipeline_output["output_dir"])
+        parquets = list(out.rglob("train.parquet"))
+        assert parquets, "no binary head datasets produced"
+        for p in parquets:
+            labels = set(int(x) for x in pd.read_parquet(p)["class_idx"].unique())
+            assert labels <= {0, 1}, f"{p} not binary: {labels}"
+            assert labels == {0, 1}, f"{p} missing a class: {labels}"
+
+    def test_every_head_has_nonempty_test(self, binary_pipeline_output):
+        # The window-slicing fallback must give every node a valid split — no
+        # viability gating, no empty test (the bug that broke a 3-genome node).
+        import pandas as pd
+        out = Path(binary_pipeline_output["output_dir"])
+        for train_p in out.rglob("train.parquet"):
+            test_p = train_p.parent / "test.parquet"
+            assert test_p.exists(), f"{train_p.parent} has train but no test split"
+            assert len(pd.read_parquet(test_p)) > 0, f"{test_p} is empty"
+
+
 class TestFullPipelineOutputContracts:
     def test_run_metadata_file_exists(self, pipeline_output):
         path = Path(pipeline_output["output_dir"]) / "run_metadata_viruses.json"
@@ -338,6 +393,11 @@ class TestFullPipelineOutputContracts:
         assert params["min_subseq_len"] == _MIN_LEN
         assert params["max_n_per_class"] == 100
         assert params["stop_at"] is None
+        # reject-bucket provenance (incl. the depth-scaled near/far ratio) must be
+        # recorded so a dataset's reject constitution is reproducible from metadata.
+        for key in ("reject_class", "reject_fraction",
+                    "reject_near_far_start", "reject_near_far_end"):
+            assert key in params, f"missing reject provenance key: {key}"
 
     def test_run_metadata_summary_counts(self, pipeline_output):
         path = Path(pipeline_output["output_dir"]) / "run_metadata_viruses.json"

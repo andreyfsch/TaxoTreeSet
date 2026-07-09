@@ -221,6 +221,8 @@ class TestGenerateRun:
             reject_fraction=1.0,
             reject_near_far_start=0.5,
             reject_near_far_end=0.9,
+            binary_only=False,
+            binary_budget=30000,
             log_level="INFO",
         )
 
@@ -253,6 +255,21 @@ class TestGenerateRun:
         assert kwargs["reject_fraction"] == 0.5
         assert kwargs["reject_near_far_start"] == 0.25
         assert kwargs["reject_near_far_end"] == 0.8
+
+    def test_binary_flags_thread_to_orchestrator(self, tmp_path):
+        args = self._make_args(tmp_path)
+        args.binary_only = True
+        args.binary_budget = 25000
+        with (
+            patch("taxotreeset.cli.generate.setup_logging"),
+            patch("taxotreeset.cli.generate.NCBIRegistry"),
+            patch("taxotreeset.cli.generate.GenerationOrchestrator") as mock_orch,
+        ):
+            mock_orch.return_value.run_pipeline.return_value = None
+            generate.run(args)
+        kwargs = mock_orch.call_args.kwargs
+        assert kwargs["binary_only"] is True
+        assert kwargs["binary_budget"] == 25000
 
     def test_no_sync_with_missing_registry_exits(self, tmp_path):
         args = self._make_args(tmp_path, no_sync=True, registry_exists=False)
