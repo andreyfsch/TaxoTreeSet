@@ -13,6 +13,13 @@
   "ruff.lint.enable": true,
   "ruff.importStrategy": "fromEnvironment",
   "ruff.nativeServer": "on",
+  "// lint": "Ruff (pyproject line-length=100) is the sole Python linter+formatter here. The lines below neutralize the global autopep8/flake8/pycodestyle (default 79) leaking from ~/.vscode-server Machine settings, so the workspace stops flagging >79 after a VSCode restart.",
+  "flake8.enabled": false,
+  "pycodestyle.enabled": false,
+  "python.linting.enabled": false,
+  "python.linting.flake8Enabled": false,
+  "python.linting.pycodestyleEnabled": false,
+  "autopep8.args": ["--max-line-length", "100"],
   "json.schemas": [
     {
       "fileMatch": [
@@ -26,5 +33,7 @@
       ],
       "url": "./configs/noise_patterns.schema.json"
     }
-  ]
+  ],
+  "python-envs.defaultEnvManager": "ms-python.python:conda",
+  "python-envs.defaultPackageManager": "ms-python.python:conda"
 }
