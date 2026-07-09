@@ -626,3 +626,28 @@ class TestFetchSelfNodeViaNcbi:
 
         assert result is not None
         assert result.tax_id == 777
+
+
+class TestResolveLineageAllRanks:
+    """--all-ranks resolves full NCBI granularity via taxoniq.lineage.
+
+    Uses taxoniq's local static snapshot (no network). SARS-related coronavirus
+    (694009) carries subgenus Sarbecovirus, subfamily Orthocoronavirinae, and
+    suborder Cornidovirineae in its full lineage — all absent from ranked_lineage.
+    """
+
+    def _orch(self, all_ranks):
+        return DiscoveryOrchestrator(
+            registry=MagicMock(), mapping_config={}, all_ranks=all_ranks)
+
+    def test_canonical_default_excludes_sub_ranks(self):
+        ranks = {a.rank for a in self._orch(False)._resolve_lineage(694009)}
+        assert {"species", "genus", "family", "order"} <= ranks
+        assert "subgenus" not in ranks
+        assert "subfamily" not in ranks
+        assert "suborder" not in ranks
+
+    def test_all_ranks_includes_sub_ranks(self):
+        ranks = {a.rank for a in self._orch(True)._resolve_lineage(694009)}
+        assert {"subgenus", "subfamily", "suborder"} <= ranks
+        assert {"species", "genus", "family", "order"} <= ranks

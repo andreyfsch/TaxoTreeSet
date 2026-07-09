@@ -88,6 +88,7 @@ class TestDiscoverRun:
             mapping=str(mapping),
             registry=str(tmp_path / "registry.json"),
             reset=reset,
+            all_ranks=False,
             log_level="INFO",
         )
 
@@ -101,6 +102,18 @@ class TestDiscoverRun:
             mock_orch.return_value.discover_from_root.return_value = None
             discover.run(args)
         mock_orch.return_value.discover_from_root.assert_called_once_with(10239)
+
+    def test_all_ranks_flag_threads_to_orchestrator(self, tmp_path):
+        args = self._make_args(tmp_path)
+        args.all_ranks = True
+        with (
+            patch("taxotreeset.cli.discover.setup_logging"),
+            patch("taxotreeset.cli.discover.NCBIRegistry"),
+            patch("taxotreeset.cli.discover.DiscoveryOrchestrator") as mock_orch,
+        ):
+            mock_orch.return_value.discover_from_root.return_value = None
+            discover.run(args)
+        assert mock_orch.call_args.kwargs["all_ranks"] is True
 
     def test_run_exits_when_mapping_missing(self, tmp_path):
         args = self._make_args(tmp_path, mapping_exists=False)
@@ -223,6 +236,7 @@ class TestGenerateRun:
             reject_near_far_end=0.9,
             binary_only=False,
             binary_budget=30000,
+            all_ranks=False,
             log_level="INFO",
         )
 
@@ -260,6 +274,7 @@ class TestGenerateRun:
         args = self._make_args(tmp_path)
         args.binary_only = True
         args.binary_budget = 25000
+        args.all_ranks = True
         with (
             patch("taxotreeset.cli.generate.setup_logging"),
             patch("taxotreeset.cli.generate.NCBIRegistry"),
@@ -270,6 +285,7 @@ class TestGenerateRun:
         kwargs = mock_orch.call_args.kwargs
         assert kwargs["binary_only"] is True
         assert kwargs["binary_budget"] == 25000
+        assert kwargs["all_ranks"] is True
 
     def test_no_sync_with_missing_registry_exits(self, tmp_path):
         args = self._make_args(tmp_path, no_sync=True, registry_exists=False)

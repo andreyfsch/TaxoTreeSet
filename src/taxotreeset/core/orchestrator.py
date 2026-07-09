@@ -102,7 +102,12 @@ class DiscoveryOrchestrator:
         tree_root: Root Node of the in-memory bigtree being built.
     """
 
-    def __init__(self, registry: Any, mapping_config: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        registry: Any,
+        mapping_config: dict[str, Any],
+        all_ranks: bool = False,
+    ) -> None:
         """Initialize the orchestrator with a registry and mapping config.
 
         Args:
@@ -110,9 +115,16 @@ class DiscoveryOrchestrator:
                 metadata as it is discovered.
             mapping_config: Parsed contents of the scope mapping
                 configuration JSON.
+            all_ranks: When True, resolve each lineage at FULL NCBI
+                granularity (subgenus, subfamily, suborder, clade, …) via
+                taxoniq's ``lineage`` instead of the 8 canonical ranks from
+                ``ranked_lineage``. The extra intermediate taxa become heads
+                wherever they branch (single-child sub-ranks are still
+                collapsed by passthroughs).
         """
         self.registry: Any = registry
         self.mapping: dict[str, Any] = mapping_config
+        self.all_ranks: bool = all_ranks
         self.tree_root: Node = Node("root")
 
     def discover_from_root(
@@ -411,13 +423,17 @@ class DiscoveryOrchestrator:
         """
         try:
             species_taxon = taxoniq.Taxon(taxid)
+            ancestors = (
+                species_taxon.lineage if self.all_ranks
+                else species_taxon.ranked_lineage
+            )
             return [
                 _Ancestor(
                     int(a.tax_id),
                     a.rank.name,
                     a.scientific_name,
                 )
-                for a in species_taxon.ranked_lineage
+                for a in ancestors
             ]
         except KeyError:
             lineage = self._fetch_lineage_via_ncbi(taxid)

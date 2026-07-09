@@ -263,6 +263,7 @@ class GenerationOrchestrator:
         reject_near_far_end: float = 0.9,
         binary_only: bool = False,
         binary_budget: int = 30000,
+        all_ranks: bool = False,
     ) -> None:
         """Initialize the orchestrator and its collaborating components.
 
@@ -354,6 +355,7 @@ class GenerationOrchestrator:
         self.reject_near_far_end: float = reject_near_far_end
         self.binary_only: bool = binary_only
         self.binary_budget: int = binary_budget
+        self.all_ranks: bool = all_ranks
         self.selective_download_threshold: int = selective_download_threshold
         self.spill_dir: str | None = spill_dir
         self.tmp_dir: str | None = tmp_dir
@@ -400,6 +402,7 @@ class GenerationOrchestrator:
         discovery = DiscoveryOrchestrator(
             registry=self.registry,
             mapping_config=mapping_config,
+            all_ranks=self.all_ranks,
         )
         if domain_taxid is None:
             # "all": re-discover every domain already present in the registry,
@@ -674,6 +677,7 @@ class GenerationOrchestrator:
             node,
             children_list,
             min_subclades_per_bucket=self.min_subclades_per_bucket,
+            all_ranks=self.all_ranks,
         )
         if not effective_children:
             return
@@ -1419,6 +1423,7 @@ class GenerationOrchestrator:
                 "reject_near_far_end": self.reject_near_far_end,
                 "binary_only": self.binary_only,
                 "binary_budget": self.binary_budget,
+                "all_ranks": self.all_ranks,
             },
             "summary": {
                 "n_heads": n_heads,
@@ -1770,6 +1775,7 @@ class GenerationOrchestrator:
             current_node,
             children_list,
             min_subclades_per_bucket=self.min_subclades_per_bucket,
+            all_ranks=self.all_ranks,
         )
         self._register_virtual_buckets(
             new_virtual_buckets=new_virtual_buckets,

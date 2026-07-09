@@ -71,6 +71,7 @@ def classify_children_by_rank(
     parent_node,
     children: list,
     min_subclades_per_bucket: int = _DEFAULT_MIN_SUBCLADES_PER_BUCKET,
+    all_ranks: bool = False,
 ) -> tuple[list, list[dict]]:
     """Apply rank-aware bucketing to a parent's children.
 
@@ -91,6 +92,12 @@ def classify_children_by_rank(
             non-canonical rank to receive its own dedicated bucket.
             Children of rarer ranks (below this threshold) are
             merged into ``virtual_misc``.
+        all_ranks: When True (full-granularity mode), keep every sub-rank
+            child as a real head and skip rank bucketing entirely — folding
+            non-modal ranks into buckets would re-collapse the
+            subgenus/subfamily/suborder distinctions ``--all-ranks`` exists to
+            preserve. Rare-taxa / low-capacity bucketing is unaffected (handled
+            elsewhere).
 
     Returns:
         Two-tuple ``(effective_children, new_virtual_buckets)``:
@@ -103,6 +110,9 @@ def classify_children_by_rank(
     """
     if not children:
         return [], []
+
+    if all_ranks:
+        return list(children), []
 
     canonical_rank = _resolve_canonical_rank(children)
     if canonical_rank is None:

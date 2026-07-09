@@ -343,3 +343,29 @@ class TestIdempotency:
         virtual_nodes = [c for c in effective2 if getattr(c, "rank", "").startswith("virtual_")]
         assert len(virtual_nodes) == 1
         assert buckets2 == []
+
+
+class TestAllRanksMode:
+    """--all-ranks: keep sub-rank children as real heads, no rank bucketing."""
+
+    def _mixed(self):
+        # modal rank genus (2) + a non-modal subgenus (1) -> normally bucketed
+        parent = _node("1000", rank="family")
+        return parent, [
+            _node("g1", rank="genus", parent=parent),
+            _node("g2", rank="genus", parent=parent),
+            _node("sg1", rank="subgenus", parent=parent),
+        ]
+
+    def test_all_ranks_keeps_sub_rank_children_unbucketed(self):
+        parent, children = self._mixed()
+        effective, buckets = classify_children_by_rank(
+            parent, children, all_ranks=True)
+        assert buckets == []
+        assert [str(c.name) for c in effective] == ["g1", "g2", "sg1"]
+
+    def test_canonical_default_buckets_the_sub_rank(self):
+        # contrast: without the flag, the non-modal subgenus is folded into a bucket
+        parent, children = self._mixed()
+        _, buckets = classify_children_by_rank(parent, children)
+        assert buckets, "expected the non-modal subgenus to be bucketed by default"

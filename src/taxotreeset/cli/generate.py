@@ -265,6 +265,16 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "heads, capped by each node's extraction capacity. Decoupled from "
         "--max-n-per-class (the multi-class cap). Default 30000.",
     )
+    parser.add_argument(
+        "--all-ranks",
+        action="store_true",
+        help="Resolve lineages at FULL NCBI granularity (subgenus, subfamily, "
+        "suborder, clade, ...) during the sync, instead of only the 8 canonical "
+        "ranks. Applied by the auto-sync unless --no-sync is given; heads are "
+        "then created at the sub-ranks wherever they branch. NOTE: the sync "
+        "overwrites the registry lineages, so a later run without --all-ranks "
+        "reverts to canonical.",
+    )
 
 
 def run(args: argparse.Namespace) -> None:
@@ -320,6 +330,7 @@ def run(args: argparse.Namespace) -> None:
             reject_near_far_end=args.reject_near_far_end,
             binary_only=args.binary_only,
             binary_budget=args.binary_budget,
+            all_ranks=args.all_ranks,
         )
 
         logger.info(

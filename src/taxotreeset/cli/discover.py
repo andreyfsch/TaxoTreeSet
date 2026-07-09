@@ -47,6 +47,14 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="If set, forces deletion of the old registry before "
         "starting a new discovery run",
     )
+    parser.add_argument(
+        "--all-ranks",
+        action="store_true",
+        help="Resolve lineages at FULL NCBI granularity (subgenus, subfamily, "
+        "suborder, clade, ...) via taxoniq's full lineage, instead of only the "
+        "8 canonical ranks. Intermediate taxa become heads where they branch "
+        "(single-child sub-ranks are still collapsed by passthroughs).",
+    )
 
 
 def run(args: argparse.Namespace) -> None:
@@ -96,6 +104,7 @@ def run(args: argparse.Namespace) -> None:
         orchestrator = DiscoveryOrchestrator(
             registry=registry,
             mapping_config=mapping_config,
+            all_ranks=args.all_ranks,
         )
         logger.info("Starting taxonomic scan for TaxID: %s", args.taxon_id)
         orchestrator.discover_from_root(args.taxon_id)
