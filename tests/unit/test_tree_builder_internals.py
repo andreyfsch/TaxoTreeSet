@@ -271,6 +271,61 @@ class TestApplyScopeRedirections:
         assert result == lineage
 
 
+class TestApplyScopeRedirectionsAllRanks:
+    """All-ranks scan: the redirectable group may sit below clade/realm."""
+
+    def _scope(self, redirections=None, default_id=None, all_ranks=True):
+        return {
+            "redirections": redirections or {},
+            "default_id": default_id,
+            "virtual_labels": {},
+            "all_ranks": all_ranks,
+        }
+
+    def test_kingdom_below_clade_preserves_backbone(self):
+        # Regression: Viruses -> clade Riboviria -> kingdom Orthornavirae -> ...
+        # Canonically this collapsed the whole subtree to [domain, 999000, leaf].
+        lineage = ["10239", "2559587", "2732396", "2732408", "76804", "2508233"]
+        scope = self._scope(
+            redirections={"2732396": {"target_id": "2732396"}},
+            default_id="999000",
+        )
+        result = _apply_scope_redirections(lineage, "10239", scope)
+        assert result == lineage  # full backbone kept, not collapsed
+
+    def test_virtual_insert_below_clade_keeps_intermediate_ranks(self):
+        lineage = ["10239", "2559587", "2732090", "10501"]
+        scope = self._scope(
+            redirections={"2732090": {"target_id": "999001"}},
+            default_id="999000",
+        )
+        result = _apply_scope_redirections(lineage, "10239", scope)
+        assert result == ["10239", "2559587", "999001", "2732090", "10501"]
+
+    def test_match_at_index_one_matches_canonical(self):
+        lineage = ["10239", "2732396", "2732408", "2508233"]
+        scope = self._scope(redirections={"2732396": {"target_id": "2732396"}})
+        assert _apply_scope_redirections(lineage, "10239", scope) == lineage
+
+    def test_unclassified_still_flattens_to_default(self):
+        lineage = ["10239", "9999999", "8888888"]
+        scope = self._scope(default_id="999000")
+        result = _apply_scope_redirections(lineage, "10239", scope)
+        assert result == ["10239", "999000", "8888888"]
+
+    def test_canonical_mode_does_not_scan_deeper(self):
+        # Same lineage, all_ranks=False: the deeper key is ignored and the
+        # taxon falls to the default fallback (documents the gating).
+        lineage = ["10239", "2559587", "2732396", "2508233"]
+        redirections = {"2732396": {"target_id": "2732396"}}
+        canon = self._scope(
+            redirections=redirections, default_id="999000", all_ranks=False)
+        assert _apply_scope_redirections(lineage, "10239", canon) == [
+            "10239", "999000", "2508233"]
+        ar = self._scope(redirections=redirections, default_id="999000")
+        assert _apply_scope_redirections(lineage, "10239", ar) == lineage
+
+
 # ---------------------------------------------------------------------------
 # _enumerate_accession_tasks
 # ---------------------------------------------------------------------------

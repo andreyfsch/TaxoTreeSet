@@ -69,6 +69,7 @@ def generate_seqs_by_taxon_tree(
     domain_taxid: str | None = None,
     mapping_path: str = _DEFAULT_MAPPING_PATH,
     noise_patterns_path: str = _DEFAULT_NOISE_PATTERNS_PATH,
+    all_ranks: bool = False,
 ) -> Node:
     """Build the in-memory taxonomic tree from the accession registry.
 
@@ -94,6 +95,12 @@ def generate_seqs_by_taxon_tree(
             Missing files are tolerated; an empty mapping is used.
         noise_patterns_path: Path to the noise patterns configuration
             JSON consumed by the NoiseFilter.
+        all_ranks: When True the lineages carry full NCBI granularity
+            (clade, realm, subfamily, ...), so the redirectable top-level
+            group may sit below intermediate ranks. Scope redirections then
+            scan the lineage for the first matching key instead of only
+            inspecting the domain's direct child. Canonical mode (False)
+            keeps the direct-child-only behaviour.
 
     Returns:
         The root Node of the constructed tree. The actual taxonomic
@@ -112,6 +119,7 @@ def generate_seqs_by_taxon_tree(
     noise_filter = NoiseFilter(noise_patterns_path)
 
     scope_config = _resolve_scope_config(mapping_data, domain_taxid)
+    scope_config["all_ranks"] = all_ranks
 
     root = Node("root", rank="root")
     accession_tasks = _enumerate_accession_tasks(registry_data, domain_taxid)
@@ -478,18 +486,22 @@ def _apply_scope_redirections(
     domain_taxid: str | None,
     scope_config: dict[str, Any],
 ) -> list[str]:
-    """Apply scope-level redirections to the lineage's top child level.
+    """Apply scope-level redirections to the recognised top-level group.
 
-    Only the TaxID immediately under the domain anchor is subject to
-    redirection rules. There are three possible outcomes:
+    The redirection key is the domain's direct child in canonical mode;
+    in all-ranks mode (``scope_config['all_ranks']``) it is the first
+    lineage node that carries a rule, since clade/realm ranks can sit
+    above the recognised group. There are three possible outcomes:
 
     1. **Explicit rule found**: applies the rule's target_id. A self-
        redirect (target_id equals source) preserves the lineage; a
        virtual redirect (target_id differs) inserts the virtual group
-       above the original taxon.
+       directly above the matched taxon (keeping intermediate ranks
+       resolved above it in all-ranks mode).
 
     2. **No rule found, default fallback available**: routes the taxon
-       to the scope's default fallback (e.g., 999000 for Viruses).
+       to the scope's default fallback (e.g., 999000 for Viruses),
+       collapsing the lineage to ``[domain, default, leaf]``.
 
     3. **No rule found, no default available**: leaves the lineage
        unchanged. This branch is exercised when the domain has no
@@ -500,7 +512,8 @@ def _apply_scope_redirections(
             _anchor_lineage_to_domain.
         domain_taxid: Domain anchor TaxID.
         scope_config: Resolved scope configuration. Its 'default_id'
-            entry may be None when no scope is defined for the domain.
+            entry may be None when no scope is defined for the domain;
+            its 'all_ranks' flag selects direct-child vs. scan matching.
 
     Returns:
         Possibly modified lineage with redirections applied.
@@ -512,18 +525,41 @@ def _apply_scope_redirections(
     if lineage_ids[0] != domain_str:
         return lineage_ids
 
-    next_level_id = lineage_ids[1]
     redirections = scope_config["redirections"]
+    all_ranks = scope_config.get("all_ranks", False)
 
-    if next_level_id in redirections:
-        target_id = str(redirections[next_level_id].get("target_id"))
-        if target_id != next_level_id:
+    # Locate the redirectable node. Canonical lineages place the recognised
+    # top-level group (kingdom) as the domain's direct child, so only
+    # lineage_ids[1] is inspected. All-ranks lineages may interpose clade /
+    # realm nodes above it (e.g. Viruses -> clade Riboviria -> kingdom
+    # Orthornavirae), pushing the key deeper -- scan for the first match so the
+    # recognised group is still found instead of dumping the whole subtree into
+    # the default fallback. When the match is at index 1 both paths behave
+    # identically, so canonical routing is unchanged.
+    match_index = None
+    if all_ranks:
+        for idx in range(1, len(lineage_ids)):
+            if lineage_ids[idx] in redirections:
+                match_index = idx
+                break
+    elif lineage_ids[1] in redirections:
+        match_index = 1
+
+    if match_index is not None:
+        source_id = lineage_ids[match_index]
+        target_id = str(redirections[source_id].get("target_id"))
+        if target_id != source_id:
             logger.debug(
-                f"[VIRTUAL-INSERT] taxid={next_level_id} -> virtual group {target_id}"
+                f"[VIRTUAL-INSERT] taxid={source_id} -> virtual group {target_id}"
             )
-            return [lineage_ids[0], target_id, *lineage_ids[1:]]
+            # Insert the virtual group directly above the matched taxon,
+            # preserving any intermediate ranks resolved above it.
+            return [
+                *lineage_ids[:match_index], target_id, *lineage_ids[match_index:]
+            ]
         return lineage_ids
 
+    next_level_id = lineage_ids[1]
     default_id = scope_config["default_id"]
     if default_id is None:
         logger.debug(

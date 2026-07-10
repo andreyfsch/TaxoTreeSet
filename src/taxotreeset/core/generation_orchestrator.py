@@ -1101,6 +1101,7 @@ class GenerationOrchestrator:
             vault_path=self.vault_path,
             domain_taxid=domain_taxid,
             mapping_path=self.config_path,
+            all_ranks=self.all_ranks,
         )
 
     def _load_or_compute_capacities(self, tree_root: Node) -> dict[str, int]:
