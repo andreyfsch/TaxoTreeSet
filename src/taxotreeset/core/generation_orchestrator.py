@@ -263,6 +263,7 @@ class GenerationOrchestrator:
         reject_near_far_end: float = 0.9,
         binary_only: bool = False,
         binary_budget: int = 30000,
+        binary_extract_batch_size: int = 300,
         all_ranks: bool = False,
     ) -> None:
         """Initialize the orchestrator and its collaborating components.
@@ -355,6 +356,7 @@ class GenerationOrchestrator:
         self.reject_near_far_end: float = reject_near_far_end
         self.binary_only: bool = binary_only
         self.binary_budget: int = binary_budget
+        self.binary_extract_batch_size: int = binary_extract_batch_size
         self.all_ranks: bool = all_ranks
         self.selective_download_threshold: int = selective_download_threshold
         self.spill_dir: str | None = spill_dir
@@ -1027,27 +1029,16 @@ class GenerationOrchestrator:
             target_group=target_group,
             scheduling_artifacts=scheduling_artifacts,
         )
-        n_heads = len(scheduling_artifacts["extraction_jobs"])
+        n_heads = len(scheduling_artifacts["master_manifest"])
         ui_logger.info(
             "✓ Stage 3/4  %s   (%s heads scheduled)",
             _fmt_elapsed(time.monotonic() - t3),
             f"{n_heads:,}",
         )
 
-        # Stage 4 — extraction
-        ui_logger.info("Stage 4/4: Dispatching parallel disk extraction.")
-        t4 = time.monotonic()
-        self._execute_extraction(scheduling_artifacts["extraction_jobs"])
-        n_classes = sum(
-            len(v.get("labels", {}))
-            for v in scheduling_artifacts.get("master_manifest", {}).values()
-        )
-        ui_logger.info(
-            "✓ Stage 4/4  %s   (%s heads, %s classes)",
-            _fmt_elapsed(time.monotonic() - t4),
-            f"{n_heads:,}",
-            f"{n_classes:,}",
-        )
+        # Stage 4 — extraction (multi-class dispatches here; --binary-only has
+        # already streamed its extraction in batches during Stage 3).
+        self._run_extraction_stage(scheduling_artifacts, n_heads)
 
         self._write_label_maps(scheduling_artifacts)
         self._write_run_metadata(
@@ -1190,9 +1181,11 @@ class GenerationOrchestrator:
         self._schedule_pbar = None
         try:
             if self.binary_only:
+                # Binary heads are extracted in batches inside this call to
+                # bound peak memory; extraction_jobs stays empty so Stage 4 is
+                # a no-op for --binary-only.
                 self._schedule_binary_heads(
                     domain_node=domain_node,
-                    extraction_jobs=extraction_jobs,
                     master_manifest=master_manifest,
                     leaf_cache=leaf_cache,
                 )
@@ -1345,7 +1338,9 @@ class GenerationOrchestrator:
         snapshot = self.registry.accession_snapshot()
 
         master_manifest = scheduling_artifacts.get("master_manifest", {})
-        n_heads = len(scheduling_artifacts.get("extraction_jobs", []))
+        # One manifest entry per head, for both the multi-class and the
+        # (batch-extracted, so extraction_jobs is empty) binary paths.
+        n_heads = len(master_manifest)
         n_classes_total = sum(len(v.get("labels", {})) for v in master_manifest.values())
 
         heads = []
@@ -1521,6 +1516,39 @@ class GenerationOrchestrator:
             f"({len(scheduling_artifacts['virtual_id_registry'])})."
         )
 
+    def _run_extraction_stage(
+        self, scheduling_artifacts: dict, n_heads: int
+    ) -> None:
+        """Run Stage 4 extraction and log its completion.
+
+        For ``--binary-only`` runs extraction was already streamed in batches
+        during Stage 3 (to bound peak memory), so ``extraction_jobs`` is empty
+        and nothing is dispatched here; the multi-class path dispatches its
+        accumulated jobs now.
+
+        Args:
+            scheduling_artifacts: Artifacts from ``_schedule_pipeline_jobs``.
+            n_heads: Number of scheduled heads, for the summary line.
+        """
+        t4 = time.monotonic()
+        if not self.binary_only:
+            ui_logger.info("Stage 4/4: Dispatching parallel disk extraction.")
+            self._execute_extraction(scheduling_artifacts["extraction_jobs"])
+        n_classes = sum(
+            len(v.get("labels", {}))
+            for v in scheduling_artifacts.get("master_manifest", {}).values()
+        )
+        stage4_note = (
+            "streamed during Stage 3" if self.binary_only
+            else _fmt_elapsed(time.monotonic() - t4)
+        )
+        ui_logger.info(
+            "✓ Stage 4/4  %s   (%s heads, %s classes)",
+            stage4_note,
+            f"{n_heads:,}",
+            f"{n_classes:,}",
+        )
+
     def _execute_extraction(self, extraction_jobs: list) -> None:
         """Dispatch the extraction jobs to the worker pool.
 
@@ -1626,11 +1654,10 @@ class GenerationOrchestrator:
     def _schedule_binary_heads(
         self,
         domain_node: Node,
-        extraction_jobs: list,
         master_manifest: dict,
         leaf_cache: dict,
     ) -> None:
-        """Schedule a binary belongs/not-belongs head for every taxonomic node.
+        """Schedule and extract a binary belongs/not-belongs head per node.
 
         ``--binary-only`` mode. For each non-root taxonomic node ``N`` (a real
         taxon, not an individual genome), emit a 2-class dataset:
@@ -1648,9 +1675,18 @@ class GenerationOrchestrator:
         positives are skipped, since a 2-class head cannot be formed there. The
         learning auditor/monitor certify which trained heads actually learn.
 
+        Extraction is streamed in batches of
+        ``self.binary_extract_batch_size`` heads instead of accumulating every
+        head's task lists in memory first: at all-ranks scale (tens of
+        thousands of heads, each carrying up to a few thousand reject task
+        dicts) holding them all at once exhausts RAM. Each batch's jobs are
+        built, dispatched to the worker pool, and freed before the next, so
+        peak memory is bounded by one batch rather than the whole run. The
+        ``master_manifest`` (lightweight per-head metadata) is still populated
+        in full for downstream persistence.
+
         Args:
             domain_node: The domain anchor node (its descendants get heads).
-            extraction_jobs: Job list to append to (mutated).
             master_manifest: Manifest to populate (mutated).
             leaf_cache: Per-node sequence-leaf cache.
         """
@@ -1660,18 +1696,35 @@ class GenerationOrchestrator:
             if getattr(n, "rank", "") != "sequence"
         ]
         total = len(nodes)
+        batch_size = max(1, self.binary_extract_batch_size)
         ui_logger.info(
-            "Scheduling binary heads over %s taxonomic nodes "
-            "(one belongs/not-belongs head per node)...", f"{total:,}")
+            "Scheduling + extracting binary heads over %s taxonomic nodes "
+            "in batches of %s (one belongs/not-belongs head per node)...",
+            f"{total:,}", f"{batch_size:,}")
+        batch: list = []
+        scheduled = 0
         skipped = 0
         last_log = time.monotonic()
+
+        def flush_batch() -> None:
+            nonlocal scheduled
+            if not batch:
+                return
+            self.builder.build_node_dataset(batch, parallel=True)
+            scheduled += len(batch)
+            ui_logger.info(
+                "  extracted binary batch: +%s heads  (%s extracted, "
+                "%s skipped)", f"{len(batch):,}", f"{scheduled:,}",
+                f"{skipped:,}")
+            batch.clear()
+
         for i, node in enumerate(nodes):
             now = time.monotonic()
             if now - last_log >= 15.0:
                 ui_logger.info(
-                    "  scheduling binary heads: %s/%s nodes  ->  %s heads  "
-                    "(%s skipped)", f"{i:,}", f"{total:,}",
-                    f"{len(extraction_jobs):,}", f"{skipped:,}")
+                    "  binary heads: %s/%s nodes scanned  ->  %s extracted, "
+                    "%s pending, %s skipped", f"{i:,}", f"{total:,}",
+                    f"{scheduled:,}", f"{len(batch):,}", f"{skipped:,}")
                 last_log = now
             taxid = str(node.name)
             cap = caps.get(taxid, 0)
@@ -1734,14 +1787,17 @@ class GenerationOrchestrator:
                     },
                 },
             }
-            extraction_jobs.append((
+            batch.append((
                 taxid, target_dir, parent_tasks,
                 self.max_subseq_len, self.seed, self.output_format,
             ))
+            if len(batch) >= batch_size:
+                flush_batch()
+        flush_batch()
         ui_logger.info(
-            "Scheduled %s binary heads (%s of %s nodes skipped: no data or no "
-            "external negatives).", f"{len(extraction_jobs):,}", f"{skipped:,}",
-            f"{total:,}")
+            "Scheduled + extracted %s binary heads (%s of %s nodes skipped: "
+            "no data or no external negatives).", f"{scheduled:,}",
+            f"{skipped:,}", f"{total:,}")
 
     def _schedule_decision_point(
         self,

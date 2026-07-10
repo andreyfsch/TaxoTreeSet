@@ -373,6 +373,74 @@ class TestBinaryOnlyGeneration:
             assert len(pd.read_parquet(test_p)) > 0, f"{test_p} is empty"
 
 
+@pytest.fixture(scope="module")
+def binary_pipeline_output_batched(synthetic_env, tmp_path_factory):
+    """Same binary run but with batch_size=1, forcing many extraction flushes."""
+    from taxotreeset.core.generation_orchestrator import GenerationOrchestrator
+    from taxotreeset.io.registry import NCBIRegistry
+
+    output_dir = str(tmp_path_factory.mktemp("binary_out_batched"))
+    registry = NCBIRegistry(registry_path=synthetic_env["registry_path"])
+    orch = GenerationOrchestrator(
+        registry=registry,
+        vault_path=synthetic_env["vault_dir"],
+        output_dir=output_dir,
+        config_path=synthetic_env["mapping_path"],
+        min_subseq_len=_MIN_LEN,
+        max_subseq_len=200,
+        max_n_per_class=100,
+        min_leaves_per_class=1,
+        rare_taxa_strategy="keep",
+        n_gpu_workers=0,
+        n_workers=1,
+        binary_only=True,
+        binary_budget=60,
+        binary_extract_batch_size=1,
+    )
+    orch.run_pipeline(target_group="viruses", sync=False, abundance_threshold=1)
+    return {"output_dir": output_dir}
+
+
+class TestBinaryBatchedExtractionParity:
+    """Streaming extraction in batches must not change the produced datasets."""
+
+    def _head_rowcounts(self, output_dir):
+        import pandas as pd
+        out = Path(output_dir)
+        counts = {}
+        for parquet in out.rglob("*.parquet"):
+            rel = parquet.relative_to(out)
+            counts[str(rel)] = len(pd.read_parquet(parquet))
+        return counts
+
+    def test_same_head_files_and_rowcounts(
+        self, binary_pipeline_output, binary_pipeline_output_batched
+    ):
+        single = self._head_rowcounts(binary_pipeline_output["output_dir"])
+        batched = self._head_rowcounts(binary_pipeline_output_batched["output_dir"])
+        assert batched, "batched run produced no parquet files"
+        assert set(batched) == set(single), (
+            "batched extraction produced a different set of head files"
+        )
+        assert batched == single, (
+            "batched extraction changed per-file row counts (non-deterministic "
+            "across batch boundaries)"
+        )
+
+    def test_batched_metadata_records_all_heads(
+        self, binary_pipeline_output, binary_pipeline_output_batched
+    ):
+        def n_heads(output_dir):
+            meta = json.loads((Path(output_dir)
+                               / "run_metadata_viruses.json").read_text())
+            return meta["summary"]["n_heads"]
+        single = n_heads(binary_pipeline_output["output_dir"])
+        batched = n_heads(binary_pipeline_output_batched["output_dir"])
+        # n_heads must reflect the manifest, not the (now-empty) extraction_jobs.
+        assert single > 0 and batched > 0, "binary run reported zero heads"
+        assert batched == single
+
+
 class TestFullPipelineOutputContracts:
     def test_run_metadata_file_exists(self, pipeline_output):
         path = Path(pipeline_output["output_dir"]) / "run_metadata_viruses.json"

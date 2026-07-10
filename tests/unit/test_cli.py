@@ -236,6 +236,7 @@ class TestGenerateRun:
             reject_near_far_end=0.9,
             binary_only=False,
             binary_budget=30000,
+            extract_batch_size=300,
             all_ranks=False,
             log_level="INFO",
         )
@@ -274,6 +275,7 @@ class TestGenerateRun:
         args = self._make_args(tmp_path)
         args.binary_only = True
         args.binary_budget = 25000
+        args.extract_batch_size = 128
         args.all_ranks = True
         with (
             patch("taxotreeset.cli.generate.setup_logging"),
@@ -285,6 +287,7 @@ class TestGenerateRun:
         kwargs = mock_orch.call_args.kwargs
         assert kwargs["binary_only"] is True
         assert kwargs["binary_budget"] == 25000
+        assert kwargs["binary_extract_batch_size"] == 128
         assert kwargs["all_ranks"] is True
 
     def test_no_sync_with_missing_registry_exits(self, tmp_path):

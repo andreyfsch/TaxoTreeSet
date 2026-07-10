@@ -266,6 +266,16 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--max-n-per-class (the multi-class cap). Default 30000.",
     )
     parser.add_argument(
+        "--extract-batch-size",
+        type=int,
+        default=300,
+        help="--binary-only only: number of heads whose parquets are extracted "
+        "per batch. Extraction is streamed batch-by-batch so peak memory is "
+        "bounded by one batch instead of all heads at once (at all-ranks scale "
+        "the full job list can exceed RAM). Lower it on low-memory hosts; raise "
+        "it for more parallelism headroom. Default 300.",
+    )
+    parser.add_argument(
         "--all-ranks",
         action="store_true",
         help="Resolve lineages at FULL NCBI granularity (subgenus, subfamily, "
@@ -330,6 +340,7 @@ def run(args: argparse.Namespace) -> None:
             reject_near_far_end=args.reject_near_far_end,
             binary_only=args.binary_only,
             binary_budget=args.binary_budget,
+            binary_extract_batch_size=args.extract_batch_size,
             all_ranks=args.all_ranks,
         )
 
