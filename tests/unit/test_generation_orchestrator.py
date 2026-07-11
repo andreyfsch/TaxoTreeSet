@@ -542,15 +542,45 @@ class TestMaybeAddRejectClass:
         assert not (headers & {"a1", "a2"})       # never the head's own leaves
         assert registry[reject_taxid]["purpose"] == "reject"
 
-    def test_near_ratio_interpolates_start_to_end_by_depth(self, orchestrator):
-        # _reject_tree: A (kingdom, depth 2) → CA (family, depth 3) → seq leaves
-        # (depth 4). d_min=2, tree max_depth=4, so the near fraction runs from
-        # start (shallowest head) to end (deepest) linearly over depth.
+    def test_near_ratio_interpolates_over_decidable_depth(self, orchestrator):
+        # Branching (non-passthrough) tree — each node is a real decision with
+        # >=2 taxonomic children. Decidable depths A=2, CA=3, GA=4; d_max=4, so
+        # the near fraction runs start -> end linearly over decidable depth.
+        root = _reject_node("1", None, "superkingdom", "Root")
+        a = _reject_node("2", root, "kingdom", "A")
+        _reject_node("3", root, "kingdom", "B")
+        ca = _reject_node("20", a, "phylum", "CA")
+        _reject_node("21", a, "phylum", "CB")
+        ga = _reject_node("200", ca, "class", "GA")
+        _reject_node("201", ca, "class", "GB")
+        _rej_leaf("g1", ga)
         orchestrator.reject_near_far_start = 0.4
         orchestrator.reject_near_far_end = 0.9
-        node_a, child_a = _reject_tree()
-        assert orchestrator._reject_near_ratio(node_a) == pytest.approx(0.4)     # d2
-        assert orchestrator._reject_near_ratio(child_a) == pytest.approx(0.65)   # d3
+        assert orchestrator._reject_near_ratio(a) == pytest.approx(0.4)     # d2
+        assert orchestrator._reject_near_ratio(ca) == pytest.approx(0.65)   # d3
+        assert orchestrator._reject_near_ratio(ga) == pytest.approx(0.9)    # d4
+
+    def test_near_ratio_ignores_passthrough_depth(self, orchestrator):
+        # A node under a long single-child (passthrough) chain has high RAW tree
+        # depth but shallow DECIDABLE depth (passthroughs are not heads and prune
+        # nothing) — its near fraction must be `start`, not near-heavy.
+        root = _reject_node("1", None, "superkingdom", "Root")
+        k1 = _reject_node("2", root, "clade", "k1")        # passthrough chain
+        g1 = _reject_node("3", k1, "kingdom", "g1")
+        g2 = _reject_node("4", g1, "phylum", "g2")
+        pt_leaf = _reject_node("5", g2, "species", "ptleaf")
+        _rej_leaf("s1", pt_leaf)
+        k2 = _reject_node("6", root, "clade", "k2")        # branching side (deep)
+        _reject_node("7", k2, "kingdom", "m2")
+        m1 = _reject_node("8", k2, "kingdom", "m1")
+        _reject_node("9", m1, "phylum", "x2")
+        deep = _reject_node("10", m1, "phylum", "x1")
+        _rej_leaf("d1", deep)
+        orchestrator.reject_near_far_start = 0.5
+        orchestrator.reject_near_far_end = 0.9
+        assert pt_leaf.depth > deep.depth                  # raw depth: 5 > 4 ...
+        assert orchestrator._reject_near_ratio(pt_leaf) == pytest.approx(0.5)  # ...but decidable d2
+        assert orchestrator._reject_near_ratio(deep) == pytest.approx(0.9)     # decidable d4
 
     def test_near_ratio_flat_when_start_equals_end(self, orchestrator):
         orchestrator.reject_near_far_start = 0.6

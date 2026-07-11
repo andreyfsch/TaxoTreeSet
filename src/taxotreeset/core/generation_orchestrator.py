@@ -2130,27 +2130,63 @@ class GenerationOrchestrator:
     def _reject_near_ratio(self, node: Node) -> float:
         """Depth-scaled near fraction of the reject bucket for ``node``'s head.
 
-        Distant intruders are pruned by upstream heads, so the intruders a deep
-        head actually faces are near-heavy (siblings/cousins). The near fraction
-        is therefore linearly interpolated from ``reject_near_far_start`` at the
-        shallowest reject-eligible head (the root's children, depth 2) to
-        ``reject_near_far_end`` at the deepest node in the tree. ``end == start``
-        gives a flat, depth-independent ratio.
+        Distant intruders are pruned by upstream HEADS, so the intruders a deep
+        head actually faces are near-heavy (siblings/cousins). The relevant
+        depth is therefore the number of *decidable* nodes above the head — i.e.
+        NON-passthrough ancestors, since a passthrough (single taxonomic child)
+        is not a head and prunes nothing. Using the raw ``node.depth`` (which
+        counts passthrough nodes in the all-ranks tree) over-states depth for
+        heads under long single-child chains (e.g. a strain sitting directly
+        under a clade). The near fraction is linearly interpolated from
+        ``reject_near_far_start`` at decidable depth 2 (the root's decidable
+        children) to ``reject_near_far_end`` at the deepest decidable node.
+        ``end == start`` gives a flat, depth-independent ratio.
 
         Args:
             node: The head (parent) node being scheduled.
 
         Returns:
-            Near fraction in ``[start, end]`` for this head's depth.
+            Near fraction in ``[start, end]`` for this head's decidable depth.
         """
         start, end = self.reject_near_far_start, self.reject_near_far_end
-        d_min = 2                         # root (depth 1) has no reject
-        d_max = node.root.max_depth
+        depths = self._decidable_depths(node.root)
+        d_min = 2                         # a decidable child of the root
+        d_max = max(depths.values()) if depths else d_min
         if d_max <= d_min:
             return start
-        frac = (node.depth - d_min) / (d_max - d_min)
-        frac = min(1.0, max(0.0, frac))
+        d = depths.get(id(node), d_min)
+        frac = min(1.0, max(0.0, (d - d_min) / (d_max - d_min)))
         return start + (end - start) * frac
+
+    def _decidable_depths(self, root: Node) -> dict:
+        """Map ``id(node)`` -> count of non-passthrough nodes from root to it.
+
+        A passthrough node (exactly one taxonomic child) is not a head and does
+        not prune, so it does not add to a node's effective (pruning) depth.
+        Computed top-down once per tree and cached, so ``_reject_near_ratio`` is
+        O(1) per head.
+
+        Args:
+            root: The tree root.
+
+        Returns:
+            Dict mapping node identity to its decidable depth (root's decidable
+            children are depth 2, matching the old ``node.depth`` convention).
+        """
+        if getattr(self, "_dd_root_id", None) == id(root):
+            return self._dd_map
+        depths: dict[int, int] = {}
+        stack = [(root, 0)]
+        while stack:
+            n, parent_d = stack.pop()
+            kids = [c for c in n.children if getattr(c, "rank", "") != "sequence"]
+            d = parent_d + (0 if len(kids) == 1 else 1)   # passthrough adds 0
+            depths[id(n)] = d
+            for c in kids:
+                stack.append((c, d))
+        self._dd_root_id = id(root)
+        self._dd_map = depths
+        return depths
 
     def _maybe_add_reject_class(
         self,
