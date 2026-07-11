@@ -372,6 +372,22 @@ class TestBinaryOnlyGeneration:
             assert test_p.exists(), f"{train_p.parent} has train but no test split"
             assert len(pd.read_parquet(test_p)) > 0, f"{test_p} is empty"
 
+    def test_single_child_nodes_collapse_to_passthrough(self, binary_pipeline_output):
+        # A binary head for a single-child node is redundant with its only child
+        # (identical subtree), so it must NOT be emitted — it collapses to a
+        # passthrough. Adenoviridae 12227 has exactly one species (10509).
+        out = Path(binary_pipeline_output["output_dir"])
+        passthroughs = json.loads(
+            (out / "passthroughs_viruses.json").read_text())
+        assert passthroughs.get("12227") == "10509", (
+            "single-child Adenoviridae should collapse to its only species")
+        # No passthrough taxid may have a head; the child keeps its head.
+        for taxid in passthroughs:
+            assert not list(out.rglob(f"*/{taxid}/train.parquet")), (
+                f"passthrough {taxid} wrongly got a belongs/not-belongs head")
+        assert list(out.rglob("*/10509/train.parquet")), (
+            "the passthrough's child (10509) must keep its head")
+
 
 @pytest.fixture(scope="module")
 def binary_pipeline_output_batched(synthetic_env, tmp_path_factory):

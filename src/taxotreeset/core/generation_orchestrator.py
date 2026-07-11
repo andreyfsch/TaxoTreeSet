@@ -1188,6 +1188,7 @@ class GenerationOrchestrator:
                     domain_node=domain_node,
                     master_manifest=master_manifest,
                     leaf_cache=leaf_cache,
+                    passthrough_map=passthrough_map,
                 )
             else:
                 self._schedule_pbar = tqdm(
@@ -1656,6 +1657,7 @@ class GenerationOrchestrator:
         domain_node: Node,
         master_manifest: dict,
         leaf_cache: dict,
+        passthrough_map: dict,
     ) -> None:
         """Schedule and extract a binary belongs/not-belongs head per node.
 
@@ -1685,10 +1687,18 @@ class GenerationOrchestrator:
         ``master_manifest`` (lightweight per-head metadata) is still populated
         in full for downstream persistence.
 
+        Single-child nodes are passthroughs: a node with exactly one taxonomic
+        child covers the identical subtree as that child, so its
+        belongs/not-belongs head would be redundant. Such nodes are skipped (no
+        head, no parquet) and recorded in ``passthrough_map`` — mirroring the
+        multi-class path's ``_is_passthrough_case`` — so only genuine branching
+        (decidable) nodes become heads.
+
         Args:
             domain_node: The domain anchor node (its descendants get heads).
             master_manifest: Manifest to populate (mutated).
             leaf_cache: Per-node sequence-leaf cache.
+            passthrough_map: Map of collapsed node -> its single child (mutated).
         """
         caps = self._all_capacities or {}
         nodes = [
@@ -1704,6 +1714,7 @@ class GenerationOrchestrator:
         batch: list = []
         scheduled = 0
         skipped = 0
+        passthrough = 0
         last_log = time.monotonic()
 
         def flush_batch() -> None:
@@ -1727,6 +1738,15 @@ class GenerationOrchestrator:
                     f"{scheduled:,}", f"{len(batch):,}", f"{skipped:,}")
                 last_log = now
             taxid = str(node.name)
+            # Passthrough: a node with a single taxonomic child covers the exact
+            # same subtree as that child, so its belongs/not-belongs head is
+            # redundant. Skip it (no head/parquet) and record the collapse, so
+            # only genuine branching nodes become heads.
+            node_children = self._collect_real_children(node)
+            if self._is_passthrough_case(node_children):
+                passthrough_map[taxid] = str(node_children[0].name)
+                passthrough += 1
+                continue
             cap = caps.get(taxid, 0)
             budget = min(self.binary_budget, cap) if cap else self.binary_budget
             if budget <= 0:
@@ -1795,9 +1815,10 @@ class GenerationOrchestrator:
                 flush_batch()
         flush_batch()
         ui_logger.info(
-            "Scheduled + extracted %s binary heads (%s of %s nodes skipped: "
-            "no data or no external negatives).", f"{scheduled:,}",
-            f"{skipped:,}", f"{total:,}")
+            "Scheduled + extracted %s binary heads (%s of %s nodes: %s "
+            "passthroughs collapsed, %s skipped for no data/negatives).",
+            f"{scheduled:,}", f"{total:,}", f"{total:,}", f"{passthrough:,}",
+            f"{skipped:,}")
 
     def _schedule_decision_point(
         self,
