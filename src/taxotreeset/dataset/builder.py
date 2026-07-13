@@ -50,6 +50,7 @@ Typical usage::
 """
 
 import logging
+import math
 import multiprocessing
 import os
 from typing import Any
@@ -77,6 +78,14 @@ _STRATIFIED_SPLIT_RATIOS = (0.70, 0.85)
 _LOW_MEMORY_THRESHOLD_GB = 12
 _LOW_MEMORY_WORKER_COUNT = 2
 _WORKERS_RESERVED_FOR_PARENT = 2
+
+# Target rows per extraction shard. A head's per-split tasks are partitioned into
+# shards of roughly this many sampled rows (balanced by each task's ``n``), so a
+# head with many source genomes is spread across workers instead of pinning one
+# core. Heads whose whole split is smaller than this stay a single shard (no
+# fan-out overhead). Chosen well above _BUFFER_SIZE_ROWS so each shard amortizes
+# its per-task pickling/IPC while still yielding shards >> worker count on big heads.
+_SHARD_ROWS_TARGET = 50_000
 
 
 def extract_parent_node_worker(job: tuple) -> bool:
@@ -232,6 +241,158 @@ def _buffer_to_arrow_table(buffer: list[dict[str, Any]]) -> pa.Table:
     dataframe = pd.DataFrame(buffer)
     dataframe["class_idx"] = dataframe["class_idx"].astype("int32")
     return pa.Table.from_pandas(dataframe, preserve_index=False)
+
+
+def _partition_tasks(
+    tasks: list[dict[str, Any]],
+    shard_rows_target: int,
+) -> list[list[dict[str, Any]]]:
+    """Split a split's tasks into shards balanced by estimated rows (``n``).
+
+    The number of shards is ``ceil(sum(n) / shard_rows_target)``, capped at the
+    task count (a shard can hold at least one task). Tasks are greedily assigned
+    to the least-loaded shard in descending-``n`` order, so shard row-counts stay
+    close to uniform. A single-task or below-target split returns one shard, i.e.
+    no fan-out for small heads.
+
+    Args:
+        tasks: Worker-ready task dicts for one split of one head.
+        shard_rows_target: Approximate rows per shard.
+
+    Returns:
+        A list of non-empty task sublists (the shards), in shard-index order.
+    """
+    total = sum(int(t.get("n", 0)) for t in tasks)
+    n_shards = max(1, min(len(tasks), math.ceil(total / shard_rows_target)))
+    if n_shards <= 1:
+        return [list(tasks)]
+
+    shards: list[list[dict[str, Any]]] = [[] for _ in range(n_shards)]
+    loads = [0] * n_shards
+    for task in sorted(tasks, key=lambda t: int(t.get("n", 0)), reverse=True):
+        i = min(range(n_shards), key=lambda k: loads[k])
+        shards[i].append(task)
+        loads[i] += int(task.get("n", 0))
+    return [s for s in shards if s]
+
+
+def _plan_shards(
+    jobs: list[tuple],
+    shard_rows_target: int,
+) -> tuple[list[tuple], list[tuple]]:
+    """Fan head-jobs out into per-(head, split, shard) shard-jobs + merge-jobs.
+
+    Splits whose final merged file already exists are skipped (resume), so no
+    shard or merge work is scheduled for them. Part-file names are deterministic
+    (``<split>.part{idx:05d}.<fmt>``) given the task order, so an interrupted run
+    reuses completed parts on restart.
+
+    Args:
+        jobs: Head-jobs ``(taxid, target_dir, parent_tasks, max_subseq_len, seed,
+            output_format)`` as built by the orchestrator.
+        shard_rows_target: Approximate rows per shard (see ``_partition_tasks``).
+
+    Returns:
+        ``(shard_jobs, merge_jobs)``. A shard-job is ``(target_dir, split,
+        part_path, shard_tasks, max_subseq_len)``; a merge-job is ``(target_dir,
+        split, part_paths, final_path)``.
+    """
+    shard_jobs: list[tuple] = []
+    merge_jobs: list[tuple] = []
+    for job in jobs:
+        _taxid, target_dir, parent_tasks, max_subseq_len, _seed, output_format = job
+        for split in _SPLITS:
+            tasks = parent_tasks.get(split, [])
+            if not tasks:
+                continue
+            final_path = os.path.join(target_dir, f"{split}.{output_format}")
+            if os.path.exists(final_path):
+                continue  # resume: this split is already built
+            part_paths: list[str] = []
+            for idx, shard_tasks in enumerate(
+                _partition_tasks(tasks, shard_rows_target)
+            ):
+                part_path = os.path.join(
+                    target_dir, f"{split}.part{idx:05d}.{output_format}"
+                )
+                part_paths.append(part_path)
+                shard_jobs.append(
+                    (target_dir, split, part_path, shard_tasks, max_subseq_len)
+                )
+            merge_jobs.append((target_dir, split, part_paths, final_path))
+    return shard_jobs, merge_jobs
+
+
+def _shard_worker(shard_job: tuple) -> bool:
+    """Extract one shard's tasks to a part file (spawn-pool target).
+
+    Writes to a ``.tmp`` sibling and atomically renames, so an interrupted write
+    never leaves a corrupt part that a resume would trust. A shard whose tasks
+    yield no rows produces no file (``_write_split_parquet`` opens lazily).
+
+    Args:
+        shard_job: ``(target_dir, split, part_path, shard_tasks, max_subseq_len)``.
+
+    Returns:
+        True on completion.
+    """
+    target_dir, _split, part_path, shard_tasks, max_subseq_len = shard_job
+    if os.path.exists(part_path):
+        return True  # resume: this shard is already built
+    os.makedirs(target_dir, exist_ok=True)
+    tmp_path = f"{part_path}.tmp"
+    _write_split_parquet(shard_tasks, tmp_path, max_subseq_len)
+    if os.path.exists(tmp_path):
+        os.replace(tmp_path, part_path)
+    return True
+
+
+def _merge_worker(merge_job: tuple) -> bool:
+    """Concatenate a split's part files into its final Parquet (spawn-pool target).
+
+    Copies each part's row groups into one writer (no re-sampling, constant
+    memory), writes to a ``.tmp`` sibling, atomically renames to the final path,
+    then deletes the parts. The atomic rename makes the merge crash-safe: an
+    interrupted merge leaves the parts intact and no final file, so a resume
+    redoes it. An empty split (no part produced any rows) yields no final file,
+    matching the un-sharded behavior.
+
+    Args:
+        merge_job: ``(target_dir, split, part_paths, final_path)``.
+
+    Returns:
+        True on completion.
+    """
+    _target_dir, _split, part_paths, final_path = merge_job
+    if os.path.exists(final_path):
+        for part in part_paths:  # tidy any leftover parts from a prior run
+            if os.path.exists(part):
+                os.remove(part)
+        return True
+
+    existing = [p for p in part_paths if os.path.exists(p)]
+    if not existing:
+        return True  # empty split -> no file, as before
+
+    tmp_path = f"{final_path}.tmp"
+    writer: pq.ParquetWriter | None = None
+    try:
+        for part in existing:
+            parquet_file = pq.ParquetFile(part)
+            for batch in parquet_file.iter_batches():
+                table = pa.Table.from_batches([batch])
+                if writer is None:
+                    writer = pq.ParquetWriter(
+                        tmp_path, table.schema, compression=_PARQUET_COMPRESSION
+                    )
+                writer.write_table(table)
+    finally:
+        if writer is not None:
+            writer.close()
+    os.replace(tmp_path, final_path)
+    for part in existing:
+        os.remove(part)
+    return True
 
 
 class DatasetBuilder:
@@ -438,28 +599,37 @@ class DatasetBuilder:
         if not parallel:
             return [extract_parent_node_worker(job) for job in jobs]
 
+        # Task-level sharding: fan each head's per-split tasks out into balanced
+        # shards so a head with many source genomes is spread across workers
+        # instead of pinning one core (the straggler that idles cores at the end
+        # of a batch). Shards write part files; a merge pass concatenates each
+        # split's parts back into the single <split>.<fmt> file downstream expects.
+        shard_jobs, merge_jobs = _plan_shards(jobs, _SHARD_ROWS_TARGET)
+        if not shard_jobs and not merge_jobs:
+            return [True] * len(jobs)  # every split already built (resume)
+
         worker_count = self._compute_worker_count()
-        logger.info(f"[BUILDER] Worker pool: {worker_count} processes")
+        logger.info(
+            f"[BUILDER] Worker pool: {worker_count} processes; "
+            f"{len(shard_jobs)} shard(s) over {len(jobs)} head(s)"
+        )
 
         context = multiprocessing.get_context("spawn")
         with context.Pool(
             processes=worker_count,
             initializer=_pool_worker_initializer,
         ) as pool:
-            results: list[bool] = []
             with tqdm(
-                total=len(jobs),
-                desc="Building parquets",
-                unit="job",
+                total=len(shard_jobs), desc="Extracting shards", unit="shard"
             ) as progress_bar:
-                for result in pool.imap_unordered(
-                    extract_parent_node_worker,
-                    jobs,
-                    chunksize=1,
-                ):
-                    results.append(result)
+                for _ in pool.imap_unordered(_shard_worker, shard_jobs, chunksize=1):
                     progress_bar.update(1)
-            return results
+            with tqdm(
+                total=len(merge_jobs), desc="Merging shards", unit="file"
+            ) as progress_bar:
+                for _ in pool.imap_unordered(_merge_worker, merge_jobs, chunksize=1):
+                    progress_bar.update(1)
+        return [True] * len(jobs)
 
     @staticmethod
     def _compute_worker_count() -> int:

@@ -204,6 +204,36 @@ approximate/Bloom capacity, GPU encoding, disk spill, checkpointing).
 **Effort.** Remaining `_bottomup.py` move moderate but multiprocessing-sensitive;
 do it as its own verified step.
 
+## 🟢 P8 — Extraction parallelism (HoreKa)
+
+**Problem.** Parquet extraction (Stage 3/4) pooled one worker per HEAD (`cpu-2`
+workers), tasks within a head serial — so a head with many source genomes was a
+single-worker straggler that idled cores at the end of each batch.
+
+**Done (2026-07-13) — task-level sharding.** `build_node_dataset` now fans each
+head's per-split tasks into work-balanced shards (`_partition_tasks` /
+`_plan_shards`), pools the shard-jobs (`_shard_worker` → `<split>.part*.parquet`),
+then a merge pass (`_merge_worker`) row-group-concatenates the parts into
+`<split>.parquet`. Crash-safe (`.tmp` + atomic rename) and resumable at the split,
+shard, and merge level. Orchestrator + downstream readers unchanged (single file
+per split preserved). Correct because the subseq sampling is order-independent →
+total rows per split/class invariant under sharding. New `_SHARD_ROWS_TARGET`
+(50k). Tests: `tests/unit/test_builder_sharding.py` (8, incl. a real spawn-pool
+run) over the P7-Part-B `_vault_fixture`.
+
+**Deferred follow-ups (independent, additive; today's change is their prerequisite).**
+- **Intra-genome chunking** for eukaryotes: split one huge genome's `n` across
+  fraction ranges so a single giant genome isn't an unsplittable straggler. The
+  real memory/I/O win needs a **storage-layout change** — genomes stored as
+  independently-decompressible blocks (chunked LMDB records or BGZF) + a ranged
+  reader; zlib whole-genome blobs have no random access. Reuse the streaming-read
+  pattern of `_from_chunked_sequence` (now in `core/generation/_keys.py`). NOT the
+  LMDB engine itself — just the value layout + reader.
+- **`--shard i/N`** multi-node partition of the head set (SLURM job array) — heads
+  are independent; the biggest raw win on HoreKa.
+- **Vectorize `extract_subseqs`** — the per-subseq Python `rng.randint`+slice loop
+  is the per-core CPU cost.
+
 ---
 
 ## Cross-repo — PhyloCascadeGLM
