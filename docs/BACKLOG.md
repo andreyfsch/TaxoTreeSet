@@ -178,15 +178,31 @@ approximate/Bloom capacity, GPU encoding, disk spill, checkpointing).
   `_capacity_approximate`, `compute_node_capacity` through a genuine temp vault
   with **no monkeypatching**, so they survive the I/O core moving out of
   `capacity.py`.
-- **Part C — remaining.** Move the I/O core (`_read_single_sequence`/
-  `_read_sequence_cached`/`_SEQUENCE_CACHE`, `_HASHED_*`, `_flush_keys_to_buckets`),
-  `_NodeCapacityKeys`, `_BottomUpCapacityComputer`, checkpoint/spill,
-  exact-capacity, and `_capacity_approximate` into submodules, then migrate/retire
-  the ~45 patch-by-path tests in `test_capacity.py` as the behavioral tests take
-  over. HoreKa-critical; do incrementally on top of the Part B net.
+- **Part C — in progress (2026-07-13).** Extracted the key-machinery layer, keeping
+  the I/O cache (`_read_sequence_cached` / `_SEQUENCE_CACHE`) and the `_HASHED_*`
+  thresholds IN `capacity.py` as the patch anchors, so **no test needed editing**
+  (912 pass, ruff clean). New submodules, all re-exported from `capacity.py`:
+  - `_diskdedup.py` — the pure prefix-bucket machinery (`_bucket_writer_paths`,
+    `_count_unique_bucketed_on_disk`, `_flush_keys_to_buckets`, `_compact_pure_keys`,
+    `_cleanup_key_buckets`). `_open_key_buckets` stays in `capacity.py` so both its
+    and `_capacity_exact`'s flush calls resolve through the one patchable namespace.
+  - `_spill.py` — checkpoint/spill (`_save`/`_load`/`_delete_leaf_checkpoint`,
+    `_cleanup_spill_dirs`, `_LEAF_CHECKPOINT_FNAME`); `_load` lazily imports
+    `_NodeCapacityKeys` to avoid a cycle.
+  - `_keys.py` — `_NodeCapacityKeys` (the 445-line accumulator); its sequence reads
+    lazily `from …capacity import _read_sequence_cached`, which breaks the cycle AND
+    keeps `patch("capacity._read_sequence_cached")` working (verified by the 7 patch
+    tests).
+  `capacity.py` **1893 → 1179** so far.
+  - **Still remaining.** Move `_BottomUpCapacityComputer` (~470 lines) + the pool
+    worker tasks (`_leaf_worker_task[_auto]`, `_leaf_pool_initializer`,
+    `_reconstruct_leaf_keys`, `_WORKER_GPU_DEVICE_ID`) into `_bottomup.py`. CAREFUL:
+    multiprocessing pickles workers by qualified name and `_leaf_pool_initializer`
+    sets a module-global GPU device id read by the tasks — initializer + tasks must
+    land in the SAME module. Not covered by a real-pool test, so higher risk.
 
-**Effort.** Part C moderate, low-risk now (covered by the 855-test suite +
-behavioral net).
+**Effort.** Remaining `_bottomup.py` move moderate but multiprocessing-sensitive;
+do it as its own verified step.
 
 ---
 
