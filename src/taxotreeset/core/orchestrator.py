@@ -356,11 +356,12 @@ class DiscoveryOrchestrator:
         reports: list[dict[str, Any]],
         root_id_str: str,
     ) -> None:
-        """Add a single species TaxID's lineage and accessions to the system.
+        """Add a single leaf taxon's lineage and accessions to the system.
 
         Args:
-            taxid_str: Species TaxID as string.
-            reports: List of assembly reports for this species.
+            taxid_str: Leaf/organism TaxID as string (a species or a rank
+                below it, e.g. a no_rank strain).
+            reports: List of assembly reports for this taxon.
             root_id_str: Root TaxID for scope lookup.
 
         Raises:
@@ -404,7 +405,7 @@ class DiscoveryOrchestrator:
         )
 
     def _resolve_lineage(self, taxid: int) -> list[_Ancestor]:
-        """Resolve a species' canonical lineage, species to root.
+        """Resolve a taxon's canonical lineage, from that taxon to root.
 
         Tries the local taxoniq cache first; on a cache miss (a TaxID
         newer than taxoniq's snapshot) falls back to a live NCBI Datasets
@@ -412,20 +413,21 @@ class DiscoveryOrchestrator:
         and order so downstream tree paths stay consistent.
 
         Args:
-            taxid: Species TaxID to resolve.
+            taxid: Leaf/organism TaxID to resolve — usually a species,
+                often a rank below it (e.g. a no_rank strain).
 
         Returns:
-            Ancestors from species to root.
+            Ancestors from the taxon to root.
 
         Raises:
             RuntimeError: If neither taxoniq nor the NCBI fallback can
                 resolve the TaxID.
         """
         try:
-            species_taxon = taxoniq.Taxon(taxid)
+            taxon = taxoniq.Taxon(taxid)
             ancestors = (
-                species_taxon.lineage if self.all_ranks
-                else species_taxon.ranked_lineage
+                taxon.lineage if self.all_ranks
+                else taxon.ranked_lineage
             )
             return [
                 _Ancestor(
