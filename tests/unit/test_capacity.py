@@ -943,7 +943,7 @@ class TestCleanupSpillDirs:
         leaf.header_id = "HDR1"
 
         with patch(
-            "taxotreeset.core.generation.capacity._leaf_worker_task",
+            "taxotreeset.core.generation._bottomup._leaf_worker_task",
             return_value=("leaf1", False, b"", 0, 13, None),
         ):
             compute_all_capacities(
@@ -972,7 +972,7 @@ class TestCleanupSpillDirs:
         leaf.header_id = "HDR1"
 
         with patch(
-            "taxotreeset.core.generation.capacity._leaf_worker_task",
+            "taxotreeset.core.generation._bottomup._leaf_worker_task",
             return_value=("leaf1", False, b"", 0, 13, None),
         ):
             compute_all_capacities(

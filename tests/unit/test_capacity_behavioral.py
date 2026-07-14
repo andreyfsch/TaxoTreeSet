@@ -216,3 +216,49 @@ def test_compute_node_capacity_no_sequence_leaves_returns_zero(tmp_path):
     child.rank = "species"
 
     assert compute_node_capacity(parent, _MIN_LEN, {}, mode="exact") == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# compute_all_capacities: the parallel bottom-up pass over a real vault. Guards
+# the _bottomup.py extraction — the workers run in spawn subprocesses, so a broken
+# pickle/module-global would surface here (and can't be mocked). Parallel must
+# equal serial and the exact ground truth.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_compute_all_capacities_parallel_matches_serial_and_truth(tmp_path):
+    from bigtree import Node
+
+    from taxotreeset.core.generation.capacity import compute_all_capacities
+
+    seqs = {
+        "NC_A": _SEQ_A, "NC_B": _SEQ_B,
+        "NC_C": _SEQ_A[::-1], "NC_D": _SEQ_B[::-1],   # 4 leaves -> 2 workers busy
+    }
+    vault = make_test_vault(tmp_path, seqs)
+
+    def build_tree():
+        root = Node("root")
+        root.rank = "superkingdom"
+        for i, hid in enumerate(seqs):
+            sp = Node(f"sp{i}", parent=root)
+            sp.rank = "species"
+            make_vault_leaf(hid, vault).parent = sp
+        return root
+
+    spill_serial = tmp_path / "serial"
+    spill_serial.mkdir()
+    spill_parallel = tmp_path / "parallel"
+    spill_parallel.mkdir()
+
+    serial = compute_all_capacities(
+        build_tree(), _MIN_LEN, spill_dir=str(spill_serial),
+        n_workers=1, n_gpu_workers=0,
+    )
+    parallel = compute_all_capacities(
+        build_tree(), _MIN_LEN, spill_dir=str(spill_parallel),
+        n_workers=2, n_gpu_workers=0,
+    )
+
+    assert parallel == serial                       # spawn workers agree with serial
+    assert serial["root"] == true_unique_kmers(seqs.values(), _MIN_LEN)

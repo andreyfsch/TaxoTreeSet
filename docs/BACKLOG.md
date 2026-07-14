@@ -193,16 +193,24 @@ approximate/Bloom capacity, GPU encoding, disk spill, checkpointing).
     lazily `from …capacity import _read_sequence_cached`, which breaks the cycle AND
     keeps `patch("capacity._read_sequence_cached")` working (verified by the 7 patch
     tests).
-  `capacity.py` **1893 → 1179** so far.
-  - **Still remaining.** Move `_BottomUpCapacityComputer` (~470 lines) + the pool
-    worker tasks (`_leaf_worker_task[_auto]`, `_leaf_pool_initializer`,
-    `_reconstruct_leaf_keys`, `_WORKER_GPU_DEVICE_ID`) into `_bottomup.py`. CAREFUL:
-    multiprocessing pickles workers by qualified name and `_leaf_pool_initializer`
-    sets a module-global GPU device id read by the tasks — initializer + tasks must
-    land in the SAME module. Not covered by a real-pool test, so higher risk.
+  - `_bottomup.py` (2026-07-14) — `_BottomUpCapacityComputer` + the pool workers
+    (`_leaf_worker_task[_auto]`, `_leaf_pool_initializer`, `_reconstruct_leaf_keys`)
+    + the `_WORKER_GPU_DEVICE_ID` global, all in ONE module (spawn pickles workers
+    by qualified name and the initializer sets the device id the workers read).
+    `_resolve_bottom_up_threshold` stays in `capacity.py` (patch anchor) and is
+    imported lazily. First closed the test-net gap with a parallel-vs-serial
+    value test (`compute_all_capacities` n_workers=2 == n_workers=1 == ground
+    truth over a real vault) — the spawn workers can't be mocked, so this guards
+    the pickle/global. Only 2 tests needed a patch-path repoint
+    (`capacity._leaf_worker_task` → `_bottomup._leaf_worker_task`).
 
-**Effort.** Remaining `_bottomup.py` move moderate but multiprocessing-sensitive;
-do it as its own verified step.
+  **`capacity.py` decomposition DONE:** **2422 → 541** (−78%); cohesive submodules
+  `_bottomup` (668), `_keys` (476), `_bloom` (249), `_gpu` (245), `_spill` (200),
+  `_diskdedup` (121), `_encoding` (102). Suite 921, ruff clean.
+
+**Still open (the other half of P7's title):** decompose `generation_orchestrator.py`
+(2507 lines, now the largest module — it grew with the binary-head work). Needs its
+own test groundwork first, the way Part B seeded capacity's behavioral net.
 
 ## 🟢 P8 — Extraction parallelism (HoreKa)
 
