@@ -559,6 +559,20 @@ class DiscoveryOrchestrator:
                 lineage.append(
                     _Ancestor(int(node["id"]), rank, str(node["name"]))
                 )
+
+        # Canonical ranks only — the classification dict is keyed by rank name, so
+        # it cannot carry the non-canonical (no_rank / clade / sub*) intermediates
+        # that --all-ranks needs. TODO: the CLI reply also has a ``taxonomy.parents``
+        # array (ordered ancestor TaxIDs, including those intermediates, e.g.
+        # suborder Arnidovirineae / subfamily Variarterivirinae for taxon 299386);
+        # a future all-ranks-aware fallback should resolve those via taxoniq (the
+        # ancestors predate the cache miss that sent us here, so taxoniq knows them).
+        if self.all_ranks:
+            logger.warning(
+                "NCBI taxonomy fallback for TaxID %s yields canonical ranks only; "
+                "--all-ranks non-canonical intermediates are omitted for this leaf.",
+                taxid,
+            )
         return lineage
 
     @staticmethod
