@@ -509,19 +509,23 @@ class DiscoveryOrchestrator:
         return None
 
     def _fetch_lineage_via_ncbi(self, taxid: int) -> list[_Ancestor]:
-        """Fetch a species' canonical lineage from the NCBI Datasets CLI.
+        """Fetch a taxon's canonical lineage from the NCBI Datasets CLI.
 
         Used as a fallback when taxoniq's static snapshot does not know a
-        recently classified TaxID. Parses the CLI's taxonomy
-        classification into the same canonical rank set and order taxoniq
-        produces (species to root).
+        recently classified TaxID. Parses the CLI's taxonomy classification
+        into the canonical rank chain (species rank up to root). Note this
+        fallback always yields the canonical ranks only — unlike the taxoniq
+        path it does not honor ``all_ranks`` (see the caller), so a
+        non-canonical leaf (e.g. a no_rank strain) is not itself included.
 
         Args:
-            taxid: Species TaxID to resolve.
+            taxid: Leaf/organism TaxID to resolve — usually a species,
+                often a rank below it (e.g. a no_rank strain).
 
         Returns:
-            Ancestors from species to root, or an empty list if the CLI
-            returns no usable classification.
+            The taxon's canonical ancestors from its species-rank ancestor
+            to root, or an empty list if the CLI returns no usable
+            classification.
         """
         command = [
             "datasets",
