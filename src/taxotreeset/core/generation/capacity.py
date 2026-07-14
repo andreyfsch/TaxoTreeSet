@@ -56,7 +56,7 @@ Typical usage::
 
 import logging
 
-from taxotreeset.core.generation._bloom import (  # re-exported for callers/tests
+from taxotreeset.core.generation._capacity._bloom import (  # re-exported for callers/tests
     _bloom_get_bit as _bloom_get_bit,
     _bloom_set_bit as _bloom_set_bit,
     _build_bloom_filter,
@@ -64,24 +64,24 @@ from taxotreeset.core.generation._bloom import (  # re-exported for callers/test
     _consume_sequence_into_bloom_vectorized,
     _generate_bloom_hashes as _generate_bloom_hashes,
 )
-from taxotreeset.core.generation._encoding import (
+from taxotreeset.core.generation._capacity._encoding import (
     _BASES_PER_BYTE,
     _encode_windows_2bit,
 )
-from taxotreeset.core.generation._bottomup import (  # re-exported; public API below
+from taxotreeset.core.generation._capacity._bottomup import (  # re-exported; public API below
     _BottomUpCapacityComputer,
 )
-from taxotreeset.core.generation._diskdedup import (  # re-exported for callers/tests
+from taxotreeset.core.generation._capacity._diskdedup import (  # re-exported for callers/tests
     _bucket_writer_paths,
     _cleanup_key_buckets,
     _compact_pure_keys,
     _count_unique_bucketed_on_disk,
     _flush_keys_to_buckets,
 )
-from taxotreeset.core.generation._keys import (  # re-exported for _spill lazy import + tests
+from taxotreeset.core.generation._capacity._keys import (  # re-export: tests + _spill
     _NodeCapacityKeys as _NodeCapacityKeys,
 )
-from taxotreeset.core.generation._spill import (  # re-exported for tests
+from taxotreeset.core.generation._capacity._spill import (  # re-exported for tests
     _cleanup_spill_dirs as _cleanup_spill_dirs,
 )
 from taxotreeset.core.generation.constants import (

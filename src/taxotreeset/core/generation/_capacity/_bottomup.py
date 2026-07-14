@@ -19,13 +19,13 @@ import logging
 
 from tqdm import tqdm
 
-from taxotreeset.core.generation._encoding import _BASES_PER_BYTE
-from taxotreeset.core.generation._gpu import (
+from taxotreeset.core.generation._capacity._encoding import _BASES_PER_BYTE
+from taxotreeset.core.generation._capacity._gpu import (
     _detect_cuda_device_count,
     _gpu_encode_unique,
 )
-from taxotreeset.core.generation._keys import _NodeCapacityKeys
-from taxotreeset.core.generation._spill import (
+from taxotreeset.core.generation._capacity._keys import _NodeCapacityKeys
+from taxotreeset.core.generation._capacity._spill import (
     _cleanup_spill_dirs,
     _delete_leaf_checkpoint,
     _load_leaf_checkpoint,

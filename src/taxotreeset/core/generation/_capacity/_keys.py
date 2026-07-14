@@ -15,12 +15,12 @@ at load time (breaking the cycle) while tests that patch
 
 import contextlib
 
-from taxotreeset.core.generation._diskdedup import (
+from taxotreeset.core.generation._capacity._diskdedup import (
     _bucket_writer_paths,
     _count_unique_bucketed_on_disk,
     _flush_keys_to_buckets,
 )
-from taxotreeset.core.generation._encoding import _encode_windows_2bit
+from taxotreeset.core.generation._capacity._encoding import _encode_windows_2bit
 
 
 class _NodeCapacityKeys:

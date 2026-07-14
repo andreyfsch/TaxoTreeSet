@@ -13,7 +13,7 @@ sequence I/O and no memory-vs-disk policy — the caller (``_NodeCapacityKeys`` 
 Part C) and re-exported there so existing imports keep working.
 """
 
-from taxotreeset.core.generation._encoding import _HASHED_PREFIX_BUCKETS
+from taxotreeset.core.generation._capacity._encoding import _HASHED_PREFIX_BUCKETS
 
 
 def _bucket_writer_paths(tmp_dir: str) -> list:

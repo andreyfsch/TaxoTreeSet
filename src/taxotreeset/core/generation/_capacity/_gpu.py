@@ -10,7 +10,7 @@ the functions so the module loads without a GPU. The multiprocessing leaf worker
 
 from typing import TYPE_CHECKING
 
-from taxotreeset.core.generation._encoding import (
+from taxotreeset.core.generation._capacity._encoding import (
     _BASES_PER_BYTE,
     _HASHED_PREFIX_BUCKETS,
     _get_acgt_lut,
