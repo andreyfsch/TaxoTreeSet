@@ -510,6 +510,81 @@ class TestFetchLineageViaNcbi:
 
 
 # ---------------------------------------------------------------------------
+# _fetch_lineage_via_ncbi — --all-ranks fallback via `parents`
+# ---------------------------------------------------------------------------
+
+
+class TestFetchLineageViaNcbiAllRanks:
+    """--all-ranks fallback resolves non-canonical intermediates via ``parents``.
+
+    taxoniq's static snapshot knows the ancestor TaxIDs (they predate the cache
+    miss that triggered the fallback), so the ordered ``parents`` array yields the
+    same all-ranks lineage the primary path produces — including the non-canonical
+    (sub*/clade/no_rank) ranks the rank-keyed ``classification`` dict cannot hold.
+    """
+
+    # Ordered root -> immediate parent for a leaf whose deepest parent (11047) is a
+    # no_rank taxon taxoniq knows; its lineage carries subfamily/suborder/clade.
+    _PARENTS = [1, 10239, 2559587, 2732396, 2732408, 2732506, 76804,
+                2499398, 76803, 2499604, 2499610, 2499620, 11047]
+
+    def _orch(self, all_ranks):
+        mock_registry = MagicMock()
+        mock_registry.registry = {"accessions": {}, "taxons": {}, "lineages": {}}
+        return DiscoveryOrchestrator(
+            registry=mock_registry, mapping_config={}, all_ranks=all_ranks)
+
+    def test_all_ranks_resolves_non_canonical_via_parents(self):
+        orch = self._orch(all_ranks=True)
+        payload = {"taxonomy": {
+            "parents": self._PARENTS,
+            "classification": {"species": {"id": "11047", "name": "S"}},
+        }}
+        mock_result = MagicMock()
+        mock_result.stdout = json.dumps(payload) + "\n"
+        with patch("subprocess.run", return_value=mock_result):
+            result = orch._fetch_lineage_via_ncbi(299386)
+        ranks = {a.rank for a in result}
+        assert {"subfamily", "suborder"} <= ranks  # non-canonical intermediates
+        assert {"species", "genus", "family", "order"} <= ranks
+
+    def test_canonical_mode_ignores_parents(self):
+        orch = self._orch(all_ranks=False)
+        payload = {"taxonomy": {
+            "parents": self._PARENTS,
+            "classification": {
+                "species": {"id": "11047", "name": "S"},
+                "genus": {"id": "2499620", "name": "G"},
+            },
+        }}
+        mock_result = MagicMock()
+        mock_result.stdout = json.dumps(payload) + "\n"
+        with patch("subprocess.run", return_value=mock_result):
+            result = orch._fetch_lineage_via_ncbi(299386)
+        ranks = {a.rank for a in result}
+        assert "subfamily" not in ranks
+        assert "suborder" not in ranks
+        assert {"species", "genus"} <= ranks
+
+    def test_all_ranks_falls_back_to_classification_when_parents_missing(self):
+        orch = self._orch(all_ranks=True)
+        payload = {"taxonomy": {"classification": {
+            "species": {"id": "2697049", "name": "SARS-CoV-2"},
+            "superkingdom": {"id": "10239", "name": "Viruses"},
+        }}}
+        mock_result = MagicMock()
+        mock_result.stdout = json.dumps(payload) + "\n"
+        with (
+            patch("taxotreeset.core.orchestrator.logger") as mock_logger,
+            patch("subprocess.run", return_value=mock_result),
+        ):
+            result = orch._fetch_lineage_via_ncbi(2697049)
+        ranks = {a.rank for a in result}
+        assert "species" in ranks
+        mock_logger.warning.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # discover_from_root — early return when no reports
 # ---------------------------------------------------------------------------
 

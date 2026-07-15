@@ -509,23 +509,24 @@ class DiscoveryOrchestrator:
         return None
 
     def _fetch_lineage_via_ncbi(self, taxid: int) -> list[_Ancestor]:
-        """Fetch a taxon's canonical lineage from the NCBI Datasets CLI.
+        """Fetch a taxon's lineage from the NCBI Datasets CLI.
 
-        Used as a fallback when taxoniq's static snapshot does not know a
-        recently classified TaxID. Parses the CLI's taxonomy classification
-        into the canonical rank chain (species rank up to root). Note this
-        fallback always yields the canonical ranks only — unlike the taxoniq
-        path it does not honor ``all_ranks`` (see the caller), so a
-        non-canonical leaf (e.g. a no_rank strain) is not itself included.
+        Fallback when taxoniq's static snapshot does not know a recently
+        classified TaxID. In ``--all-ranks`` mode the ordered ``taxonomy.parents``
+        array is used — it carries the non-canonical (no_rank/clade/sub*)
+        ancestors the rank-keyed ``classification`` dict cannot — and those
+        ancestors predate the cache miss, so taxoniq resolves them into the same
+        all-ranks lineage the primary path produces. Otherwise, or if ``parents``
+        cannot be resolved, the canonical ``classification`` ranks are used.
 
         Args:
             taxid: Leaf/organism TaxID to resolve — usually a species,
                 often a rank below it (e.g. a no_rank strain).
 
         Returns:
-            The taxon's canonical ancestors from its species-rank ancestor
-            to root, or an empty list if the CLI returns no usable
-            classification.
+            The taxon's ancestors, deepest-first (all ranks when ``all_ranks`` and
+            ``parents`` resolves, else canonical species-to-root), or an empty list
+            if the CLI returns nothing usable.
         """
         command = [
             "datasets",
@@ -548,32 +549,91 @@ class DiscoveryOrchestrator:
             )
             return []
 
-        classification = self._parse_taxonomy_classification(completed.stdout)
-        if not classification:
+        taxonomy = self._parse_taxonomy(completed.stdout)
+        if not taxonomy:
             return []
 
-        lineage: list[_Ancestor] = []
+        # --all-ranks: the canonical `classification` dict is keyed by rank name and
+        # cannot carry the non-canonical (no_rank/clade/sub*) intermediates, but the
+        # ordered `parents` array can. Resolve those ancestors through taxoniq (they
+        # predate the cache miss, so taxoniq knows them) for the same all-ranks
+        # lineage the primary path yields.
+        if self.all_ranks:
+            lineage = self._lineage_from_parents(taxonomy.get("parents", []))
+            if lineage:
+                return lineage
+            logger.warning(
+                "NCBI all-ranks fallback for TaxID %s could not resolve `parents`; "
+                "using canonical ranks only for this leaf.", taxid,
+            )
+
+        classification = taxonomy.get("classification")
+        if not classification:
+            return []
+        lineage = []
         for rank in CANONICAL_RANKS_SPECIES_TO_ROOT:
             node = self._classification_node_for_rank(classification, rank)
             if node is not None:
-                lineage.append(
-                    _Ancestor(int(node["id"]), rank, str(node["name"]))
-                )
-
-        # Canonical ranks only — the classification dict is keyed by rank name, so
-        # it cannot carry the non-canonical (no_rank / clade / sub*) intermediates
-        # that --all-ranks needs. TODO: the CLI reply also has a ``taxonomy.parents``
-        # array (ordered ancestor TaxIDs, including those intermediates, e.g.
-        # suborder Arnidovirineae / subfamily Variarterivirinae for taxon 299386);
-        # a future all-ranks-aware fallback should resolve those via taxoniq (the
-        # ancestors predate the cache miss that sent us here, so taxoniq knows them).
-        if self.all_ranks:
-            logger.warning(
-                "NCBI taxonomy fallback for TaxID %s yields canonical ranks only; "
-                "--all-ranks non-canonical intermediates are omitted for this leaf.",
-                taxid,
-            )
+                lineage.append(_Ancestor(int(node["id"]), rank, str(node["name"])))
         return lineage
+
+    def _lineage_from_parents(self, parents: list) -> list[_Ancestor]:
+        """Full all-ranks ancestor lineage from the CLI's ordered ``parents`` array.
+
+        ``parents`` is ordered root -> immediate parent and includes the
+        non-canonical ranks (no_rank/clade/sub*) the canonical classification omits.
+        The ancestors predate the taxoniq cache miss that triggered this fallback,
+        so taxoniq resolves them: the deepest resolvable ancestor's taxoniq
+        ``.lineage`` (which is itself + all its ancestors, deepest-first) is exactly
+        the shape the primary path produces. The leaf itself is not in ``parents`` —
+        ``_register_taxon`` records it via ``_resolve_self_node``.
+
+        Args:
+            parents: Ordered ancestor TaxIDs from the CLI taxonomy reply.
+
+        Returns:
+            Ancestors from the deepest resolvable parent to root, deepest-first,
+            or an empty list if none resolve (e.g. ``parents`` missing).
+        """
+        for parent_taxid in reversed(parents):
+            try:
+                ancestor = taxoniq.Taxon(int(parent_taxid))
+                return [
+                    _Ancestor(int(a.tax_id), a.rank.name, a.scientific_name)
+                    for a in ancestor.lineage
+                ]
+            except Exception:
+                continue
+        return []
+
+    @staticmethod
+    def _parse_taxonomy(stdout: str) -> dict[str, Any] | None:
+        """Extract the taxonomy object from a taxonomy JSON-lines reply.
+
+        The taxonomy object carries both the canonical ``classification`` dict and
+        the ordered ``parents`` ancestor array the all-ranks fallback needs.
+
+        Args:
+            stdout: Raw stdout from the datasets taxonomy command.
+
+        Returns:
+            The first non-empty ``taxonomy`` object, or None if the reply has no
+            parsable report.
+        """
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            # With --as-json-lines each line is a report itself, with
+            # taxonomy at the top level (no enclosing "reports" array).
+            taxonomy = payload.get("taxonomy")
+            if taxonomy:
+                return taxonomy
+        return None
 
     @staticmethod
     def _parse_taxonomy_classification(stdout: str) -> dict[str, Any] | None:
@@ -586,21 +646,8 @@ class DiscoveryOrchestrator:
             The classification mapping (rank name to {id, name}), or None
             if the reply has no parsable report.
         """
-        for line in stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            # With --as-json-lines each line is a report itself, with
-            # taxonomy at the top level (no enclosing "reports" array).
-            taxonomy = payload.get("taxonomy", {})
-            classification = taxonomy.get("classification")
-            if classification:
-                return classification
-        return None
+        taxonomy = DiscoveryOrchestrator._parse_taxonomy(stdout)
+        return taxonomy.get("classification") if taxonomy else None
 
     @staticmethod
     def _classification_node_for_rank(
