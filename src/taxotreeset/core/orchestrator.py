@@ -399,7 +399,7 @@ class DiscoveryOrchestrator:
             full_path,
             node_attrs={
                 "taxid": taxid_str,
-                "rank": "species",
+                "rank": lineage[0].rank,
                 "scientific_name": lineage[0].scientific_name,
             },
         )
@@ -679,21 +679,21 @@ class DiscoveryOrchestrator:
         lineage: list[_Ancestor],
         root_id_str: str,
     ) -> list[str]:
-        """Resolve a species' lineage applying scope redirections.
+        """Resolve a leaf taxon's lineage applying scope redirections.
 
-        Walks the species' ranked lineage and substitutes each TaxID
-        according to the scope mapping rules. TaxIDs with no rule
-        retain their NCBI scientific name (sanitized for filesystem
-        compatibility).
+        Walks the taxon's lineage — species-to-root, or deeper when the leaf
+        is a rank below species — and substitutes each TaxID according to the
+        scope mapping rules. TaxIDs with no rule retain their NCBI scientific
+        name (sanitized for filesystem compatibility).
 
         Args:
-            lineage: Ancestors from species to root, as produced by
+            lineage: Ancestors from the leaf taxon to root, as produced by
                 taxoniq or by the NCBI-CLI fallback.
             root_id_str: Root TaxID as string for scope lookup.
 
         Returns:
-            List of human-readable path components from root to
-            species, suitable for joining with '/' as a tree path.
+            List of human-readable path components from root to the leaf
+            taxon, suitable for joining with '/' as a tree path.
         """
         scope = self.mapping.get("scopes", {}).get(root_id_str, {})
         redirections = scope.get("redirections", {})
