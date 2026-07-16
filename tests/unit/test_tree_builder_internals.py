@@ -9,12 +9,15 @@ import json
 import pytest
 from bigtree import Node
 from taxotreeset.dataset.tree_builder import (
+    _accumulate_sequence_leaves,
     _anchor_lineage_to_domain,
     _annotate_node_metadata,
     _apply_noise_filter_to_lineage,
     _apply_scope_redirections,
     _attach_sequence_leaves,
     _build_lineage_path,
+    _drop_child_indexes,
+    _flush_pending_leaves,
     _enumerate_accession_tasks,
     _find_child_by_name,
     _lineage_ids_from_registry,
@@ -22,6 +25,7 @@ from taxotreeset.dataset.tree_builder import (
     _load_optional_json,
     _maybe_append_target_taxid,
     _process_accession,
+    _register_child,
     _resolve_scope_config,
     generate_seqs_by_taxon_tree,
 )
@@ -750,3 +754,149 @@ class TestGenerateSeqsByTaxonTreeDanglingAccession:
         assert all(
             getattr(n, "rank", "") != "sequence" for n in root.descendants
         )
+
+
+# ---------------------------------------------------------------------------
+# per-node child index (O(1) lookup) — behaviour preservation + cleanup
+# ---------------------------------------------------------------------------
+
+
+class TestChildIndex:
+    def test_register_child_makes_lookup_find_it(self):
+        # A child created and registered is found in O(1) by the index.
+        root = make_root()
+        child = Node("X", parent=root)
+        _register_child(root, child)
+        assert _find_child_by_name(root, "X") is child
+
+    def test_index_seeds_from_preexisting_children(self):
+        # A node whose children predate the index is still resolved (lazy seed).
+        root = make_root()
+        pre = Node("PRE", parent=root)          # created without registering
+        assert _find_child_by_name(root, "PRE") is pre
+
+    def test_drop_child_indexes_is_idempotent_and_total(self):
+        root = make_root()
+        a = Node("a", parent=root)
+        _register_child(root, a)
+        _find_child_by_name(a, "none")          # forces an index on `a` too
+        _drop_child_indexes(root)
+        _drop_child_indexes(root)               # second call must not raise
+        assert all(
+            "_child_index" not in n.__dict__ for n in (root, *root.descendants)
+        )
+
+    def _build_tree(self, tmp_path):
+        # One species, two accessions sharing header H2 (dedup), registered
+        # under a single taxon — exercises the index-backed leaf dedup path.
+        registry = {
+            "taxons": {"2697049": ["ACC1", "ACC2"]},
+            "accessions": {
+                "ACC1": {"taxid": "2697049", "organism": "SARS-CoV-2",
+                         "headers": [{"id": "H1"}, {"id": "H2"}]},
+                "ACC2": {"taxid": "2697049", "organism": "SARS-CoV-2",
+                         "headers": [{"id": "H2"}, {"id": "H3"}]},
+            },
+            "lineages": {
+                "2697049": [
+                    {"taxid": "2697049", "rank": "species", "name": "SARS-CoV-2"},
+                    {"taxid": "10239", "rank": "superkingdom", "name": "Viruses"},
+                ]
+            },
+            "capacities": {},
+        }
+        registry_path = str(tmp_path / "registry.json")
+        with open(registry_path, "w", encoding="utf-8") as fh:
+            json.dump(registry, fh)
+        noise_path = str(tmp_path / "noise.json")
+        with open(noise_path, "w", encoding="utf-8") as fh:
+            json.dump({"name_patterns": [], "rank_blacklist": {"ranks": []}}, fh)
+        # Empty scopes so no redirection/default-fallback node is inserted —
+        # keeps the test hermetic (independent of configs/mapping.json).
+        mapping_path = str(tmp_path / "mapping.json")
+        with open(mapping_path, "w", encoding="utf-8") as fh:
+            json.dump({"scopes": {}}, fh)
+        return generate_seqs_by_taxon_tree(
+            registry_path=registry_path,
+            vault_path=str(tmp_path / "vault"),
+            domain_taxid="10239",
+            mapping_path=mapping_path,
+            noise_patterns_path=noise_path,
+        )
+
+    def test_shared_header_dedups_across_accessions(self, tmp_path):
+        root = self._build_tree(tmp_path)
+        species = _find_child_by_name(_find_child_by_name(root, "10239"), "2697049")
+        leaves = sorted(
+            c.name for c in species.children if getattr(c, "rank", "") == "sequence"
+        )
+        assert leaves == ["H1", "H2", "H3"]   # H2 not duplicated
+
+    def test_construction_index_dropped_from_returned_tree(self, tmp_path):
+        root = self._build_tree(tmp_path)
+        assert all(
+            "_child_index" not in n.__dict__ for n in (root, *root.descendants)
+        )
+
+
+# ---------------------------------------------------------------------------
+# bulk leaf attachment — deferred accumulate + single flush per node
+# ---------------------------------------------------------------------------
+
+
+class TestBulkLeafAttachment:
+    def test_accumulate_defers_then_flush_attaches_unique_leaves(self):
+        node = Node("sp")
+        node.rank = "species"
+        pending = {}
+        _accumulate_sequence_leaves(
+            node, {"organism": "O1", "headers": [{"id": "H1"}, {"id": "H2"}]},
+            "/v", pending,
+        )
+        _accumulate_sequence_leaves(
+            node, {"organism": "O2", "headers": [{"id": "H2"}, {"id": "H3"}]},
+            "/v", pending,
+        )
+        assert len(node.children) == 0          # nothing attached until flush
+        _flush_pending_leaves(pending)
+        assert sorted(c.name for c in node.children) == ["H1", "H2", "H3"]
+        assert all(c.rank == "sequence" for c in node.children)
+        assert node.children[0].fasta_path.endswith("sequences.lmdb")
+
+    def test_first_accession_wins_on_duplicate_header(self):
+        node = Node("sp")
+        pending = {}
+        _accumulate_sequence_leaves(
+            node, {"organism": "FIRST", "headers": [{"id": "H"}]}, "/v", pending)
+        _accumulate_sequence_leaves(
+            node, {"organism": "SECOND", "headers": [{"id": "H"}]}, "/v", pending)
+        _flush_pending_leaves(pending)
+        assert node.children[0].scientific_name == "FIRST"
+
+    def test_flush_skips_header_colliding_with_taxon_child(self):
+        node = Node("sp")
+        taxon_child = Node("12345", parent=node)
+        taxon_child.rank = "strain"
+        pending = {}
+        _accumulate_sequence_leaves(
+            node, {"organism": "O", "headers": [{"id": "12345"}, {"id": "H1"}]},
+            "/v", pending,
+        )
+        _flush_pending_leaves(pending)
+        collisions = [c for c in node.children if c.name == "12345"]
+        assert len(collisions) == 1
+        assert collisions[0].rank == "strain"   # the taxon child, not a leaf
+        assert any(c.name == "H1" and c.rank == "sequence" for c in node.children)
+
+    def test_flush_empty_pending_is_noop(self):
+        _flush_pending_leaves({})                # must not raise
+
+    def test_leaves_across_two_nodes_each_bulk_attached(self):
+        a = Node("A")
+        b = Node("B")
+        pending = {}
+        _accumulate_sequence_leaves(a, {"headers": [{"id": "Ha"}]}, "/v", pending)
+        _accumulate_sequence_leaves(b, {"headers": [{"id": "Hb"}]}, "/v", pending)
+        _flush_pending_leaves(pending)
+        assert [c.name for c in a.children] == ["Ha"]
+        assert [c.name for c in b.children] == ["Hb"]

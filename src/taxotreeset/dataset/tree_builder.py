@@ -125,13 +125,17 @@ def generate_seqs_by_taxon_tree(
     accession_tasks = _enumerate_accession_tasks(registry_data, domain_taxid)
 
     logger.info(
-        f"Spawning phylogenetic tree workers for {len(accession_tasks)} "
-        "metadata entries."
+        f"Resolving lineage vectors for {len(accession_tasks)} accession "
+        "entries into the taxonomic tree."
     )
 
     accessions_dict = registry_data.get("accessions", {})
     lineages = registry_data.get("lineages", {})
 
+    # Sequence leaves are accumulated per taxon node and attached in one bulk
+    # pass below, so a leaf-heavy taxon costs ~O(total) rather than O(N^2)
+    # incremental bigtree inserts.
+    pending_leaves: dict[int, tuple[Node, dict[str, dict[str, str]]]] = {}
     for taxid_str, accession_id in tqdm(
         accession_tasks, desc="Resolving Lineage Vectors"
     ):
@@ -149,10 +153,25 @@ def generate_seqs_by_taxon_tree(
             noise_filter=noise_filter,
             vault_path=vault_path,
             lineages=lineages,
+            pending_leaves=pending_leaves,
         )
 
+    _flush_pending_leaves(pending_leaves)
     _log_noise_filter_summary(noise_filter)
+    _drop_child_indexes(root)
     return root
+
+
+def _drop_child_indexes(root: Node) -> None:
+    """Drop the transient per-node name indexes after construction.
+
+    The ``{child_name: child}`` maps that make lookups O(1) during construction
+    are pure scaffolding; the finished tree is traversed via ``node.children`` /
+    ``.descendants``. Releasing them keeps the returned tree free of the extra
+    per-node dicts (meaningful on bacteria/eukaryote-scale trees).
+    """
+    for node in (root, *root.descendants):
+        node.__dict__.pop("_child_index", None)
 
 
 def _load_json(path: str) -> dict[str, Any]:
@@ -319,6 +338,7 @@ def _process_accession(
     noise_filter: NoiseFilter,
     vault_path: str,
     lineages: dict[str, list[dict[str, str]]],
+    pending_leaves: dict[int, tuple[Node, dict[str, dict[str, str]]]] | None = None,
 ) -> None:
     """Stitch a single accession into the tree at the correct lineage path.
 
@@ -337,6 +357,10 @@ def _process_accession(
         noise_filter: Configured NoiseFilter instance.
         vault_path: LMDB vault directory.
         lineages: The registry's ``lineages`` map (taxid to ancestry).
+        pending_leaves: When provided, sequence leaves are accumulated here for a
+            single bulk attach by ``_flush_pending_leaves`` (the pipeline path,
+            O(total) instead of O(N^2)). When None, they are attached
+            immediately — the standalone behaviour direct callers/tests rely on.
     """
     target_taxid = accession_info.get("taxid") or taxid_str
     stored_lineage = lineages.get(str(target_taxid))
@@ -380,11 +404,16 @@ def _process_accession(
         taxon_info=taxon_info,
     )
 
-    _attach_sequence_leaves(
-        taxon_node=leaf_taxon_node,
-        accession_info=accession_info,
-        vault_path=vault_path,
-    )
+    if pending_leaves is None:
+        _attach_sequence_leaves(
+            taxon_node=leaf_taxon_node,
+            accession_info=accession_info,
+            vault_path=vault_path,
+        )
+    else:
+        _accumulate_sequence_leaves(
+            leaf_taxon_node, accession_info, vault_path, pending_leaves
+        )
 
 
 def _lineage_ids_from_registry(
@@ -608,6 +637,7 @@ def _build_lineage_path(
             current = existing_child
             continue
         new_node = Node(taxid_str, parent=current)
+        _register_child(current, new_node)
         _annotate_node_metadata(
             new_node, taxid_str, virtual_labels, taxon_info
         )
@@ -617,7 +647,17 @@ def _build_lineage_path(
 
 
 def _find_child_by_name(node: Node, name: str) -> Node | None:
-    """Locate a direct child of a node by name attribute.
+    """Locate a direct child of a node by name, O(1) via a per-node index.
+
+    Used when walking lineage paths (``_build_lineage_path``): a wide internal
+    node — a genus with thousands of species children — would otherwise cost
+    O(children) per lookup on every accession that traverses it. This keeps a
+    lazily-built ``{child_name: child}`` index on the node, seeded from its
+    current children on first use and kept in step by ``_register_child`` at the
+    lineage-node creation site. (Sequence leaves are not looked up here; they are
+    accumulated and bulk-attached by ``_flush_pending_leaves``.) The index is a
+    transient construction aid; ``generate_seqs_by_taxon_tree`` drops it before
+    returning, leaving the tree identical to a linear-scan build.
 
     Args:
         node: Parent node to search.
@@ -626,10 +666,25 @@ def _find_child_by_name(node: Node, name: str) -> Node | None:
     Returns:
         The matching child Node, or None if no child has that name.
     """
-    for child in node.children:
-        if child.name == name:
-            return child
-    return None
+    return _child_index(node).get(name)
+
+
+def _child_index(node: Node) -> dict[str, Node]:
+    """Return the node's lazily-built ``{child_name: child}`` index.
+
+    Seeds from the node's current children the first time it is needed (normally
+    none), so the index is correct even for a node whose children predate it.
+    """
+    index = getattr(node, "_child_index", None)
+    if index is None:
+        index = {child.name: child for child in node.children}
+        node._child_index = index
+    return index
+
+
+def _register_child(parent: Node, child: Node) -> None:
+    """Record a freshly created child in its parent's name index."""
+    _child_index(parent)[child.name] = child
 
 
 def _annotate_node_metadata(
@@ -664,39 +719,97 @@ def _annotate_node_metadata(
     node.scientific_name = name
 
 
+def _accumulate_sequence_leaves(
+    taxon_node: Node,
+    accession_info: dict[str, Any],
+    vault_path: str,
+    pending_leaves: dict[int, tuple[Node, dict[str, dict[str, str]]]],
+) -> None:
+    """Record an accession's sequence headers for deferred bulk attachment.
+
+    Creating a leaf ``Node(parent=...)`` per header inserts one at a time, and
+    bigtree re-validates the parent's whole child tuple on every insert — so a
+    leaf-heavy taxon (a bacterial/eukaryote species with thousands of assemblies
+    under one node) costs O(N^2). Instead the headers are collected per taxon
+    node here and materialized once by ``_flush_pending_leaves`` in a single
+    ``children`` assignment. Duplicate header IDs (the same header seen through
+    several accessions) collapse to the first spec, matching the old
+    find-by-name dedup.
+
+    Args:
+        taxon_node: Parent taxon node the leaves belong under.
+        accession_info: Accession metadata containing the headers list.
+        vault_path: LMDB vault directory.
+        pending_leaves: Accumulator keyed by ``id(taxon_node)`` ->
+            (node, {header_id: leaf_spec}); mutated in place.
+    """
+    lmdb_path = os.path.join(vault_path, _LMDB_FILE_NAME)
+    organism = accession_info.get("organism") or ""
+    _node, specs = pending_leaves.setdefault(id(taxon_node), (taxon_node, {}))
+    for header_entry in accession_info.get("headers", []):
+        if not isinstance(header_entry, dict) or not header_entry.get("id"):
+            continue
+        header_id = str(header_entry["id"])
+        specs.setdefault(
+            header_id,
+            {"fasta_path": lmdb_path, "scientific_name": organism},
+        )
+
+
+def _flush_pending_leaves(
+    pending_leaves: dict[int, tuple[Node, dict[str, dict[str, str]]]],
+) -> None:
+    """Materialize accumulated sequence leaves — one bulk attach per taxon node.
+
+    Building each node's leaves parentless and assigning ``node.children`` in a
+    single operation makes leaf attachment ~O(total leaves) instead of the
+    O(N^2) of incremental inserts (see ``_accumulate_sequence_leaves``). A header
+    ID already present as a child — from an earlier flush or a taxon child of the
+    same name — is skipped, preserving the previous find-by-name dedup.
+
+    Args:
+        pending_leaves: Accumulator from ``_accumulate_sequence_leaves``.
+    """
+    for taxon_node, specs in pending_leaves.values():
+        if not specs:
+            continue
+        existing = {child.name for child in taxon_node.children}
+        new_leaves: list[Node] = []
+        for header_id, spec in specs.items():
+            if header_id in existing:
+                continue
+            leaf = Node(header_id)
+            leaf.rank = "sequence"
+            leaf.header_id = header_id
+            leaf.fasta_path = spec["fasta_path"]
+            leaf.scientific_name = spec["scientific_name"]
+            new_leaves.append(leaf)
+        if new_leaves:
+            taxon_node.children = (*taxon_node.children, *new_leaves)
+
+
 def _attach_sequence_leaves(
     taxon_node: Node,
     accession_info: dict[str, Any],
     vault_path: str,
 ) -> None:
-    """Attach all sequence headers of an accession as leaf nodes.
+    """Attach one accession's sequence headers as leaf nodes (immediate).
 
-    For each valid header in the accession metadata, creates a leaf
-    Node with rank='sequence', linked to the LMDB vault via the
-    ``fasta_path`` and ``header_id`` attributes. Headers that already
-    exist as children are skipped (idempotent across calls).
+    Thin convenience wrapper over the deferred path — accumulate this
+    accession's headers and flush them at once. The generation pipeline instead
+    accumulates across every accession and flushes a single time (see
+    ``generate_seqs_by_taxon_tree``), so a leaf-heavy taxon is built in one bulk
+    ``children`` assignment rather than O(N^2) incremental inserts. Headers that
+    already exist as children are skipped (idempotent across calls).
 
     Args:
         taxon_node: Parent taxon node to host the sequence leaves.
         accession_info: Accession metadata containing the headers list.
         vault_path: LMDB vault directory.
     """
-    lmdb_path = os.path.join(vault_path, _LMDB_FILE_NAME)
-    headers_list = accession_info.get("headers", [])
-
-    for header_entry in headers_list:
-        if not isinstance(header_entry, dict) or not header_entry.get("id"):
-            continue
-
-        header_id = header_entry["id"]
-        if _find_child_by_name(taxon_node, header_id) is not None:
-            continue
-
-        sequence_node = Node(header_id, parent=taxon_node)
-        sequence_node.rank = "sequence"
-        sequence_node.header_id = str(header_id)
-        sequence_node.fasta_path = lmdb_path
-        sequence_node.scientific_name = accession_info.get("organism") or ""
+    pending: dict[int, tuple[Node, dict[str, dict[str, str]]]] = {}
+    _accumulate_sequence_leaves(taxon_node, accession_info, vault_path, pending)
+    _flush_pending_leaves(pending)
 
 
 def _log_noise_filter_summary(noise_filter: NoiseFilter) -> None:
