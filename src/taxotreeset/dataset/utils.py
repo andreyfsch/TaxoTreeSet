@@ -165,7 +165,12 @@ def _read_single_sequence(lmdb_path: str, header_id: str) -> str:
         return ""
 
     try:
-        return zlib.decompress(compressed_seq).decode("utf-8")
+        # Uppercase at the single read boundary so every consumer — capacity,
+        # subseq extraction, separability, the tokenizer — sees canonical ACGT.
+        # NCBI ships eukaryotic genomes soft-masked (lowercase acgt for repeats);
+        # left as-is, those bases read as ambiguous (capacity) and as unexpected
+        # tokens (training). The vault keeps the original bytes; only reads normalize.
+        return zlib.decompress(compressed_seq).decode("utf-8").upper()
     except (zlib.error, UnicodeDecodeError) as exc:
         logger.error(f"Failed to decompress '{header_id}': {exc}")
         return ""

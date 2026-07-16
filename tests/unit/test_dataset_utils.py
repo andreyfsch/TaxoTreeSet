@@ -122,6 +122,13 @@ class TestReadSingleSequence:
         lmdb_path = _make_lmdb(tmp_path, {"NC_001": seq})
         assert _read_single_sequence(lmdb_path, "NC_001") == seq
 
+    def test_soft_masked_lowercase_is_uppercased(self, tmp_path):
+        # NCBI eukaryotic genomes are soft-masked (lowercase = repeat regions).
+        # The read boundary normalizes to canonical ACGT for every consumer.
+        stored = "acgtACGTnnnNacGT"
+        lmdb_path = _make_lmdb(tmp_path, {"NC_soft": stored})
+        assert _read_single_sequence(lmdb_path, "NC_soft") == "ACGTACGTNNNNACGT"
+
     def test_returns_empty_for_missing_key(self, tmp_path):
         lmdb_path = _make_lmdb(tmp_path, {})
         assert _read_single_sequence(lmdb_path, "MISSING_KEY") == ""
