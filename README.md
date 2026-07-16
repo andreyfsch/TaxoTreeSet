@@ -202,11 +202,24 @@ unlike the buckets above, it is **not** built from the parent's own diverted
 children. Its windows are sampled from sequences **outside the head's subtree**:
 `near` (the nearest ancestor's sibling clades) plus `far` (the rest of the tree).
 The head therefore sees explicit negatives and gains a *none-of-these* label for
-inputs that match none of its real classes. `--reject-near-far-ratio`
-(default 0.5) sets the near/far mix and `--reject-fraction` (default 1.0) sizes
-the class relative to `n_per_class`; each pool is randomly capped for a flat
-per-head cost. Off by default. The root head gets no reject class — it has no
+inputs that match none of its real classes. `--reject-fraction` (default 1.0)
+sizes the class relative to `n_per_class`, and each pool is randomly capped for a
+flat per-head cost. Off by default. The root head gets no reject class — it has no
 in-tree "outside".
+
+The **near/far mix scales with the head's depth**, because the intruders a head
+actually faces depend on where it sits. A head deep in the tree only receives
+inputs that every shallower head on its path already accepted, and those shallower
+heads have already rejected the *distant* clades — so the intruders that survive to
+a deep head are overwhelmingly **near** (siblings and cousins). A shallow head near
+the root has no such filtering above it and must guard against intruders from
+**anywhere**, near and far alike. The near fraction is therefore interpolated by
+depth, from `--reject-near-far-start` (default 0.5, at the shallowest head) up to
+`--reject-near-far-end` (default 0.9, near-heavy, at the deepest head); set them
+equal for a flat, depth-independent ratio. Depth here counts only **decidable**
+(branching) ancestors — a passthrough node is not a head and prunes nothing, so a
+taxon under a long single-child chain (common with `--all-ranks`) is not treated as
+artificially deep.
 
 ### Binary heads (optional)
 

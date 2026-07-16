@@ -857,8 +857,10 @@ def fig_reject_bucket() -> None:
     _curve(ax, f2, (43, 22), "#e0902c", rad=0.34)
     _curve(ax, f3, (44, 20), "#e0902c", rad=0.40)
 
-    ax.text(74, 26, "windows sampled from the\nnear + far clades  →  reject\n\n"
-            "--reject-near-far-ratio  sets near:far\n"
+    ax.text(74, 27, "windows sampled from the\nnear + far clades  →  reject\n\n"
+            "near:far scales with head depth\n"
+            "--reject-near-far-start → -end\n"
+            "(shallow: far-heavy · deep: near-heavy)\n"
             "size ≈ n_per_class  (--reject-fraction)",
             ha="center", fontsize=7, color="#555555")
 
