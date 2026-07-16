@@ -1,6 +1,7 @@
 """Tests for taxotreeset.io.registry.NCBIRegistry."""
 
 import json
+import os
 import subprocess
 from unittest.mock import patch, MagicMock
 import pytest
@@ -392,6 +393,21 @@ class TestSave:
         assert reloaded.registry["lineages"]["12227"] == lineage
         assert reloaded.load_capacities(100) == {"12227": 5000}
 
+    def test_save_leaves_no_tmp_file(self, reg, registry_path):
+        reg.save()
+        assert not os.path.exists(f"{registry_path}.tmp")
+
+    def test_save_atomically_replaces_existing(self, reg, registry_path):
+        # A second save must fully replace the first (os.replace), never leave a
+        # half-written or mixed file.
+        reg.registry["taxons"]["1"] = ["OLD"]
+        reg.save()
+        reg.registry["taxons"]["1"] = ["NEW"]
+        reg.save()
+        with open(registry_path, encoding="utf-8") as fh:
+            on_disk = json.load(fh)
+        assert on_disk["taxons"]["1"] == ["NEW"]
+
 
 # ---------------------------------------------------------------------------
 # _invalidate_ancestor_capacities
@@ -585,6 +601,15 @@ class TestDiscoverTaxonMetadata:
         with patch("subprocess.run", return_value=fake_result):
             reg.discover_taxon_metadata(10239)
         assert "GCF_MOCK_002" in reg.registry["accessions"]
+
+    def test_skips_non_json_lines(self, reg):
+        # The CLI can emit non-JSON informational lines; they must not abort
+        # discovery of the valid records around them.
+        fake_result = MagicMock()
+        fake_result.stdout = "downloading...\n" + self._fake_report_line("GCF_MOCK_003")
+        with patch("subprocess.run", return_value=fake_result):
+            reg.discover_taxon_metadata(10239)
+        assert "GCF_MOCK_003" in reg.registry["accessions"]
 
 
 # ---------------------------------------------------------------------------

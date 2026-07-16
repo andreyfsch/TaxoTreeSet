@@ -212,7 +212,12 @@ class NCBIRegistry:
         for line in result.stdout.splitlines():
             if not line.strip():
                 continue
-            assembly_data = json.loads(line)
+            try:
+                assembly_data = json.loads(line)
+            except json.JSONDecodeError:
+                # The CLI can emit non-JSON informational lines; skip them
+                # rather than aborting the whole discovery.
+                continue
             self._update_taxon_entry(taxon_id, assembly_data)
 
     def store_capacities(self, capacities: dict[str, int], min_len: int) -> None:
@@ -474,6 +479,13 @@ class NCBIRegistry:
         registry file is written in pretty-printed form (indent=2) to
         ease manual inspection and git diff readability.
 
+        The write is **atomic**: the JSON is written to a temp sibling and then
+        ``os.replace``d into place, so an interrupted write (a WSL crash, a full
+        disk) never truncates the authoritative registry into a file the next
+        load cannot parse. ``save()`` runs after every download chunk and
+        discovery checkpoint, so the crash window is wide and losing the registry
+        would forfeit all discovery/download progress.
+
         This method is intentionally logged at DEBUG level rather than
         INFO because it is called frequently during discovery (after
         each batch) and would otherwise distort progress bar output.
@@ -482,8 +494,10 @@ class NCBIRegistry:
         if destination_dir:
             os.makedirs(destination_dir, exist_ok=True)
 
-        with open(self.registry_path, "w", encoding="utf-8") as registry_file:
+        tmp_path = f"{self.registry_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as registry_file:
             json.dump(self.registry, registry_file, indent=2)
+        os.replace(tmp_path, self.registry_path)
 
         logger.debug(f"Registry persisted to: {self.registry_path}")
 
