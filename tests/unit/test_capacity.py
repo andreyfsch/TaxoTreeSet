@@ -926,6 +926,28 @@ class TestCleanupSpillDirs:
     def test_empty_spill_dir_is_a_noop(self, tmp_path):
         _cleanup_spill_dirs(str(tmp_path))  # must not raise
 
+    def test_removes_orphaned_flatbin_file(self, tmp_path):
+        # A crashed run strands its (multi-GB) eviction flat-bin; a fresh run's
+        # cleanup must reclaim it — a directory-only sweep used to leak it.
+        flatbin = tmp_path / "tts_capacity_flatbins_ab12cd.bin"
+        flatbin.write_bytes(b"x" * 100)
+        _cleanup_spill_dirs(str(tmp_path))
+        assert not flatbin.exists()
+
+    def test_removes_orphaned_leaf_checkpoint_bins(self, tmp_path):
+        leaf_bin = tmp_path / "capacity_leaf_7.bin"
+        leaf_bin.write_bytes(b"x" * 100)
+        _cleanup_spill_dirs(str(tmp_path))
+        assert not leaf_bin.exists()
+
+    def test_preserves_checkpoint_json(self, tmp_path):
+        # The checkpoint JSON is managed by _delete_leaf_checkpoint; cleanup
+        # must not touch it (its load already guards missing bins).
+        ckpt = tmp_path / "capacity_leaf_checkpoint.json"
+        ckpt.write_text("{}")
+        _cleanup_spill_dirs(str(tmp_path))
+        assert ckpt.exists()
+
     def test_dirs_absent_after_successful_compute(self, tmp_path):
         from bigtree import Node
         from unittest.mock import patch

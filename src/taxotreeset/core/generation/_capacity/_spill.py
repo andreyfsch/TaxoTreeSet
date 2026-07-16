@@ -162,24 +162,34 @@ def _delete_leaf_checkpoint(spill_dir: str) -> None:
 
 
 def _cleanup_spill_dirs(spill_dir: str) -> None:
-    """Remove all tts_capacity_* directories inside spill_dir.
+    """Remove tts_capacity_* bucket dirs AND stranded spill files in spill_dir.
 
-    Called in two situations:
-    - At the start of a fresh run (no valid checkpoint found) to evict
-      directories left behind by previous failed runs.
-    - After a successful Phase 2 to remove directories created by the
-      current run once their data has been merged and is no longer needed.
+    Sweeps three kinds of leftover:
+    - ``tts_capacity_*/`` prefix-bucket directories;
+    - the eviction flat-bin ``tts_capacity_flatbins_*.bin`` (a single file that
+      can reach many GB);
+    - the memory-mode leaf-checkpoint bins ``capacity_leaf_*.bin``.
 
-    Errors are logged as warnings and never propagate — a failure to clean
-    up is unfortunate but must not abort an otherwise successful pipeline.
+    Only a *successful* run deletes the loose files explicitly (in
+    ``_BottomUpCapacityComputer._cleanup``), so a directory-only sweep leaked
+    what a crashed run left behind — a fresh run over the same spill_dir never
+    reclaimed it, and the flat-bin can be many gigabytes. The file globs are
+    specific (not every ``tts_capacity_*`` entry) so unrelated files in
+    spill_dir are never touched; the checkpoint JSON is left to
+    ``_delete_leaf_checkpoint`` (its load already guards missing bins).
+
+    Called at the start of a fresh run (evict prior failed-run leftovers) and
+    after a successful Phase 2. Errors are logged as warnings and never
+    propagate — a cleanup failure must not abort an otherwise successful run.
     """
     import glob
     import os
     import shutil
 
-    pattern = os.path.join(spill_dir, "tts_capacity_*")
+    log = logging.getLogger("TaxoTreeSet.Core.Generation.Capacity")
     removed = 0
-    for path in glob.glob(pattern):
+
+    for path in glob.glob(os.path.join(spill_dir, "tts_capacity_*")):
         if not os.path.isdir(path):
             continue
         try:
@@ -187,14 +197,19 @@ def _cleanup_spill_dirs(spill_dir: str) -> None:
             if not os.path.exists(path):
                 removed += 1
             else:
-                logging.getLogger("TaxoTreeSet.Core.Generation.Capacity").warning(
-                    "[bottom-up] Could not fully remove spill dir %s", path
-                )
+                log.warning("[bottom-up] Could not fully remove spill dir %s", path)
         except OSError as exc:
-            logging.getLogger("TaxoTreeSet.Core.Generation.Capacity").warning(
-                "[bottom-up] Could not remove spill dir %s: %s", path, exc
-            )
+            log.warning("[bottom-up] Could not remove spill dir %s: %s", path, exc)
+
+    for pattern in ("tts_capacity_flatbins_*.bin", "capacity_leaf_*.bin"):
+        for path in glob.glob(os.path.join(spill_dir, pattern)):
+            if not os.path.isfile(path):
+                continue
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError as exc:
+                log.warning("[bottom-up] Could not remove spill file %s: %s", path, exc)
+
     if removed:
-        logging.getLogger("TaxoTreeSet.Core.Generation.Capacity").info(
-            "[bottom-up] Removed %d spill dir(s) from %s.", removed, spill_dir
-        )
+        log.info("[bottom-up] Removed %d spill artifact(s) from %s.", removed, spill_dir)
