@@ -208,6 +208,24 @@ the class relative to `n_per_class`; each pool is randomly capped for a flat
 per-head cost. Off by default. The root head gets no reject class — it has no
 in-tree "outside".
 
+### Binary heads (optional)
+
+![Binary heads: instead of one multi-class head per branching parent, every taxonomic node gets its own belongs / not-belongs detector](docs/figures/binary_heads.png)
+
+`--binary-only` swaps the multi-class formulation for a **belongs / not-belongs
+head on every taxonomic node** — not just the branching parents. Each node `N`
+gets a 2-class dataset: the **positive** class is windows drawn from `N`'s own
+subtree, and the **negative** class (`not_belongs`) is windows sampled from
+**outside** `N` — the same `near` (nearest-ancestor siblings) plus `far`
+(elsewhere in the tree) sampler the reject class uses, balanced one-to-one with the
+positives. `--binary-budget` (default 30000) sets the windows per class, capped by
+the node's extraction capacity, and the near/far mix follows
+`--reject-near-far-start/end`. Because at full granularity this yields tens of
+thousands of heads, extraction is streamed `--extract-batch-size` heads at a time
+(default 300) so peak memory is bounded by one batch rather than every head's task
+list at once. Single-child (passthrough) nodes are skipped — their detector would
+be identical to the child's.
+
 ### Splitting: whole genomes, leakage-safe
 
 ![Splitting: assign whole genomes to train/val/test when there are at least three; otherwise slice one sequence positionally](docs/figures/split_distribution.png)
@@ -234,6 +252,14 @@ become training labels, but not heads of their own — while `--single-level`
 generates only the root's head. Every node from `--root` down to `--stop-at`
 becomes one balanced classifier; each head classifies its direct children into a
 single balanced train/val/test dataset.
+
+By default lineages use the **8 canonical ranks** (superkingdom … species).
+`--all-ranks` instead resolves them at **full NCBI granularity** — the
+non-canonical ranks (subgenus, subfamily, suborder, clade, …) become tree nodes
+too, so heads branch wherever the taxonomy does, not only at the canonical levels.
+It is applied by the auto-sync (with `--no-sync`, the existing lineages are used
+as-is); note the sync **overwrites** the registry's cached lineages, so a later run
+without `--all-ranks` reverts to canonical.
 
 The figures above are generated, reproducibly and from no external data, by
 `python docs/make_figures.py`.
@@ -286,10 +312,14 @@ Key options:
 | `--max-n-per-class`      | 20000         | Hard ceiling on subseqs per class                              |
 | `--min-leaves-per-class` | 3             | Minimum sequence leaves for a child to stay a standalone class |
 | `--rare-taxa-strategy`   | fallback      | `fallback` (divert rare taxa) or `keep` (retain all classes)   |
+| `--all-ranks`            | off           | Resolve lineages at full NCBI granularity (sub-ranks/clades), not just the 8 canonical ranks |
+| `--binary-only`          | off           | One belongs/not-belongs head per node instead of multi-class heads (with `--binary-budget`, `--extract-batch-size`) |
 
 Behind these options, the per-head mechanics are illustrated in
-[How it works](#how-it-works): `--root` / `--stop-at` / `--single-level` shape
-generation ([Parameterizing generation](#parameterizing-generation));
+[How it works](#how-it-works): `--root` / `--stop-at` / `--single-level` /
+`--all-ranks` shape generation ([Parameterizing generation](#parameterizing-generation));
+`--binary-only` switches every node to a
+[binary belongs/not-belongs head](#binary-heads-optional);
 `--approximate-capacity` toggles how
 [capacity](#capacity-computed-bottom-up) is measured; `--min-num-seqs`,
 `--cutoff-percentage` and `--max-n-per-class` drive

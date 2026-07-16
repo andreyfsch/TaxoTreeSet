@@ -871,12 +871,88 @@ def fig_reject_bucket() -> None:
     plt.close(fig)
 
 
+def fig_binary_heads() -> None:
+    """--binary-only: one belongs / not-belongs detector per node.
+
+    Contrasts the default multi-class head (a branching parent's children compete
+    in one softmax) with the binary formulation, where every node gets its own
+    2-class head: positive = the node's subtree, negative = out-of-subtree
+    near + far windows balanced to it (the same near/far sampler the reject class
+    uses).
+    """
+    fig, ax = _canvas(13.5, 6.8)
+    ax.text(50, 96, "Binary heads: one belongs / not-belongs detector per node "
+            "(--binary-only)", ha="center", fontsize=12.5, weight="bold")
+
+    def edge(p1, p2, color="#cccccc", lw=1.3):
+        ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color=color, lw=lw, zorder=0)
+
+    ax.plot([50, 50], [6, 90], color="#dddddd", lw=1.0, ls=":")
+
+    # ---- LEFT: default multi-class head (siblings compete) ----
+    ax.text(25, 88, "default — a multi-class head per branching parent",
+            ha="center", fontsize=9, weight="bold", color=BLUE)
+    par, a, b, c = (25, 79), (13, 64), (25, 64), (37, 64)
+    for child in (a, b, c):
+        edge(par, child)
+    _node(ax, *par, "parent", BLUE, r=4.2)
+    for child, lab in ((a, "A"), (b, "B"), (c, "C")):
+        _node(ax, *child, lab, GREEN, r=2.9)
+    _box(ax, 8, 40, 34, 9, "head(parent)\nsoftmax over  A | B | C",
+         ec=BLUE, fontsize=8.5)
+    for child in (a, b, c):
+        _arrow(ax, (child[0], child[1] - 3), (25, 49.3), color="#bcd0e6", lw=1.2)
+    ax.text(25, 33, "the siblings compete in ONE head",
+            ha="center", fontsize=7.5, color="#555555")
+
+    # ---- RIGHT: binary belongs / not-belongs (one detector per node) ----
+    ax.text(75, 88, "--binary-only — one 2-class detector per node",
+            ha="center", fontsize=9, weight="bold", color=PINK)
+    n, s1, s2 = (66, 78), (60, 64), (72, 64)
+    edge(n, s1)
+    edge(n, s2)
+    ax.add_patch(FancyBboxPatch((55, 58), 24, 27,
+                 boxstyle="round,pad=0.3,rounding_size=0.8",
+                 fc="none", ec=GREEN, ls="--", lw=1.1))
+    ax.text(67, 60, "N's subtree → belongs", ha="center", fontsize=6.6,
+            color="#2e7d32")
+    _node(ax, *n, "N", PINK, r=4.2)
+    _node(ax, *s1, "", GREEN, r=2.6)
+    _node(ax, *s2, "", GREEN, r=2.6)
+    nf1, nf2, nf3 = (87, 75), (93, 68), (89, 61)
+    for nf in (nf1, nf2, nf3):
+        _node(ax, *nf, "", GREY, r=2.3)
+    ax.text(90, 81, "outside N (near + far)\n→ not-belongs", ha="center",
+            fontsize=6.6, color="#555555")
+    _box(ax, 58, 40, 34, 9, "head(N)\nbelongs   vs   not-belongs",
+         ec=PINK, fontsize=8.5)
+    _arrow(ax, (66, 57.7), (69, 49.3), color="#bcd0e6", lw=1.3)
+    _curve(ax, nf2, (82, 49.3), "#bdbdbd", rad=0.3)
+    _curve(ax, nf3, (83, 48.0), "#bdbdbd", rad=0.22)
+    ax.text(75, 33, "positive = N's subtree,   negative = near + far\n"
+            "(sampled outside N, balanced to it)",
+            ha="center", fontsize=7.5, color="#555555")
+
+    # ---- footer ----
+    ax.text(50, 17, "Every taxonomic node becomes a detector — not just branching "
+            "parents — so heads exist at every level.",
+            ha="center", fontsize=7.6, color="#444444")
+    ax.text(50, 5, "--binary-budget  windows per class (belongs and not-belongs), "
+            "capped by node capacity  ·  --extract-batch-size  heads per streamed "
+            "extraction batch  ·  near:far via --reject-near-far-start/end",
+            ha="center", fontsize=6.9, style="italic", color="#555555")
+
+    fig.savefig(FIG / "binary_heads.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     fig_taxotreeset()
     fig_generate_detail()
     fig_generate_visual()
     fig_virtual_buckets()
     fig_reject_bucket()
+    fig_binary_heads()
     fig_capacity_bottomup()
     fig_distribution_split()
     fig_selective_download()
