@@ -75,8 +75,8 @@ class NCBIRegistry:
             }
         }
 
-    The ``lineages`` map caches each species TaxID's resolved ancestry
-    (species to root) so generation can scope and place accessions
+    The ``lineages`` map caches each leaf TaxID's resolved ancestry
+    (leaf to root) so generation can scope and place accessions
     without re-resolving lineages, and so entries resolved via the NCBI
     fallback (TaxIDs newer than the taxoniq snapshot) survive into
     generation.
@@ -250,10 +250,10 @@ class NCBIRegistry:
             if min_len_key in entries
         }
 
-    def _invalidate_ancestor_capacities(self, species_taxid: str) -> None:
-        """Remove cached capacities for all ancestors of a species taxon.
+    def _invalidate_ancestor_capacities(self, leaf_taxid: str) -> None:
+        """Remove cached capacities for all ancestors of a leaf taxon.
 
-        Called when a new accession is added under ``species_taxid`` so
+        Called when a new accession is added under ``leaf_taxid`` so
         that stale capacity values for every ancestor are evicted. The
         lineage must already be stored in the registry before this method
         is called (``store_lineage`` must precede ``_update_taxon_entry``
@@ -264,10 +264,10 @@ class NCBIRegistry:
         window size, so partial retention would leave stale values.
 
         Args:
-            species_taxid: Species-level TaxID whose ancestor capacities
-                should be invalidated.
+            leaf_taxid: Leaf TaxID (a species or a rank below it) whose
+                ancestor capacities should be invalidated.
         """
-        lineage = self.registry["lineages"].get(species_taxid, [])
+        lineage = self.registry["lineages"].get(leaf_taxid, [])
         cache = self.registry["capacities"]
         for ancestor in lineage:
             ancestor_taxid = ancestor["taxid"]
@@ -277,7 +277,7 @@ class NCBIRegistry:
                     "Capacity cache invalidated for taxid %s "
                     "(new accession under %s).",
                     ancestor_taxid,
-                    species_taxid,
+                    leaf_taxid,
                 )
 
     def store_lineage(
@@ -285,7 +285,7 @@ class NCBIRegistry:
         taxon_id: TaxonId,
         lineage: list[dict[str, str]],
     ) -> None:
-        """Cache a species TaxID's resolved ancestry in the registry.
+        """Cache a leaf TaxID's resolved ancestry in the registry.
 
         Idempotent and overwrite-safe: re-resolving a lineage simply
         refreshes the cached entry. Storing here lets generation scope
@@ -293,8 +293,8 @@ class NCBIRegistry:
         lineages resolved via the NCBI fallback.
 
         Args:
-            taxon_id: Species TaxID the lineage belongs to.
-            lineage: Ancestors species-to-root, each a dict with
+            taxon_id: Leaf TaxID the lineage belongs to.
+            lineage: Ancestors leaf-to-root, each a dict with
                 ``taxid``, ``rank``, and ``name`` keys.
         """
         self.registry["lineages"][str(taxon_id)] = lineage
@@ -394,7 +394,7 @@ class NCBIRegistry:
 
         Args:
             domain_taxid: Optional domain anchor. When given, only
-                accessions whose species lineage contains this TaxID
+                accessions whose lineage contains this TaxID
                 are counted. When None, counts across the whole registry.
 
         Returns:

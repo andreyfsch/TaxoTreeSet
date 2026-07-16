@@ -393,7 +393,7 @@ def _lineage_ids_from_registry(
 ) -> list[str]:
     """Read a taxon's cached lineage from the registry, root to leaf.
 
-    The registry stores each lineage species-to-root as dicts resolved
+    The registry stores each lineage leaf-to-root as dicts resolved
     during discovery (taxoniq with an NCBI fallback). Tree construction
     wants TaxID strings root-to-leaf, so the stored order is reversed.
 

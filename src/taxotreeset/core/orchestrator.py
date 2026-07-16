@@ -14,9 +14,10 @@ The orchestrator works in three sequential stages:
    handle datasets of hundreds of thousands of accessions without
    loading the entire response into memory.
 
-2. **Lineage resolution**: each unique species TaxID encountered is
-   resolved against the local taxoniq cache to produce its full
-   ranked lineage from root to leaf. Lineages are then transformed
+2. **Lineage resolution**: each unique leaf TaxID encountered (a
+   species, or a rank below it such as a no_rank strain) is resolved
+   against the local taxoniq cache to produce its full lineage from
+   root to leaf. Lineages are then transformed
    through the mapping configuration to apply scope-level
    redirections (taxa with no valid kingdom placement are routed
    into curated semantic fallback groups).
@@ -80,7 +81,7 @@ _NCBI_API_KEY_ENV_VAR = "NCBI_API_KEY"
 
 
 class DiscoveryOrchestrator:
-    """Coordinate taxonomic discovery from a root taxon down to species.
+    """Coordinate taxonomic discovery from a root taxon down to its leaf taxa.
 
     Traverses the NCBI Taxonomy starting from a biological root
     (kingdom or domain level) and populates both the in-memory
@@ -162,7 +163,7 @@ class DiscoveryOrchestrator:
 
         logger.info(
             f"Successfully streamed {len(reports_by_taxid)} unique "
-            "species taxa. Commencing hierarchy building."
+            "leaf taxa. Commencing hierarchy building."
         )
 
         self._build_hierarchy(
@@ -198,14 +199,14 @@ class DiscoveryOrchestrator:
 
         Spawns the CLI as a long-running subprocess and reads its
         stdout line by line as JSON Lines. Each line is one assembly
-        report; reports are grouped by species TaxID.
+        report; reports are grouped by leaf (organism) TaxID.
 
         Args:
             root_id_str: Root TaxID as a string.
             assembly_levels: Comma-separated NCBI assembly levels.
 
         Returns:
-            Dictionary mapping species TaxID strings to their list of
+            Dictionary mapping leaf TaxID strings to their list of
             assembly report dictionaries. Empty dict on subprocess
             failure.
         """
@@ -278,7 +279,7 @@ class DiscoveryOrchestrator:
                 be consumed.
 
         Returns:
-            Dictionary mapping species TaxID strings to assembly
+            Dictionary mapping leaf TaxID strings to assembly
             report lists.
         """
         reports_by_taxid: dict[str, list[dict[str, Any]]] = {}
@@ -312,7 +313,7 @@ class DiscoveryOrchestrator:
     ) -> None:
         """Build the in-memory tree and register accessions, with checkpoints.
 
-        For each unique species TaxID:
+        For each unique leaf TaxID:
             1. Resolves its lineage via taxoniq, falling back to the
                NCBI taxonomy CLI for TaxIDs newer than the snapshot.
             2. Applies the mapping's redirection rules to the path.
@@ -324,7 +325,7 @@ class DiscoveryOrchestrator:
         without aborting the run.
 
         Args:
-            reports_by_taxid: Mapping of species TaxID to assembly
+            reports_by_taxid: Mapping of leaf TaxID to assembly
                 reports produced by ``_stream_ncbi_summaries``.
             root_id_str: Root TaxID as string for scope lookup.
             checkpoint_interval: Save the registry every N processed

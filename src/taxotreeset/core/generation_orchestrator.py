@@ -520,7 +520,7 @@ class GenerationOrchestrator:
     ) -> dict[str, int]:
         """Estimate node capacities using total_sequence_length metadata.
 
-        For each species in scope, the estimated capacity equals the sum
+        For each leaf taxon in scope, the estimated capacity equals the sum
         of total_sequence_length across all its accessions. That value is
         propagated bottom-up to every ancestor via the stored lineages so
         the balancing layer can consume it as a capacity_override.
@@ -545,16 +545,16 @@ class GenerationOrchestrator:
                 a["taxid"] == domain_str for a in stored
             ):
                 continue
-            species_cap = sum(
+            leaf_cap = sum(
                 int(accessions.get(acc, {}).get("total_sequence_length") or 0)
                 for acc in acc_list
             )
-            if species_cap == 0:
+            if leaf_cap == 0:
                 continue
-            result[taxid] = result.get(taxid, 0) + species_cap
+            result[taxid] = result.get(taxid, 0) + leaf_cap
             for ancestor in stored:
                 anc_id = ancestor["taxid"]
-                result[anc_id] = result.get(anc_id, 0) + species_cap
+                result[anc_id] = result.get(anc_id, 0) + leaf_cap
         return result
 
     def _build_scope_accession_index(
@@ -562,8 +562,8 @@ class GenerationOrchestrator:
     ) -> tuple[dict[str, int], dict[str, list[tuple[str, bool, int]]]]:
         """Build per-label capacity and pending accession lists for selection.
 
-        Iterates every species taxid in scope, then attributes each
-        accession's total_sequence_length to the species itself and all
+        Iterates every leaf taxid in scope, then attributes each
+        accession's total_sequence_length to the leaf itself and all
         its ancestors (the set of potential labels in any decision point).
 
         Args:
