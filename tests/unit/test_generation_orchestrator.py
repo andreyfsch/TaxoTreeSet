@@ -1,5 +1,8 @@
 """Tests for taxotreeset.core.generation_orchestrator — pure/isolated helpers."""
 
+import json
+import os
+import random
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -7,6 +10,7 @@ from bigtree import Node
 
 from taxotreeset.core.generation_orchestrator import (
     GenerationOrchestrator,
+    _stratified_counts,
     _stratified_cuts,
 )
 
@@ -37,6 +41,37 @@ class TestStratifiedCuts:
         assert train_cut == 70
         assert val_cut - train_cut == 15
         assert 100 - val_cut == 15
+
+
+# ---------------------------------------------------------------------------
+# _stratified_counts — within-genome subseq split (>=1 train; >=1 each at n>=3)
+# ---------------------------------------------------------------------------
+
+
+class TestStratifiedCounts:
+    @pytest.mark.parametrize("n", list(range(3, 30)))
+    def test_every_split_gets_at_least_one_at_n_ge_3(self, n):
+        n_train, n_val, n_test = _stratified_counts(n)
+        assert n_train >= 1
+        assert n_val >= 1
+        assert n_test >= 1
+        assert n_train + n_val + n_test == n
+
+    def test_train_never_empty_for_any_positive_n(self):
+        # The regression: int(n*0.70) floored to 0 left a class untrainable.
+        for n in range(1, 30):
+            n_train, _, _ = _stratified_counts(n)
+            assert n_train >= 1, f"n={n} left train empty"
+
+    def test_zero_total_is_all_zero(self):
+        assert _stratified_counts(0) == (0, 0, 0)
+
+    def test_tiny_counts_fill_train_then_test(self):
+        assert _stratified_counts(1) == (1, 0, 0)
+        assert _stratified_counts(2) == (1, 0, 1)
+
+    def test_three_splits_one_each(self):
+        assert _stratified_counts(3) == (1, 1, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -264,9 +299,9 @@ class TestEstimateCapacitiesFromRegistry:
         reg_data = self._registry_with_species("2697049", "10239", 30000)
         orch = _make_orchestrator(tmp_path, reg_data)
         result = orch._estimate_capacities_from_registry("10239")
-        # Species appears in its own lineage list, so seq_len is added twice
-        # (once via result[taxid] and once via the ancestor loop).
-        assert result.get("2697049") == 60000
+        # The leaf appears in its own stored lineage, but it is credited exactly
+        # once (the set de-dupes the explicit leaf and the ancestor-loop leaf).
+        assert result.get("2697049") == 30000
 
     def test_propagates_capacity_to_ancestor(self, tmp_path):
         reg_data = self._registry_with_species("2697049", "10239", 30000)
@@ -335,8 +370,8 @@ class TestEstimateCapacitiesFromRegistry:
         }
         orch = _make_orchestrator(tmp_path, reg_data)
         result = orch._estimate_capacities_from_registry("10239")
-        # species_cap = 30000; counted twice (see test_estimates_species_capacity_from_seq_len)
-        assert result.get("2697049") == 60000
+        # 10000 + 20000 across the two accessions, credited once to the leaf.
+        assert result.get("2697049") == 30000
 
 
 # ---------------------------------------------------------------------------
@@ -588,3 +623,83 @@ class TestMaybeAddRejectClass:
         node_a, child_a = _reject_tree()
         assert orchestrator._reject_near_ratio(node_a) == pytest.approx(0.6)
         assert orchestrator._reject_near_ratio(child_a) == pytest.approx(0.6)
+
+
+# ---------------------------------------------------------------------------
+# _materialize_leaf_split — < min_genomes window-slicing fallback (scarcity)
+# ---------------------------------------------------------------------------
+
+
+def _leaf_task(n: int, name: str = "acc") -> dict:
+    return {"fasta_path": f"/vault/{name}.fa", "header_id": name, "n": n}
+
+
+class TestMaterializeLeafSplitScarcity:
+    def test_single_genome_n1_lands_in_train_not_test_only(self, orchestrator):
+        # 1 genome (< 3 -> scarcity path) with n=1 used to go test-only, leaving
+        # the class untrainable. It must now land in train.
+        split = orchestrator._materialize_leaf_split(
+            [_leaf_task(1)], class_index=0, rng=random.Random(0)
+        )
+        assert len(split["train"]) == 1
+        assert split["val"] == []
+        assert split["test"] == []
+
+    def test_scarcity_n3_fills_all_three_splits(self, orchestrator):
+        split = orchestrator._materialize_leaf_split(
+            [_leaf_task(3)], class_index=0, rng=random.Random(0)
+        )
+        assert len(split["train"]) == 1
+        assert len(split["val"]) == 1
+        assert len(split["test"]) == 1
+
+    def test_scarcity_never_leaves_train_empty(self, orchestrator):
+        for n in range(1, 12):
+            split = orchestrator._materialize_leaf_split(
+                [_leaf_task(n)], class_index=0, rng=random.Random(0)
+            )
+            assert len(split["train"]) >= 1, f"n={n} left train empty"
+
+    def test_enriched_tasks_carry_positional_fractions(self, orchestrator):
+        split = orchestrator._materialize_leaf_split(
+            [_leaf_task(5)], class_index=2, rng=random.Random(0)
+        )
+        assert split["train"][0]["start_pct"] == 0.0
+        assert split["train"][0]["end_pct"] == 0.70
+        assert split["test"][0]["end_pct"] == 1.0
+        assert split["train"][0]["class_idx"] == 2
+
+
+# ---------------------------------------------------------------------------
+# _write_label_maps — duplicate class names stay bijective
+# ---------------------------------------------------------------------------
+
+
+class TestWriteLabelMapsCollision:
+    def test_duplicate_class_names_disambiguated(self, tmp_path, orchestrator):
+        head_dir = str(tmp_path / "head")
+        artifacts = {
+            "master_manifest": {
+                "100": {
+                    "directory_path": head_dir,
+                    "scientific_name": "Parent",
+                    "rank": "genus",
+                    "labels": {
+                        "1": {"class_idx": 0, "name": "Homonym", "rank": "species"},
+                        "2": {"class_idx": 1, "name": "Homonym", "rank": "species"},
+                    },
+                }
+            }
+        }
+        orchestrator._write_label_maps(artifacts)
+        with open(os.path.join(head_dir, "label_map.json"), encoding="utf-8") as f:
+            label_map = json.load(f)
+        # Both classes survive the collision: no silent dict-key overwrite.
+        assert len(label_map["id2label"]) == 2
+        assert len(label_map["label2id"]) == 2
+        assert set(label_map["id2label"].keys()) == {"0", "1"}
+        # label2id is the inverse of id2label (bijective).
+        assert {v: k for k, v in label_map["label2id"].items()} == {
+            0: label_map["id2label"]["0"],
+            1: label_map["id2label"]["1"],
+        }

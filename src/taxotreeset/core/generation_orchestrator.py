@@ -157,6 +157,42 @@ def _stratified_cuts(leaf_count: int) -> tuple[int, int]:
     return train_cut, val_cut
 
 
+def _stratified_counts(n_total: int) -> tuple[int, int, int]:
+    """Split one genome's ``n_total`` subseqs into ``(n_train, n_val, n_test)``.
+
+    The window-slicing scarcity path (< 3 genomes) samples ``n`` subsequences
+    from each of a genome's three positional regions. Naive ``int(n * ratio)``
+    floors leave **train empty at n_total <= 1** and **val empty up to
+    n_total == 6** (``int(6 * 0.15) == 0``), so a data-poor class could be
+    present in the label set yet have no training (or validation) support — the
+    same degeneracy ``_stratified_cuts`` prevents at the leaf level. This clamp
+    guarantees train receives >= 1 whenever ``n_total >= 1`` and every split
+    receives >= 1 whenever ``n_total >= 3``. For ``n_total`` of 1 or 2 a full
+    three-way split is impossible, so it fills train first, then test, then val
+    (an untrained class is worse than an unevaluated one).
+
+    Args:
+        n_total: Subsequences allocated to this genome (>= 0).
+
+    Returns:
+        ``(n_train, n_val, n_test)`` summing to ``n_total``.
+    """
+    if n_total <= 0:
+        return 0, 0, 0
+    if n_total == 1:
+        return 1, 0, 0
+    if n_total == 2:
+        return 1, 0, 1
+    n_train = max(1, int(n_total * _STRATIFIED_TRAIN_RATIO))
+    n_val = max(1, int(n_total * _STRATIFIED_VAL_RATIO))
+    n_test = n_total - n_train - n_val
+    if n_test < 1:
+        # Reclaim one for test from train; n_total >= 3 keeps train >= 1.
+        n_test = 1
+        n_train = n_total - n_val - n_test
+    return n_train, n_val, n_test
+
+
 def _capture_tool_versions() -> dict[str, str]:
     """Capture versions of the external tools that determine the data snapshot.
 
@@ -551,10 +587,13 @@ class GenerationOrchestrator:
             )
             if leaf_cap == 0:
                 continue
-            result[taxid] = result.get(taxid, 0) + leaf_cap
-            for ancestor in stored:
-                anc_id = ancestor["taxid"]
-                result[anc_id] = result.get(anc_id, 0) + leaf_cap
+            # Credit the leaf and every ancestor exactly once. The stored
+            # lineage already includes the leaf at index 0, so a separate
+            # ``result[taxid] += leaf_cap`` would double-count the leaf's own
+            # capacity; the set makes it robust whether or not the leaf is
+            # present in its stored lineage.
+            for node_id in {taxid, *(a["taxid"] for a in stored)}:
+                result[node_id] = result.get(node_id, 0) + leaf_cap
         return result
 
     def _build_scope_accession_index(
@@ -1285,6 +1324,15 @@ class GenerationOrchestrator:
                 ],
                 key=lambda x: x["class_idx"],
             )
+            # Disambiguate duplicate class names so id2label / label2id stay
+            # bijective — two distinct taxa can carry the same NCBI scientific
+            # name (homonyms) or sanitize to the same string, and a bare
+            # ``{name: idx}`` dict would silently drop the earlier class.
+            seen_names: set[str] = set()
+            for c in classes:
+                if c["name"] in seen_names:
+                    c["name"] = f"{c['name']} ({c['taxid']})"
+                seen_names.add(c["name"])
             id2label = {str(c["class_idx"]): c["name"] for c in classes}
             label2id = {c["name"]: c["class_idx"] for c in classes}
             label_map = {
@@ -2389,10 +2437,7 @@ class GenerationOrchestrator:
                     result["test"].append(enriched)
         else:
             for task in shuffled:
-                n_total = task["n"]
-                n_train = int(n_total * _STRATIFIED_TRAIN_RATIO)
-                n_val = int(n_total * _STRATIFIED_VAL_RATIO)
-                n_test = max(0, n_total - n_train - n_val)
+                n_train, n_val, n_test = _stratified_counts(task["n"])
                 if n_train > 0:
                     result["train"].append(
                         self._enrich_task(
