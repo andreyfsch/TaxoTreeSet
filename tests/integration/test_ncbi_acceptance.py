@@ -262,26 +262,26 @@ class TestAcceptanceDatasetMaterialization:
             seed=42,
             output_format="parquet",
         )
-        splits = builder.prepare_stratified_split([species_node])
-
         seq_leaves = [
             leaf for leaf in species_node.leaves
             if getattr(leaf, "rank", "") == "sequence"
         ]
         leaf = seq_leaves[0]
+        # Single-leaf fraction split (the orchestrator does the real splitting;
+        # here we just feed the builder a valid train/val/test task set).
+        fractions = {"train": (0.0, 0.70), "val": (0.70, 0.85), "test": (0.85, 1.0)}
         tasks = {
             split_name: [
                 {
                     "fasta_path": leaf.fasta_path,
                     "header_id": leaf.header_id,
-                    "start_pct": t[2],
-                    "end_pct": t[3],
+                    "start_pct": start,
+                    "end_pct": end,
                     "n": 3,
                     "class_idx": 0,
                 }
-                for t in task_list
             ]
-            for split_name, task_list in splits.items()
+            for split_name, (start, end) in fractions.items()
         }
 
         job = (str(_SARS_COV2_TAXID), output_dir, tasks, _MAX_SUBSEQ_LEN, 42, "parquet")

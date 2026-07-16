@@ -103,6 +103,34 @@ class TestPlanShards:
         assert "val" in built_splits
         assert all(sj[1] != "train" for sj in shard_jobs)
 
+    def test_part_names_are_content_hashed(self, tmp_path):
+        target = tmp_path / "head"
+        target.mkdir()
+        tasks = {"train": [{"n": 5, "fasta_path": "/f", "header_id": "H",
+                            "start_pct": 0.0, "end_pct": 1.0, "class_idx": 0}]}
+        shard_jobs, _ = _plan_shards(
+            [_job("t", str(target), tasks)], shard_rows_target=1000
+        )
+        name = os.path.basename(shard_jobs[0][2])   # part_path
+        # <split>.part{idx:05d}.{hash}.{fmt}
+        assert name.startswith("train.part00000.")
+        assert name.endswith(".parquet")
+        assert len(name.split(".")) == 4
+
+    def test_changed_tasks_get_new_part_and_clean_stale(self, tmp_path):
+        # D: a resumed run with a changed schedule must not reuse a stale part,
+        # and the superseded part is removed rather than orphaned on disk.
+        target = tmp_path / "head"
+        target.mkdir()
+        t1 = {"n": 5, "fasta_path": "/f", "header_id": "H1",
+              "start_pct": 0.0, "end_pct": 1.0, "class_idx": 0}
+        sj1, _ = _plan_shards([_job("t", str(target), {"train": [t1]})], 1000)
+        open(sj1[0][2], "wb").close()                # part left by a prior run
+        t2 = dict(t1, header_id="H2")                # the schedule changed
+        sj2, _ = _plan_shards([_job("t", str(target), {"train": [t2]})], 1000)
+        assert sj2[0][2] != sj1[0][2]                # new content hash -> new path
+        assert not os.path.exists(sj1[0][2])         # stale part cleaned up
+
 
 # ---------------------------------------------------------------------------
 # end-to-end: sharded == serial, merge, resume

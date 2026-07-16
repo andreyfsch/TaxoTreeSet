@@ -4,7 +4,6 @@ from unittest.mock import patch
 
 import pyarrow as pa
 import pytest
-from bigtree import Node
 
 from taxotreeset.dataset.builder import (
     DatasetBuilder,
@@ -20,22 +19,6 @@ _MOCK_READ = "taxotreeset.dataset.builder._read_single_sequence"
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
-
-
-def make_seq_leaf(header_id, fasta_path="/fake/vault", parent=None):
-    node = Node(str(header_id), parent=parent)
-    node.rank = "sequence"
-    node.header_id = header_id
-    node.fasta_path = fasta_path
-    return node
-
-
-def make_parent_with_leaves(name, n_leaves, fasta_path="/fake/vault"):
-    parent = Node(str(name))
-    parent.rank = "species"
-    for i in range(n_leaves):
-        make_seq_leaf(f"NC_{i:03}", fasta_path, parent=parent)
-    return parent
 
 
 @pytest.fixture
@@ -139,129 +122,22 @@ class TestExtractSubseqsForTask:
             rows = _extract_subseqs_for_task(task, max_subseq_len=200)
         assert all(isinstance(row["class_idx"], int) for row in rows)
 
+    def test_honors_min_subseq_len(self):
+        # Regression: extraction hardcoded min_len=100 and ignored --min-subseq-len,
+        # so capacity/n-distribution and extraction disagreed on the length floor.
+        seq = "ACGT" * 500  # 2000 bp
+        with patch(_MOCK_READ, return_value=seq):
+            rows = _extract_subseqs_for_task(
+                self._make_task(n=20), max_subseq_len=200, min_subseq_len=180
+            )
+        assert rows
+        assert all(len(row["seq"]) >= 180 for row in rows)
 
-# ---------------------------------------------------------------------------
-# DatasetBuilder._collect_sequence_leaves
-# ---------------------------------------------------------------------------
-
-
-class TestCollectSequenceLeaves:
-    def test_returns_sequence_rank_leaves(self):
-        parent = make_parent_with_leaves("species", n_leaves=3)
-        leaves = DatasetBuilder._collect_sequence_leaves([parent])
-        assert len(leaves) == 3
-
-    def test_excludes_non_sequence_rank_children(self):
-        parent = Node("family")
-        parent.rank = "family"
-        child = Node("species", parent=parent)
-        child.rank = "species"  # not a sequence leaf
-        leaves = DatasetBuilder._collect_sequence_leaves([parent])
-        assert leaves == []
-
-    def test_aggregates_across_multiple_nodes(self):
-        parent_a = make_parent_with_leaves("sp_a", n_leaves=2)
-        parent_b = make_parent_with_leaves("sp_b", n_leaves=3)
-        leaves = DatasetBuilder._collect_sequence_leaves([parent_a, parent_b])
-        assert len(leaves) == 5
-
-    def test_empty_node_list_returns_empty(self):
-        assert DatasetBuilder._collect_sequence_leaves([]) == []
-
-
-# ---------------------------------------------------------------------------
-# DatasetBuilder.prepare_stratified_split
-# ---------------------------------------------------------------------------
-
-
-class TestPrepareStratifiedSplit:
-    def test_returns_three_split_keys(self, builder):
-        parent = make_parent_with_leaves("sp", n_leaves=5)
-        splits = builder.prepare_stratified_split([parent])
-        assert set(splits.keys()) == {"train", "val", "test"}
-
-    def test_all_leaves_assigned_when_enough_diversity(self, builder):
-        parent = make_parent_with_leaves("sp", n_leaves=5)
-        splits = builder.prepare_stratified_split([parent])
-        total = sum(len(v) for v in splits.values())
-        assert total == 5
-
-    def test_fraction_split_for_scarce_leaves(self, builder):
-        parent = make_parent_with_leaves("sp", n_leaves=2)
-        splits = builder.prepare_stratified_split([parent])
-        # Each leaf appears in all 3 splits
-        assert len(splits["train"]) == 2
-        assert len(splits["val"]) == 2
-        assert len(splits["test"]) == 2
-
-    def test_three_leaves_still_populate_test(self, builder):
-        # Regression: exactly 3 leaves used to yield train=2, val=1, test=0,
-        # producing a class with zero test support (degenerate, undefined metrics).
-        parent = make_parent_with_leaves("sp", n_leaves=3)
-        splits = builder.prepare_stratified_split([parent])
-        assert len(splits["train"]) == 1
-        assert len(splits["val"]) == 1
-        assert len(splits["test"]) == 1
-
-    @pytest.mark.parametrize("n_leaves", [3, 4, 5, 6, 7, 8, 9, 10, 20])
-    def test_distinct_split_never_leaves_a_split_empty(self, builder, n_leaves):
-        parent = make_parent_with_leaves("sp", n_leaves=n_leaves)
-        splits = builder.prepare_stratified_split([parent])
-        assert all(len(splits[s]) >= 1 for s in ("train", "val", "test"))
-        assert sum(len(v) for v in splits.values()) == n_leaves
-
-    def test_single_leaf_fraction_split(self, builder):
-        parent = make_parent_with_leaves("sp", n_leaves=1)
-        splits = builder.prepare_stratified_split([parent])
-        assert len(splits["train"]) == 1
-        assert len(splits["val"]) == 1
-        assert len(splits["test"]) == 1
-
-    def test_fraction_train_uses_correct_bounds(self, builder):
-        parent = make_parent_with_leaves("sp", n_leaves=1)
-        splits = builder.prepare_stratified_split([parent])
-        train_task = splits["train"][0]
-        assert train_task[2] == 0.0   # start_pct
-        assert train_task[3] == 0.70  # end_pct
-
-    def test_fraction_val_uses_correct_bounds(self, builder):
-        parent = make_parent_with_leaves("sp", n_leaves=1)
-        splits = builder.prepare_stratified_split([parent])
-        val_task = splits["val"][0]
-        assert val_task[2] == 0.70
-        assert val_task[3] == 0.85
-
-    def test_fraction_test_uses_correct_bounds(self, builder):
-        parent = make_parent_with_leaves("sp", n_leaves=1)
-        splits = builder.prepare_stratified_split([parent])
-        test_task = splits["test"][0]
-        assert test_task[2] == 0.85
-        assert test_task[3] == 1.0
-
-    def test_distinct_split_assigns_full_sequence_to_each_leaf(self, builder):
-        parent = make_parent_with_leaves("sp", n_leaves=5)
-        splits = builder.prepare_stratified_split([parent])
-        for split_tasks in splits.values():
-            for task in split_tasks:
-                assert task[2] == 0.0   # start_pct
-                assert task[3] == 1.0   # end_pct
-
-    def test_empty_leaves_returns_empty_splits(self, builder):
-        parent = Node("empty")
-        parent.rank = "species"
-        splits = builder.prepare_stratified_split([parent])
-        assert splits == {"train": [], "val": [], "test": []}
-
-    def test_deterministic_with_same_seed(self, tmp_path):
-        parent = make_parent_with_leaves("sp", n_leaves=10)
-        b1 = DatasetBuilder(str(tmp_path), 200, 42, "parquet")
-        b2 = DatasetBuilder(str(tmp_path), 200, 42, "parquet")
-        s1 = b1.prepare_stratified_split([parent])
-        # Reset bigtree leaves (shuffling modifies list order but not nodes)
-        parent2 = make_parent_with_leaves("sp", n_leaves=10)
-        s2 = b2.prepare_stratified_split([parent2])
-        # Same seed → same number of leaves per split
-        assert len(s1["train"]) == len(s2["train"])
+    def test_default_min_subseq_len_is_100(self):
+        seq = "ACGT" * 500
+        with patch(_MOCK_READ, return_value=seq):
+            rows = _extract_subseqs_for_task(self._make_task(n=20), max_subseq_len=200)
+        assert all(len(row["seq"]) >= 100 for row in rows)
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +207,7 @@ class TestWriteSplitParquet:
 
         call_count = {"n": 0}
 
-        def fake_extract(task, max_subseq_len):
+        def fake_extract(task, max_subseq_len, min_subseq_len=100):
             call_count["n"] += 1
             return big_batch
 
@@ -411,3 +287,23 @@ class TestBuildNodeDatasetSerial:
 
         assert results == [True]
         assert os.path.exists(os.path.join(output_dir, "train.parquet"))
+
+    def test_serial_write_is_atomic_no_tmp_left(self, builder, tmp_path):
+        # C: serial writes each split to a .tmp then renames, so a crash never
+        # leaves a partial <split>.parquet a resume would trust.
+        import os
+
+        output_dir = str(tmp_path / "head")
+        os.makedirs(output_dir)
+        task = {"fasta_path": "/fake", "header_id": "NC_001",
+                "start_pct": 0.0, "end_pct": 1.0, "n": 2, "class_idx": 0}
+        job = ("t", output_dir, {"train": [task]}, 200, 42, "parquet")
+
+        with patch(
+            "taxotreeset.dataset.builder._extract_subseqs_for_task",
+            return_value=[{"seq": "ACGT" * 50, "class_idx": 0}] * 2,
+        ):
+            builder.build_node_dataset([job], parallel=False)
+
+        assert os.path.exists(os.path.join(output_dir, "train.parquet"))
+        assert [f for f in os.listdir(output_dir) if f.endswith(".tmp")] == []

@@ -45,17 +45,16 @@ Typical usage::
         seed=42,
         output_format="parquet",
     )
-    splits = builder.prepare_stratified_split(sequence_leaf_nodes)
     builder.build_node_dataset(extraction_jobs, parallel=True)
 """
 
+import hashlib
 import logging
 import math
 import multiprocessing
 import os
 from typing import Any
 
-import numpy as np
 import pandas as pd
 import psutil
 import pyarrow as pa
@@ -74,7 +73,6 @@ _BUFFER_SIZE_ROWS = 10_000
 _DEFAULT_MIN_SUBSEQ_LEN = 100
 _PARQUET_COMPRESSION = "snappy"
 _SPLITS = ("train", "val", "test")
-_STRATIFIED_SPLIT_RATIOS = (0.70, 0.85)
 _LOW_MEMORY_THRESHOLD_GB = 12
 _LOW_MEMORY_WORKER_COUNT = 2
 _WORKERS_RESERVED_FOR_PARENT = 2
@@ -88,18 +86,24 @@ _WORKERS_RESERVED_FOR_PARENT = 2
 _SHARD_ROWS_TARGET = 50_000
 
 
-def extract_parent_node_worker(job: tuple) -> bool:
+def extract_parent_node_worker(
+    job: tuple,
+    min_subseq_len: int = _DEFAULT_MIN_SUBSEQ_LEN,
+) -> bool:
     """Build train/val/test Parquet files for a single parent node.
 
-    Designed as the target callable of a spawned multiprocessing pool.
-    Iterates over the job's split tasks, reads each source sequence
-    from LMDB, slices it to the assigned fraction, samples
-    subsequences, and streams rows to Parquet using a bounded buffer
-    that flushes every ``_BUFFER_SIZE_ROWS`` rows.
+    The non-sharded (serial) extraction path. Iterates over the job's split
+    tasks, reads each source sequence from LMDB, slices it to the assigned
+    fraction, samples subsequences, and streams rows to Parquet using a bounded
+    buffer that flushes every ``_BUFFER_SIZE_ROWS`` rows.
 
     Memory is bounded by ``_BUFFER_SIZE_ROWS`` rather than the total
     output volume, so workers operate in constant memory regardless
     of how large the head's training shard turns out to be.
+
+    Each split is written to a ``.tmp`` sibling and atomically renamed, so an
+    interrupted run never leaves a partial ``<split>.<fmt>`` that a resume would
+    trust as complete.
 
     Args:
         job: Tuple of (parent_taxid, target_dir, parent_tasks,
@@ -107,6 +111,7 @@ def extract_parent_node_worker(job: tuple) -> bool:
             element is a dict with keys 'train', 'val', 'test'; each
             value is a list of task dicts with keys 'fasta_path',
             'header_id', 'start_pct', 'end_pct', 'n', and 'class_idx'.
+        min_subseq_len: Lower bound on each subsequence length, in bp.
 
     Returns:
         True on completion. Failures within a single task are logged
@@ -133,11 +138,15 @@ def extract_parent_node_worker(job: tuple) -> bool:
             continue
 
         output_path = os.path.join(target_dir, f"{split}.{output_format}")
+        tmp_path = f"{output_path}.tmp"
         _write_split_parquet(
             tasks=tasks,
-            output_path=output_path,
+            output_path=tmp_path,
             max_subseq_len=max_subseq_len,
+            min_subseq_len=min_subseq_len,
         )
+        if os.path.exists(tmp_path):
+            os.replace(tmp_path, output_path)
 
     return True
 
@@ -146,6 +155,7 @@ def _write_split_parquet(
     tasks: list[dict[str, Any]],
     output_path: str,
     max_subseq_len: int,
+    min_subseq_len: int = _DEFAULT_MIN_SUBSEQ_LEN,
 ) -> None:
     """Write subsequences from a list of tasks to a Parquet file.
 
@@ -161,6 +171,7 @@ def _write_split_parquet(
         output_path: Destination path for the Parquet file.
         max_subseq_len: Upper bound on each subsequence length, in
             base pairs.
+        min_subseq_len: Lower bound on each subsequence length, in bp.
     """
     writer: pq.ParquetWriter | None = None
     buffer: list[dict[str, Any]] = []
@@ -181,7 +192,9 @@ def _write_split_parquet(
 
     try:
         for task in tasks:
-            extracted_rows = _extract_subseqs_for_task(task, max_subseq_len)
+            extracted_rows = _extract_subseqs_for_task(
+                task, max_subseq_len, min_subseq_len
+            )
             buffer.extend(extracted_rows)
             if len(buffer) >= _BUFFER_SIZE_ROWS:
                 flush_buffer()
@@ -194,6 +207,7 @@ def _write_split_parquet(
 def _extract_subseqs_for_task(
     task: dict[str, Any],
     max_subseq_len: int,
+    min_subseq_len: int = _DEFAULT_MIN_SUBSEQ_LEN,
 ) -> list[dict[str, Any]]:
     """Read, slice, and sample subsequences for a single task.
 
@@ -201,6 +215,10 @@ def _extract_subseqs_for_task(
         task: Task dictionary with the keys documented in
             ``extract_parent_node_worker``.
         max_subseq_len: Upper bound on each subsequence length.
+        min_subseq_len: Lower bound on each subsequence length, in bp — the same
+            ``--min-subseq-len`` used for capacity and n-distribution, threaded
+            through so extraction honours the configured floor instead of a fixed
+            default.
 
     Returns:
         List of row dictionaries ready to append to the buffer.
@@ -217,7 +235,7 @@ def _extract_subseqs_for_task(
     sampled_subsequences = extract_subseqs(
         seq=sliced_sequence,
         n=task["n"],
-        min_len=_DEFAULT_MIN_SUBSEQ_LEN,
+        min_len=min_subseq_len,
         max_len=max_subseq_len,
     )
 
@@ -276,27 +294,54 @@ def _partition_tasks(
     return [s for s in shards if s]
 
 
+def _shard_hash(shard_tasks: list[dict[str, Any]]) -> str:
+    """Return a short content hash of a shard's ordered task list.
+
+    Embedded in the part-file name so a resumed run only reuses a part when its
+    task set is byte-identical. If the upstream schedule changed (different tasks,
+    counts, or partition), the hash changes, the part is recomputed, and the stale
+    part — no longer referenced by any plan — is cleaned up by ``_plan_shards``.
+    """
+    digest = hashlib.blake2s(digest_size=4)
+    for t in shard_tasks:
+        digest.update(
+            repr((
+                t.get("fasta_path"), t.get("header_id"),
+                t.get("start_pct"), t.get("end_pct"),
+                t.get("n"), t.get("class_idx"),
+            )).encode()
+        )
+    return digest.hexdigest()
+
+
 def _plan_shards(
     jobs: list[tuple],
     shard_rows_target: int,
+    min_subseq_len: int = _DEFAULT_MIN_SUBSEQ_LEN,
 ) -> tuple[list[tuple], list[tuple]]:
     """Fan head-jobs out into per-(head, split, shard) shard-jobs + merge-jobs.
 
     Splits whose final merged file already exists are skipped (resume), so no
-    shard or merge work is scheduled for them. Part-file names are deterministic
-    (``<split>.part{idx:05d}.<fmt>``) given the task order, so an interrupted run
-    reuses completed parts on restart.
+    shard or merge work is scheduled for them. Part-file names are content-hashed
+    (``<split>.part{idx:05d}.{hash}.<fmt>``), so an interrupted run reuses a part
+    only when its tasks are identical; parts left by a superseded schedule (a
+    stale hash, or a higher index from a larger prior partition) are deleted
+    before dispatch so they are neither reused nor orphaned on disk.
 
     Args:
         jobs: Head-jobs ``(taxid, target_dir, parent_tasks, max_subseq_len, seed,
             output_format)`` as built by the orchestrator.
         shard_rows_target: Approximate rows per shard (see ``_partition_tasks``).
+        min_subseq_len: Lower bound on each subsequence length, in bp; carried in
+            each shard-job so the worker extracts to the configured floor.
 
     Returns:
         ``(shard_jobs, merge_jobs)``. A shard-job is ``(target_dir, split,
-        part_path, shard_tasks, max_subseq_len)``; a merge-job is ``(target_dir,
-        split, part_paths, final_path)``.
+        part_path, shard_tasks, max_subseq_len, min_subseq_len)``; a merge-job is
+        ``(target_dir, split, part_paths, final_path)``.
     """
+    import glob
+
     shard_jobs: list[tuple] = []
     merge_jobs: list[tuple] = []
     for job in jobs:
@@ -313,12 +358,27 @@ def _plan_shards(
                 _partition_tasks(tasks, shard_rows_target)
             ):
                 part_path = os.path.join(
-                    target_dir, f"{split}.part{idx:05d}.{output_format}"
+                    target_dir,
+                    f"{split}.part{idx:05d}.{_shard_hash(shard_tasks)}."
+                    f"{output_format}",
                 )
                 part_paths.append(part_path)
-                shard_jobs.append(
-                    (target_dir, split, part_path, shard_tasks, max_subseq_len)
-                )
+                shard_jobs.append((
+                    target_dir, split, part_path, shard_tasks,
+                    max_subseq_len, min_subseq_len,
+                ))
+            # Drop any parts of this split not in the current plan (stale hash or
+            # a higher index from a bigger prior partition), so a changed
+            # schedule never reuses them and they do not accumulate on disk.
+            keep = set(part_paths)
+            for stale in glob.glob(
+                os.path.join(target_dir, f"{split}.part*.{output_format}")
+            ):
+                if stale not in keep:
+                    try:
+                        os.remove(stale)
+                    except OSError:
+                        pass
             merge_jobs.append((target_dir, split, part_paths, final_path))
     return shard_jobs, merge_jobs
 
@@ -331,17 +391,20 @@ def _shard_worker(shard_job: tuple) -> bool:
     yield no rows produces no file (``_write_split_parquet`` opens lazily).
 
     Args:
-        shard_job: ``(target_dir, split, part_path, shard_tasks, max_subseq_len)``.
+        shard_job: ``(target_dir, split, part_path, shard_tasks, max_subseq_len,
+            min_subseq_len)``.
 
     Returns:
         True on completion.
     """
-    target_dir, _split, part_path, shard_tasks, max_subseq_len = shard_job
+    (
+        target_dir, _split, part_path, shard_tasks, max_subseq_len, min_subseq_len
+    ) = shard_job
     if os.path.exists(part_path):
         return True  # resume: this shard is already built
     os.makedirs(target_dir, exist_ok=True)
     tmp_path = f"{part_path}.tmp"
-    _write_split_parquet(shard_tasks, tmp_path, max_subseq_len)
+    _write_split_parquet(shard_tasks, tmp_path, max_subseq_len, min_subseq_len)
     if os.path.exists(tmp_path):
         os.replace(tmp_path, part_path)
     return True
@@ -399,21 +462,18 @@ class DatasetBuilder:
     """Materialize the train/val/test Parquet shards for the cascade.
 
     Acts as the dispatch layer between the generation orchestrator
-    (which schedules extraction jobs) and the worker pool (which
-    writes Parquet files). Provides two services:
-
-    - **Stratified splitting** via ``prepare_stratified_split``,
-      which partitions sequence leaves into train/val/test sets
-      with deterministic shuffling controlled by the seed.
-
-    - **Parallel build dispatch** via ``build_node_dataset``, which
-      configures a multiprocessing pool sized to the host's RAM and
-      delegates each parent-node job to a worker.
+    (which schedules extraction jobs, already split into train/val/test) and
+    the worker pool that writes Parquet files. Its single service,
+    ``build_node_dataset``, fans each head's per-split tasks into balanced
+    shards, runs them on a spawn pool sized to the host's RAM, and merges each
+    split's shards back into one file. The stratified split itself lives
+    upstream in the generation orchestrator.
 
     Attributes:
         output_dir: Root directory for the generated training shards.
         max_subseq_len: Upper bound on each subsequence length, in bp.
-        seed: Random seed for the deterministic shuffle.
+        min_subseq_len: Lower bound on each subsequence length, in bp.
+        seed: Random seed recorded for the run (carried in each job tuple).
         output_format: Either 'parquet' (production) or 'csv' (debug).
     """
 
@@ -423,6 +483,7 @@ class DatasetBuilder:
         max_subseq_len: int,
         seed: int,
         output_format: str,
+        min_subseq_len: int = _DEFAULT_MIN_SUBSEQ_LEN,
     ) -> None:
         """Initialize the dataset builder.
 
@@ -435,142 +496,15 @@ class DatasetBuilder:
                 stratified split.
             output_format: 'parquet' or 'csv'. Parquet is recommended
                 for production; CSV may be useful for debugging.
+            min_subseq_len: Lower bound on each subsequence length, in bp —
+                the ``--min-subseq-len`` used upstream for capacity and
+                n-distribution, so extraction samples to the same floor.
         """
         self.output_dir: str = output_dir
         self.max_subseq_len: int = max_subseq_len
         self.seed: int = seed
         self.output_format: str = output_format
-
-    def prepare_stratified_split(self, nodes: list) -> dict[str, list[tuple]]:
-        """Partition sequence leaves into train/val/test sets.
-
-        Two scenarios are supported based on the number of available
-        sequence leaves:
-
-        1. **Sufficient diversity** (>= 3 leaves): leaves are shuffled
-           deterministically and partitioned by index. Each leaf is
-           fully assigned to a single split, with no intra-sequence
-           leakage between splits.
-
-        2. **Extreme scarcity** (< 3 leaves): the same sequence is
-           sliced into the three splits by fraction (70/15/15).
-           Intra-sequence leakage is accepted as the cost of having
-           any training data at all for these low-data classes.
-
-        Args:
-            nodes: List of taxon nodes whose sequence leaves will be
-                collected and partitioned.
-
-        Returns:
-            Dictionary with three keys ('train', 'val', 'test'); each
-            value is a list of (fasta_path, header_id, start_pct,
-            end_pct) tuples describing what each worker should read.
-        """
-        splits: dict[str, list[tuple]] = {key: [] for key in _SPLITS}
-
-        all_leaves = self._collect_sequence_leaves(nodes)
-        if not all_leaves:
-            return splits
-
-        np.random.seed(self.seed)
-        np.random.shuffle(all_leaves)
-
-        if len(all_leaves) >= 3:
-            return self._split_by_distinct_leaves(all_leaves, splits)
-        return self._split_by_sequence_fractions(all_leaves, splits)
-
-    @staticmethod
-    def _collect_sequence_leaves(nodes: list) -> list:
-        """Gather all sequence leaves under the given nodes.
-
-        Args:
-            nodes: List of parent nodes to scan.
-
-        Returns:
-            Flat list of leaf nodes whose rank is 'sequence'.
-        """
-        leaves: list = []
-        for node in nodes:
-            leaves.extend(
-                leaf for leaf in node.leaves if getattr(leaf, "rank", "") == "sequence"
-            )
-        return leaves
-
-    def _split_by_distinct_leaves(
-        self,
-        all_leaves: list,
-        splits: dict[str, list[tuple]],
-    ) -> dict[str, list[tuple]]:
-        """Assign whole leaves to train/val/test by index ranges.
-
-        Uses the global ratios ``_STRATIFIED_SPLIT_RATIOS`` to compute
-        train and validation cut indices. Each leaf is assigned to a
-        single split with start_pct=0.0 and end_pct=1.0, meaning the
-        worker will read the entire sequence into the target split.
-
-        Args:
-            all_leaves: Shuffled list of leaf nodes.
-            splits: Pre-initialized splits dictionary to populate.
-
-        Returns:
-            The populated splits dictionary.
-        """
-        leaf_count = len(all_leaves)
-        train_ratio, val_ratio = _STRATIFIED_SPLIT_RATIOS
-
-        train_cut = max(1, int(leaf_count * train_ratio))
-        val_cut = train_cut + max(1, int(leaf_count * (val_ratio - train_ratio)))
-        # Guarantee test receives at least one leaf: the two max(1, ...) floors
-        # otherwise consume all three leaves at leaf_count == 3 (train=2, val=1,
-        # test=0), producing a class with zero test support.
-        if val_cut >= leaf_count:
-            val_cut = leaf_count - 1
-            if train_cut >= val_cut:
-                train_cut = val_cut - 1
-
-        for index, leaf in enumerate(all_leaves):
-            task = (
-                getattr(leaf, "fasta_path", ""),
-                getattr(leaf, "header_id", ""),
-                0.0,
-                1.0,
-            )
-            if index < train_cut:
-                splits["train"].append(task)
-            elif index < val_cut:
-                splits["val"].append(task)
-            else:
-                splits["test"].append(task)
-
-        return splits
-
-    @staticmethod
-    def _split_by_sequence_fractions(
-        all_leaves: list,
-        splits: dict[str, list[tuple]],
-    ) -> dict[str, list[tuple]]:
-        """Slice each leaf's sequence across all three splits.
-
-        Used when the leaf count is too low for distinct assignment
-        (< 3 leaves). Each sequence is read in three fractions: the
-        first 70% goes to train, the next 15% to val, the final 15%
-        to test. This produces some data in every split at the cost
-        of accepting intra-sequence leakage.
-
-        Args:
-            all_leaves: Shuffled list of leaf nodes.
-            splits: Pre-initialized splits dictionary to populate.
-
-        Returns:
-            The populated splits dictionary.
-        """
-        for leaf in all_leaves:
-            fasta_path = getattr(leaf, "fasta_path", "")
-            header_id = getattr(leaf, "header_id", "")
-            splits["train"].append((fasta_path, header_id, 0.0, 0.70))
-            splits["val"].append((fasta_path, header_id, 0.70, 0.85))
-            splits["test"].append((fasta_path, header_id, 0.85, 1.0))
-        return splits
+        self.min_subseq_len: int = min_subseq_len
 
     def build_node_dataset(
         self,
@@ -597,14 +531,19 @@ class DatasetBuilder:
             List of worker return values (one per job).
         """
         if not parallel:
-            return [extract_parent_node_worker(job) for job in jobs]
+            return [
+                extract_parent_node_worker(job, self.min_subseq_len)
+                for job in jobs
+            ]
 
         # Task-level sharding: fan each head's per-split tasks out into balanced
         # shards so a head with many source genomes is spread across workers
         # instead of pinning one core (the straggler that idles cores at the end
         # of a batch). Shards write part files; a merge pass concatenates each
         # split's parts back into the single <split>.<fmt> file downstream expects.
-        shard_jobs, merge_jobs = _plan_shards(jobs, _SHARD_ROWS_TARGET)
+        shard_jobs, merge_jobs = _plan_shards(
+            jobs, _SHARD_ROWS_TARGET, self.min_subseq_len
+        )
         if not shard_jobs and not merge_jobs:
             return [True] * len(jobs)  # every split already built (resume)
 

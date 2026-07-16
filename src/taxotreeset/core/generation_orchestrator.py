@@ -416,6 +416,7 @@ class GenerationOrchestrator:
             max_subseq_len=self.max_subseq_len,
             seed=self.seed,
             output_format=self.output_format,
+            min_subseq_len=self.min_subseq_len,
         )
 
     def _sync_with_ncbi(self, target_group: str) -> None:
