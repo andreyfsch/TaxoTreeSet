@@ -74,14 +74,21 @@ class NCBIDownloader:
     """
 
     _DEFAULT_CHUNK_SIZE = 100
-    # Cap each CLI invocation at ~5 GiB of total sequence data so that
-    # large eukaryotic assemblies don't produce a single 60+ GiB request
-    # that the NCBI server rejects.
+    # Cap the total sequence bytes per CLI invocation so a chunk of many large
+    # assemblies does not become a single 60+ GiB request the NCBI server
+    # rejects. A single accession larger than the cap cannot be split further and
+    # is requested alone in its own chunk (warned by _split_into_chunks).
     _DEFAULT_MAX_BYTES_PER_CHUNK = 5 * 1024 ** 3  # 5 GiB
     # Defline keywords marking sequences to drop when exclude_plasmids is set.
     # Substring, case-insensitive (so "megaplasmid" is also caught). Extend this
     # set to also drop organelles (e.g. mitochondrion, chloroplast) in future.
     _EXCLUDED_MOLECULE_KEYWORDS: tuple[str, ...] = ("plasmid",)
+    # An accession the CLI returns but whose FASTA cannot be ingested (missing
+    # directory, unparsable file, withdrawn record) is retried up to this many
+    # times, then given up on — so one permanently-bad accession does not force a
+    # re-download of its chunk on every run / refinement round. A whole-CLI
+    # failure (transient network) does NOT count against this limit.
+    _MAX_DOWNLOAD_ATTEMPTS: int = 3
 
     def __init__(
         self,
@@ -146,9 +153,13 @@ class NCBIDownloader:
         self._reset_state_if_lmdb_missing()
 
         pending = self._collect_pending_accessions()
-        total_accessions = len(self.registry.registry.get("accessions", {}))
+        accessions = self.registry.registry.get("accessions", {})
         total_pending = len(pending)
-        already_downloaded = total_accessions - total_pending
+        # Count actually-downloaded accessions rather than (total - pending),
+        # which would inflate the bar by the deferred (not-processed) accessions.
+        already_downloaded = sum(
+            1 for info in accessions.values() if info.get("downloaded")
+        )
 
         if total_pending == 0:
             logger.info("All registered accessions are already archived in LMDB.")
@@ -171,8 +182,8 @@ class NCBIDownloader:
         try:
             self._process_chunks(
                 chunks=chunks,
-                total_accessions=total_accessions,
-                already_downloaded=already_downloaded,
+                bar_total=already_downloaded + total_pending,
+                bar_initial=already_downloaded,
             )
         finally:
             if self._env is not None:
@@ -223,6 +234,7 @@ class NCBIDownloader:
             info["downloaded"] = False
             info.pop("local_path", None)
             info.pop("headers", None)
+            info.pop("download_attempts", None)  # fresh vault -> fresh retries
         self.registry.save()
 
     def reconcile_with_vault(self) -> int:
@@ -266,6 +278,7 @@ class NCBIDownloader:
                         info["downloaded"] = False
                         info["local_path"] = None
                         info.pop("headers", None)
+                        info.pop("download_attempts", None)
                         reset_count += 1
         finally:
             env.close()
@@ -282,8 +295,10 @@ class NCBIDownloader:
         """Return the list of accession IDs that still need downloading.
 
         Excludes accessions flagged as ``download_deferred=True`` by the
-        selective download selection pass; those are reserved for a later
-        refinement batch and must not enter the current download.
+        selective download selection pass (reserved for a later refinement
+        batch) and accessions that have exhausted ``_MAX_DOWNLOAD_ATTEMPTS``
+        ingest failures (permanently bad — retrying them only re-downloads their
+        chunk each run).
 
         Returns:
             List of accession strings eligible for download. Order
@@ -293,7 +308,9 @@ class NCBIDownloader:
         return [
             accession
             for accession, info in accessions.items()
-            if not info.get("downloaded") and not info.get("download_deferred")
+            if not info.get("downloaded")
+            and not info.get("download_deferred")
+            and info.get("download_attempts", 0) < self._MAX_DOWNLOAD_ATTEMPTS
         ]
 
     def _split_into_chunks(self, accessions: list[str]) -> list[list[str]]:
@@ -319,6 +336,13 @@ class NCBIDownloader:
             vol = (registry_accessions.get(accession) or {}).get(
                 "total_sequence_length"
             ) or 0
+            if vol > self.max_bytes_per_chunk:
+                logger.warning(
+                    "Accession %s (%.1f GiB) exceeds max_bytes_per_chunk "
+                    "(%.1f GiB) and cannot be split; requested alone.",
+                    accession, vol / 1024**3,
+                    self.max_bytes_per_chunk / 1024**3,
+                )
             at_count_limit = len(current_chunk) >= self.chunk_size
             at_volume_limit = (
                 vol > 0
@@ -340,27 +364,26 @@ class NCBIDownloader:
     def _process_chunks(
         self,
         chunks: list[list[str]],
-        total_accessions: int,
-        already_downloaded: int,
+        bar_total: int,
+        bar_initial: int,
     ) -> None:
         """Execute the per-chunk download loop with progress reporting.
 
         Args:
             chunks: List of accession chunks to process sequentially.
-            total_accessions: Total accessions in the registry, used to
-                size the progress bar.
-            already_downloaded: Accessions completed in prior runs, used
-                as the progress bar's starting position.
+            bar_total: Progress-bar total (already-downloaded + pending; deferred
+                accessions are excluded since they are not processed this run).
+            bar_initial: Accessions already downloaded, the bar's start position.
         """
         with tqdm(
-            total=total_accessions,
-            initial=already_downloaded,
+            total=bar_total,
+            initial=bar_initial,
             desc="Ingesting genomes to LMDB",
             unit=" genome",
         ) as progress_bar:
             for chunk in chunks:
-                batch_results = self.download_batch(chunk)
-                self._update_registry_for_batch(chunk, batch_results)
+                batch_results, attempted = self.download_batch(chunk)
+                self._update_registry_for_batch(chunk, batch_results, attempted)
                 progress_bar.update(len(chunk))
                 self.registry.save()
 
@@ -368,47 +391,69 @@ class NCBIDownloader:
         self,
         chunk: list[str],
         batch_results: dict[str, list[dict[str, str]]],
+        attempted: list[str],
     ) -> None:
-        """Update registry entries for successfully downloaded accessions.
+        """Mark successes and count per-accession ingest failures after a batch.
+
+        A successful accession is marked downloaded and its retry counter
+        cleared. An accession the CLI returned but that failed to ingest (in
+        ``attempted`` but not ``batch_results``) has its ``download_attempts``
+        counter bumped; once it reaches ``_MAX_DOWNLOAD_ATTEMPTS`` it is given up
+        on (thereafter skipped by ``_collect_pending_accessions``). Accessions the
+        CLI never returned (a whole-batch/transient failure, absent from
+        ``attempted``) are left untouched so a network blip does not count.
 
         Args:
-            chunk: List of accession IDs that were requested in the batch.
-            batch_results: Dictionary mapping accession ID to its parsed
-                FASTA headers metadata. Accessions absent from this dict
-                are considered failed and left untouched.
+            chunk: Accession IDs requested in the batch.
+            batch_results: Successfully ingested accessions -> header metadata.
+            attempted: Accessions the CLI returned and tried to ingest.
         """
         accessions = self.registry.registry["accessions"]
+        attempted_set = set(attempted)
         for accession in chunk:
-            if accession not in batch_results:
-                continue
-            accessions[accession]["downloaded"] = True
-            accessions[accession]["local_path"] = self.lmdb_path
-            accessions[accession]["headers"] = batch_results[accession]
+            info = accessions[accession]
+            if accession in batch_results:
+                info["downloaded"] = True
+                info["local_path"] = self.lmdb_path
+                info["headers"] = batch_results[accession]
+                info.pop("download_attempts", None)
+            elif accession in attempted_set:
+                info["download_attempts"] = info.get("download_attempts", 0) + 1
+                if info["download_attempts"] >= self._MAX_DOWNLOAD_ATTEMPTS:
+                    logger.warning(
+                        "Accession %s failed to ingest %d times; giving up "
+                        "(skipped on future runs).",
+                        accession, info["download_attempts"],
+                    )
 
     def download_batch(
         self,
         accessions: list[str],
-    ) -> dict[str, list[dict[str, str]]]:
+    ) -> tuple[dict[str, list[dict[str, str]]], list[str]]:
         """Download a single batch of accessions via the NCBI CLI.
 
         Spawns one ``datasets download`` subprocess that fetches all
         requested accessions in a ZIP archive, unpacks it, parses the
-        FASTA files, and persists each sequence into LMDB. Returns a
-        mapping of successfully processed accessions to their header
-        metadata.
+        FASTA files, and persists each sequence into LMDB.
 
-        Accessions that fail to download or whose FASTA files are
-        missing are silently omitted from the result. Callers can detect
-        failures by comparing input and output keys.
+        Each accession is ingested independently: a failure in one (missing
+        directory, unparsable FASTA, LMDB error) is logged and skipped rather
+        than allowed to abort the whole batch — otherwise a single bad accession
+        would abort the run and re-block its chunk on every subsequent run.
 
         Args:
             accessions: List of accession IDs to download together in a
                 single CLI invocation.
 
         Returns:
-            Dictionary mapping accession ID to a list of header
-            metadata dictionaries (each with 'id' and 'name' keys). An
-            empty dict is returned if the CLI call fails entirely.
+            ``(batch_results, attempted)``. ``batch_results`` maps each
+            successfully ingested accession to its header metadata (each a list
+            of ``{'id', 'name'}`` dicts, possibly empty when every sequence was
+            filtered). ``attempted`` lists the accessions the CLI returned and
+            tried to ingest; entries in ``attempted`` but not ``batch_results``
+            are per-accession ingest failures (counted toward the retry limit).
+            ``attempted`` is empty when the CLI call failed entirely (a transient
+            failure that must not count against any accession).
         """
         logger.debug(f"Spawning bulk NCBI fetch for {len(accessions)} accessions.")
         batch_results: dict[str, list[dict[str, str]]] = {}
@@ -417,21 +462,31 @@ class NCBIDownloader:
             archive_path = os.path.join(temp_dir, "batch_package.zip")
 
             if not self._invoke_ncbi_datasets_cli(accessions, archive_path):
-                return batch_results
+                return batch_results, []
 
             extracted_root = self._extract_assembly_archive(archive_path, temp_dir)
             if extracted_root is None:
-                return batch_results
+                return batch_results, []
 
             for accession in accessions:
-                headers = self._ingest_accession_fasta(accession, extracted_root)
-                # None = genuine failure (missing/empty) -> omit so it stays
-                # pending and is retried. A list (even empty, when every
-                # sequence was filtered) means the accession was processed.
+                try:
+                    headers = self._ingest_accession_fasta(accession, extracted_root)
+                except Exception as exc:
+                    # Isolate one bad accession so it cannot abort the batch (and
+                    # every later chunk). It stays pending; the retry counter in
+                    # _update_registry_for_batch eventually gives up on it.
+                    logger.error(
+                        "Ingest failed for accession %s: %s — skipping.",
+                        accession, exc,
+                    )
+                    headers = None
+                # None = genuine failure (missing/empty/raised) -> omit so it
+                # stays pending. A list (even empty, when every sequence was
+                # filtered) means the accession was processed.
                 if headers is not None:
                     batch_results[accession] = headers
 
-        return batch_results
+        return batch_results, list(accessions)
 
     def _invoke_ncbi_datasets_cli(
         self,
@@ -637,8 +692,10 @@ class NCBIDownloader:
         """
         sequences: dict[str, str] = {}
         headers_metadata: list[dict[str, str]] = []
+        seen_ids: set[str] = set()
         current_header: str | None = None
         current_seq_lines: list[str] = []
+        skip_current = False  # reading a duplicate-id record to be dropped
 
         with open(fasta_path, encoding="utf-8") as fasta_file:
             for line in fasta_file:
@@ -647,20 +704,32 @@ class NCBIDownloader:
                     continue
 
                 if stripped.startswith(">"):
-                    if current_header is not None:
+                    if current_header is not None and not skip_current:
                         sequences[current_header] = "".join(current_seq_lines)
 
                     parts = stripped[1:].split(" ", 1)
                     current_header = parts[0]
                     sequence_name = parts[1] if len(parts) > 1 else current_header
-                    headers_metadata.append(
-                        {"id": current_header, "name": sequence_name}
-                    )
+                    if current_header in seen_ids:
+                        # A record id repeated within one FASTA is malformed; keep
+                        # the first occurrence so `sequences` and `headers_metadata`
+                        # stay one-to-one (the LMDB key is the id).
+                        logger.warning(
+                            "Duplicate FASTA record id %r in %s; keeping the first.",
+                            current_header, fasta_path,
+                        )
+                        skip_current = True
+                    else:
+                        seen_ids.add(current_header)
+                        headers_metadata.append(
+                            {"id": current_header, "name": sequence_name}
+                        )
+                        skip_current = False
                     current_seq_lines = []
                 else:
                     current_seq_lines.append(stripped)
 
-            if current_header is not None:
+            if current_header is not None and not skip_current:
                 sequences[current_header] = "".join(current_seq_lines)
 
         return sequences, headers_metadata
@@ -668,8 +737,17 @@ class NCBIDownloader:
     def _persist_sequences_to_lmdb(self, sequences: dict[str, str]) -> None:
         """Write parsed sequences to LMDB with zlib compression.
 
+        The LMDB key is the sequence record id (its FASTA accession.version),
+        which is a **single global namespace** across every accession in the
+        vault. This is safe because NCBI sequence ids are globally unique, so two
+        different assemblies never emit the same id; the same id reappears only
+        when the *same* accession is re-ingested (an idempotent overwrite of its
+        own value). A collision across distinct assemblies would silently
+        overwrite — it cannot happen with NCBI ids, and is called out here so the
+        invariant is explicit if the id source ever changes.
+
         Args:
-            sequences: Dictionary mapping header ID to the raw sequence
+            sequences: Dictionary mapping record id to the raw sequence
                 string. All entries are written within a single LMDB
                 transaction for atomicity.
 

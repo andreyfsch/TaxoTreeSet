@@ -117,7 +117,7 @@ class TestUpdateRegistryForBatch:
             }
         }
         batch_results = {"ACC_A": [{"id": "NC_001", "name": "Seq one"}]}
-        downloader._update_registry_for_batch(["ACC_A"], batch_results)
+        downloader._update_registry_for_batch(["ACC_A"], batch_results, ["ACC_A"])
         entry = downloader.registry.registry["accessions"]["ACC_A"]
         assert entry["downloaded"] is True
         assert entry["local_path"] == downloader.lmdb_path
@@ -129,11 +129,13 @@ class TestUpdateRegistryForBatch:
             }
         }
         headers = [{"id": "NC_001", "name": "Genome"}, {"id": "NC_002", "name": "Plasmid"}]
-        downloader._update_registry_for_batch(["ACC_A"], {"ACC_A": headers})
+        downloader._update_registry_for_batch(["ACC_A"], {"ACC_A": headers}, ["ACC_A"])
         entry = downloader.registry.registry["accessions"]["ACC_A"]
         assert entry["headers"] == headers
 
-    def test_missing_accession_in_batch_results_left_untouched(self, downloader):
+    def test_transient_miss_not_in_attempted_left_untouched(self, downloader):
+        # ACC_B was requested but the CLI never returned it (not attempted):
+        # a transient/whole-batch miss must not count against it.
         downloader.registry.registry = {
             "accessions": {
                 "ACC_A": {"downloaded": False, "local_path": None},
@@ -141,8 +143,12 @@ class TestUpdateRegistryForBatch:
             }
         }
         batch_results = {"ACC_A": [{"id": "NC_001", "name": "Seq"}]}
-        downloader._update_registry_for_batch(["ACC_A", "ACC_B"], batch_results)
-        assert downloader.registry.registry["accessions"]["ACC_B"]["downloaded"] is False
+        downloader._update_registry_for_batch(
+            ["ACC_A", "ACC_B"], batch_results, ["ACC_A"]
+        )
+        entry_b = downloader.registry.registry["accessions"]["ACC_B"]
+        assert entry_b["downloaded"] is False
+        assert "download_attempts" not in entry_b  # not attempted -> untouched
 
     def test_empty_batch_results_leaves_all_untouched(self, downloader):
         downloader.registry.registry = {
@@ -150,8 +156,41 @@ class TestUpdateRegistryForBatch:
                 "ACC_A": {"downloaded": False},
             }
         }
-        downloader._update_registry_for_batch(["ACC_A"], {})
+        downloader._update_registry_for_batch(["ACC_A"], {}, [])
         assert downloader.registry.registry["accessions"]["ACC_A"]["downloaded"] is False
+
+    def test_attempted_but_failed_bumps_retry_counter(self, downloader):
+        downloader.registry.registry = {
+            "accessions": {"ACC_A": {"downloaded": False}}
+        }
+        downloader._update_registry_for_batch(["ACC_A"], {}, ["ACC_A"])
+        entry = downloader.registry.registry["accessions"]["ACC_A"]
+        assert entry["downloaded"] is False
+        assert entry["download_attempts"] == 1
+
+    def test_success_clears_retry_counter(self, downloader):
+        downloader.registry.registry = {
+            "accessions": {"ACC_A": {"downloaded": False, "download_attempts": 2}}
+        }
+        downloader._update_registry_for_batch(
+            ["ACC_A"], {"ACC_A": [{"id": "NC_001", "name": "S"}]}, ["ACC_A"]
+        )
+        entry = downloader.registry.registry["accessions"]["ACC_A"]
+        assert entry["downloaded"] is True
+        assert "download_attempts" not in entry
+
+    def test_exhausted_attempts_excluded_from_pending(self, downloader):
+        # After _MAX_DOWNLOAD_ATTEMPTS ingest failures the accession is given up
+        # on: _collect_pending_accessions no longer offers it for re-download.
+        cap = NCBIDownloader._MAX_DOWNLOAD_ATTEMPTS
+        downloader.registry.registry = {
+            "accessions": {"ACC_A": {"downloaded": False}}
+        }
+        for _ in range(cap):
+            downloader._update_registry_for_batch(["ACC_A"], {}, ["ACC_A"])
+        entry = downloader.registry.registry["accessions"]["ACC_A"]
+        assert entry["download_attempts"] == cap
+        assert downloader._collect_pending_accessions() == []
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +270,15 @@ class TestParseFastaFile:
         seqs, headers = NCBIDownloader._parse_fasta_file(str(fasta))
         assert seqs == {}
         assert headers == []
+
+    def test_duplicate_record_id_keeps_first_and_stays_consistent(self, tmp_path):
+        # A repeated id within one FASTA is malformed; keep the first occurrence
+        # so `sequences` and `headers_metadata` stay one-to-one (LMDB key = id).
+        fasta = tmp_path / "dup.fna"
+        fasta.write_text(">NC_001 first\nAAAA\n>NC_001 second\nCCCC\n>NC_002 c\nGGGG\n")
+        seqs, headers = NCBIDownloader._parse_fasta_file(str(fasta))
+        assert seqs == {"NC_001": "AAAA", "NC_002": "GGGG"}  # first NC_001 kept
+        assert [h["id"] for h in headers] == ["NC_001", "NC_002"]  # one per id
 
 
 # ---------------------------------------------------------------------------
@@ -511,11 +559,11 @@ class TestDownloadAllPending:
         dl = NCBIDownloader(registry=mock_registry, vault_path=str(tmp_path / "vault"))
         dl._env = MagicMock()
 
-        with patch.object(dl, "download_batch", return_value={}) as mock_batch:
+        with patch.object(dl, "download_batch", return_value=({}, [])) as mock_batch:
             dl._process_chunks(
                 chunks=[["GCF_A"]],
-                total_accessions=1,
-                already_downloaded=0,
+                bar_total=1,
+                bar_initial=0,
             )
 
         mock_batch.assert_called_once_with(["GCF_A"])
@@ -537,8 +585,9 @@ class TestDownloadBatch:
     def test_returns_empty_when_cli_fails(self, tmp_path):
         dl = self._make_downloader(tmp_path)
         with patch.object(dl, "_invoke_ncbi_datasets_cli", return_value=False):
-            result = dl.download_batch(["GCF_001"])
+            result, attempted = dl.download_batch(["GCF_001"])
         assert result == {}
+        assert attempted == []  # CLI failed -> nothing attempted (no retry count)
 
     def test_returns_empty_when_extract_fails(self, tmp_path):
         dl = self._make_downloader(tmp_path)
@@ -546,8 +595,9 @@ class TestDownloadBatch:
             patch.object(dl, "_invoke_ncbi_datasets_cli", return_value=True),
             patch.object(dl, "_extract_assembly_archive", return_value=None),
         ):
-            result = dl.download_batch(["GCF_001"])
+            result, attempted = dl.download_batch(["GCF_001"])
         assert result == {}
+        assert attempted == []
 
     def test_returns_headers_when_ingest_succeeds(self, tmp_path):
         dl = self._make_downloader(tmp_path)
@@ -557,9 +607,10 @@ class TestDownloadBatch:
             patch.object(dl, "_extract_assembly_archive", return_value="/fake/extracted"),
             patch.object(dl, "_ingest_accession_fasta", return_value=fake_headers),
         ):
-            result = dl.download_batch(["GCF_001"])
+            result, attempted = dl.download_batch(["GCF_001"])
         assert "GCF_001" in result
         assert result["GCF_001"] == fake_headers
+        assert attempted == ["GCF_001"]
 
     def test_omits_accession_on_ingest_failure(self, tmp_path):
         # None from ingestion = genuine failure -> omitted so it stays pending.
@@ -569,8 +620,9 @@ class TestDownloadBatch:
             patch.object(dl, "_extract_assembly_archive", return_value="/fake/extracted"),
             patch.object(dl, "_ingest_accession_fasta", return_value=None),
         ):
-            result = dl.download_batch(["GCF_001"])
+            result, attempted = dl.download_batch(["GCF_001"])
         assert "GCF_001" not in result
+        assert attempted == ["GCF_001"]  # attempted (CLI ok) but failed to ingest
 
     def test_includes_accession_when_all_sequences_filtered(self, tmp_path):
         # Empty list = processed but every sequence filtered -> recorded (with
@@ -581,8 +633,28 @@ class TestDownloadBatch:
             patch.object(dl, "_extract_assembly_archive", return_value="/fake/extracted"),
             patch.object(dl, "_ingest_accession_fasta", return_value=[]),
         ):
-            result = dl.download_batch(["GCF_001"])
+            result, _ = dl.download_batch(["GCF_001"])
         assert result["GCF_001"] == []
+
+    def test_ingest_exception_is_isolated(self, tmp_path):
+        # A single accession raising during ingest must not abort the batch;
+        # the others still ingest and the bad one is left out (stays pending).
+        dl = self._make_downloader(tmp_path)
+
+        def ingest(acc, _root):
+            if acc == "GCF_BAD":
+                raise ValueError("corrupt FASTA")
+            return [{"id": "NC_001", "name": "ok"}]
+
+        with (
+            patch.object(dl, "_invoke_ncbi_datasets_cli", return_value=True),
+            patch.object(dl, "_extract_assembly_archive", return_value="/fake"),
+            patch.object(dl, "_ingest_accession_fasta", side_effect=ingest),
+        ):
+            result, attempted = dl.download_batch(["GCF_BAD", "GCF_GOOD"])
+        assert "GCF_GOOD" in result
+        assert "GCF_BAD" not in result
+        assert attempted == ["GCF_BAD", "GCF_GOOD"]
 
 
 # ---------------------------------------------------------------------------
