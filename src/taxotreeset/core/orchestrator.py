@@ -50,6 +50,7 @@ import json
 import logging
 import os
 import subprocess
+import tempfile
 from typing import Any, NamedTuple
 
 import taxoniq
@@ -146,9 +147,11 @@ class DiscoveryOrchestrator:
                 registry checkpoints. Lower values give better crash
                 recovery at the cost of more disk I/O.
 
-        Raises:
-            RuntimeError: If the NCBI Datasets CLI subprocess fails
-                or returns no data.
+        Failure is tolerant, not fatal: a subprocess failure or an empty CLI
+        result is logged and the method returns without modifying the registry;
+        per-taxon lineage failures are logged and skipped (see
+        ``_build_hierarchy``). The method therefore does not raise on the
+        NCBI/streaming path.
         """
         root_id_str = str(root_taxid)
         self._log_api_key_status()
@@ -214,27 +217,40 @@ class DiscoveryOrchestrator:
         logger.info(f"Spawning NCBI Datasets CLI subprocess for TaxID: {root_id_str}")
 
         env = os.environ.copy()
+        # Drain stderr to a temp file instead of a PIPE. We consume only stdout
+        # while the child runs, so a stderr PIPE that the child fills past its
+        # ~64 KiB buffer (plausible on a large-domain run's progress output)
+        # would block the child while we block reading stdout — a deadlock. A
+        # file never blocks the writer; we read it back only on failure.
+        stderr_file = tempfile.TemporaryFile(mode="w+b")
         try:
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env,
-                bufsize=1,
-            )
-        except OSError as exc:
-            logger.error(f"Failed to spawn NCBI Datasets CLI subprocess: {exc}")
-            return {}
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=stderr_file,
+                    text=True,
+                    env=env,
+                    bufsize=1,
+                )
+            except OSError as exc:
+                logger.error(f"Failed to spawn NCBI Datasets CLI subprocess: {exc}")
+                return {}
 
-        reports_by_taxid = self._consume_jsonlines_stream(process)
-        process.wait()
+            # `with process` closes stdout and waits on exit.
+            with process:
+                reports_by_taxid = self._consume_jsonlines_stream(process)
 
-        if not reports_by_taxid:
-            stderr_output = process.stderr.read() if process.stderr else ""
-            logger.error(f"NCBI streaming process returned no data: {stderr_output}")
-
-        return reports_by_taxid
+            if not reports_by_taxid:
+                stderr_file.seek(0)
+                stderr_output = stderr_file.read().decode("utf-8", errors="replace")
+                logger.error(
+                    "NCBI streaming process returned no data: %s",
+                    stderr_output.strip(),
+                )
+            return reports_by_taxid
+        finally:
+            stderr_file.close()
 
     @staticmethod
     def _build_summary_command(
@@ -332,6 +348,7 @@ class DiscoveryOrchestrator:
                 taxa.
         """
         processed_count = 0
+        skipped_count = 0
         for taxid_str, reports in tqdm(
             reports_by_taxid.items(),
             desc="Processing Lineage Hierarchy",
@@ -340,6 +357,7 @@ class DiscoveryOrchestrator:
                 self._register_taxon(taxid_str, reports, root_id_str)
                 processed_count += 1
             except Exception as exc:
+                skipped_count += 1
                 logger.debug(
                     f"Skipping lineage resolution for TaxID {taxid_str}: {exc}"
                 )
@@ -350,6 +368,19 @@ class DiscoveryOrchestrator:
                     f"Checkpoint reached ({processed_count} taxa). Flushing to disk."
                 )
                 self.registry.save()
+
+        # Surface systematic failures: a few skips are normal (unresolvable taxa),
+        # but skips outnumbering successes usually means something is wrong (bad
+        # config, taxoniq/CLI unavailable) rather than a per-taxon anomaly.
+        if skipped_count:
+            summary = (
+                "Hierarchy build: %d taxa registered, %d skipped "
+                "(lineage resolution failures)."
+            )
+            if skipped_count >= processed_count:
+                logger.warning(summary, processed_count, skipped_count)
+            else:
+                logger.info(summary, processed_count, skipped_count)
 
     def _register_taxon(
         self,

@@ -347,6 +347,19 @@ class TestProcessLineageBatchCheckpoint:
                 checkpoint_interval=100,
             )
 
+    def test_warns_when_skips_dominate(self, caplog):
+        # A systematic failure (every taxon fails) must surface as a WARNING,
+        # not be swallowed at DEBUG behind a "completed" run.
+        import logging as _logging
+
+        orch = self._orchestrator()
+        reports_by_taxid = {"1": [], "2": [], "3": []}
+        with patch.object(
+            orch, "_register_taxon", side_effect=RuntimeError("boom")
+        ), caplog.at_level(_logging.WARNING):
+            orch._build_hierarchy(reports_by_taxid, "10239", checkpoint_interval=100)
+        assert any("skipped" in r.getMessage() for r in caplog.records)
+
 
 # ---------------------------------------------------------------------------
 # _stream_ncbi_summaries — OSError and empty result paths
@@ -371,16 +384,36 @@ class TestStreamNcbiSummaries:
     def test_returns_empty_dict_when_no_reports_produced(self):
         orch = self._orchestrator()
         mock_process = MagicMock()
-        mock_process.stdout = iter([])
-        mock_process.stderr.read.return_value = "no data"
-        mock_process.wait.return_value = 0
-
+        mock_process.stdout = iter([])  # no report lines
         with patch(
             "taxotreeset.core.orchestrator.subprocess.Popen",
             return_value=mock_process,
         ):
             result = orch._stream_ncbi_summaries("10239", "complete")
         assert result == {}
+
+    def test_stderr_drained_to_file_not_pipe(self):
+        # Deadlock avoidance: stderr must go to a file we do not read
+        # concurrently, never a PIPE — a full stderr PIPE would block the child
+        # while the parent blocks reading stdout.
+        import subprocess as _sp
+
+        orch = self._orchestrator()
+        mock_process = MagicMock()
+        mock_process.stdout = iter([])
+        captured = {}
+
+        def fake_popen(_cmd, **kwargs):
+            captured["stderr"] = kwargs.get("stderr")
+            return mock_process
+
+        with patch(
+            "taxotreeset.core.orchestrator.subprocess.Popen",
+            side_effect=fake_popen,
+        ):
+            orch._stream_ncbi_summaries("10239", "complete")
+        assert captured["stderr"] is not _sp.PIPE
+        assert hasattr(captured["stderr"], "read")  # a real file object
 
 
 # ---------------------------------------------------------------------------
