@@ -41,6 +41,24 @@ class TestPermissiveWithMissingConfig:
         assert not nf.is_noise("environmental samples", rank="no_rank")
         assert not nf.is_noise("E. coli", rank="strain")
 
+    def test_malformed_config_is_permissive_not_raising(self, tmp_path):
+        # A config typo must degrade to permissive (like a missing file), not
+        # abort the whole pipeline.
+        p = tmp_path / "bad.json"
+        p.write_text("{ this is not valid json", encoding="utf-8")
+        nf = NoiseFilter(config_path=str(p))
+        assert not nf.is_noise("unclassified Caudoviricetes")
+        assert not nf.is_noise("E. coli", rank="strain")
+
+    def test_non_string_rank_in_config_does_not_raise(self, tmp_path):
+        # A stray non-string rank entry is coerced, not fatal.
+        config = {"name_patterns": [], "rank_blacklist": {"ranks": ["strain", 42]}}
+        p = tmp_path / "ranks.json"
+        p.write_text(json.dumps(config), encoding="utf-8")
+        nf = NoiseFilter(config_path=str(p))
+        assert nf.is_noise("X", rank="strain")   # the valid rank still blocks
+        assert nf.is_noise("X", rank="42")        # coerced entry matches "42"
+
 
 # ---------------------------------------------------------------------------
 # Name-pattern matching

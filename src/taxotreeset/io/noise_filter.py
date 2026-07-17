@@ -91,9 +91,11 @@ class NoiseFilter:
     def _load_configuration(self) -> None:
         """Load and compile regex patterns and rank filters from disk.
 
-        When the configuration file does not exist, the filter remains
-        in a permissive state where ``is_noise`` always returns False.
-        A warning is logged to make this situation visible.
+        When the configuration file is missing, unreadable, or malformed, the
+        filter remains in a permissive state where ``is_noise`` always returns
+        False; the situation is logged so it is visible. (A config typo must not
+        abort the whole pipeline, matching the missing-file behaviour — but it is
+        logged loudly because it silently disables noise filtering.)
 
         Invalid regex patterns are logged and skipped; the filter
         continues loading the remaining valid patterns.
@@ -105,8 +107,15 @@ class NoiseFilter:
             )
             return
 
-        with self.config_path.open(encoding="utf-8") as config_file:
-            config = json.load(config_file)
+        try:
+            with self.config_path.open(encoding="utf-8") as config_file:
+                config = json.load(config_file)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.error(
+                f"Noise patterns file {self.config_path} is unreadable or "
+                f"malformed ({exc}). Filtering disabled - all nodes will pass."
+            )
+            return
 
         self._compile_name_patterns(config.get("name_patterns", []))
         self._load_rank_blacklist(config.get("rank_blacklist", {}))
@@ -148,14 +157,15 @@ class NoiseFilter:
         """Populate the rank blacklist from configuration.
 
         Ranks are lowercased for case-insensitive matching against
-        node ranks during evaluation.
+        node ranks during evaluation. Non-string entries are coerced with
+        ``str`` so a stray non-string in the config cannot abort the load.
 
         Args:
             rank_config: The 'rank_blacklist' object from the JSON
                 configuration, containing a 'ranks' list.
         """
         ranks = rank_config.get("ranks", [])
-        self._rank_blacklist = {rank.lower() for rank in ranks}
+        self._rank_blacklist = {str(rank).lower() for rank in ranks}
 
     def is_noise(self, scientific_name: str, rank: str = "") -> bool:
         """Determine whether a taxonomic node should be filtered as noise.
