@@ -233,7 +233,7 @@ def _make_virtual_bucket_node(
     which bucketing mechanism creates them.
 
     Args:
-        virtual_id: Virtual TaxID (9xxxxxxxx) for the bucket.
+        virtual_id: Virtual TaxID (``9`` + 15 digits) for the bucket.
         parent_taxid: Parent's TaxID, stored on the node for logging.
         parent_name: Parent's scientific name, stored for logging.
         rank: Virtual rank label. One of 'virtual_low_capacity',
@@ -263,8 +263,8 @@ def register_virtual_bucket(
     """Register a virtual bucket in the registry with collision detection.
 
     Defends against statistical collisions in ``make_virtual_id``,
-    which truncates SHA256 to 8 hex chars and is therefore not
-    collision-free in principle. Re-registering the same virtual ID
+    which projects a SHA256 digest into a finite 10^15 space and is
+    therefore not collision-free in principle. Re-registering the same virtual ID
     with a different (parent_taxid, purpose) tuple raises
     ``RuntimeError`` because it would silently overwrite a previously
     created bucket's metadata.

@@ -11,10 +11,12 @@ that:
 3. Encode the bucket's purpose without requiring a sidecar registry
    to interpret.
 
-This module solves the problem by generating 9-character identifiers
-prefixed with the digit '9' (which no real NCBI TaxID starts with as
-of the latest taxonomy) and a deterministic 8-digit suffix derived
-from a SHA-256 hash of the parent TaxID and the bucket's purpose.
+This module solves the problem by generating 16-character
+identifiers prefixed with the digit '9' (which no real NCBI TaxID
+starts with as of the latest taxonomy) followed by a deterministic
+15-digit suffix derived from a SHA-256 hash of the parent TaxID and
+the bucket's purpose. Real NCBI TaxIDs are at most 10 digits, so a
+"9" + 15-digit id is unmistakably synthetic yet still int-parsable.
 
 Same inputs always produce the same output, so cross-references in
 manifests, virtual ID registries, and training shards remain stable
@@ -28,23 +30,32 @@ Typical usage::
         parent_taxid="10239",  # Viruses
         purpose="low_capacity",
     )
-    # bucket_taxid is something like '956419858'
+    # bucket_taxid is something like '9233730516624028'
 """
 
 import hashlib
 
-_VIRTUAL_ID_PROJECTION_SPACE: int = 100_000_000
-_VIRTUAL_ID_HASH_HEX_PREFIX_LENGTH: int = 8
+# The suffix is projected into a 10^15 space (15 digits): with SHA-256 truncated
+# to 8 hex chars (10^8) the birthday bound made collisions likely at scale
+# (~50% at 10k virtual buckets — a large canonical bacteria/eukaryote run), and a
+# collision is permanent because make_virtual_id is deterministic. 10^15 keeps the
+# probability negligible (~5e-6 at 100k buckets) while a "9" + 15-digit id stays
+# unmistakably non-NCBI (real TaxIDs are <= 10 digits) and int-parsable.
+_VIRTUAL_ID_SUFFIX_DIGITS: int = 15
+_VIRTUAL_ID_PROJECTION_SPACE: int = 10 ** _VIRTUAL_ID_SUFFIX_DIGITS
+_VIRTUAL_ID_HASH_HEX_PREFIX_LENGTH: int = 15
 
 
 def make_virtual_id(parent_taxid: str, purpose: str) -> str:
-    """Generate a deterministic 9-digit virtual TaxID.
+    """Generate a deterministic 16-character virtual TaxID.
 
     Builds the identifier by hashing the string ``"{parent}:{purpose}"``
-    with SHA-256, projecting the leading 8 hex characters into a
-    100-million-element integer space, and prefixing with '9'. The
-    '9' prefix is the project convention that distinguishes virtual
-    IDs from real NCBI TaxIDs.
+    with SHA-256, projecting the leading 15 hex characters into a
+    10^15-element integer space, and prefixing with '9'. The '9'
+    prefix is the project convention that distinguishes virtual IDs
+    from real NCBI TaxIDs (which are at most 10 digits). The 10^15
+    space keeps birthday collisions negligible even for canonical
+    runs with 10^5+ virtual buckets.
 
     Determinism is guaranteed by SHA-256's stability: identical
     inputs across runs (or across machines) always produce the same
@@ -63,14 +74,14 @@ def make_virtual_id(parent_taxid: str, purpose: str) -> str:
             (rank-specific buckets).
 
     Returns:
-        A 9-character string starting with '9'. The remaining 8
+        A 16-character string starting with '9'. The remaining 15
         digits are derived deterministically from the input pair.
 
     Example:
         >>> make_virtual_id("10239", "low_capacity")
-        '956419858'
+        '9233730516624028'
         >>> make_virtual_id("10239", "low_capacity")  # idempotent
-        '956419858'
+        '9233730516624028'
         >>> make_virtual_id("10239", "misc")  # different purpose
         '9...different...'
     """
@@ -80,4 +91,4 @@ def make_virtual_id(parent_taxid: str, purpose: str) -> str:
         int(digest[:_VIRTUAL_ID_HASH_HEX_PREFIX_LENGTH], 16)
         % _VIRTUAL_ID_PROJECTION_SPACE
     )
-    return f"9{suffix:08d}"
+    return f"9{suffix:0{_VIRTUAL_ID_SUFFIX_DIGITS}d}"
