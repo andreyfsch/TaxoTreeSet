@@ -437,10 +437,10 @@ def _compute_percentile_cutoff(
 ) -> int:
     """Compute the capacity value at the given percentile cutoff.
 
-    The cutoff is computed so that children with capacity strictly
-    greater than the cutoff value are retained, while those at or
-    below the value are absorbed. The (100 - p)% lowest-capacity
-    children fall in the absorbed group.
+    The cutoff is used by ``_partition_by_cutoff`` so that children with capacity
+    **at or above** the cutoff value are retained, while those **strictly below**
+    it are absorbed. The (100 - p)% lowest-capacity children fall in the absorbed
+    group.
 
     Note on precision: the computation uses integer truncation
     (``int(len * (1 - p/100))``), so floating-point representation
@@ -454,6 +454,10 @@ def _compute_percentile_cutoff(
     drop them). This semantics is preserved from the original
     pre-refactor implementation.
 
+    The index is clamped to ``[0, len-1]`` so an out-of-range percentage
+    (``<= 0``, which would otherwise index past the end) degrades gracefully
+    instead of raising.
+
     Args:
         sorted_capacities: Capacities sorted in ascending order.
         cutoff_percentage: Percentile (e.g., 98.0) to keep.
@@ -464,8 +468,9 @@ def _compute_percentile_cutoff(
     """
     if not sorted_capacities:
         return 0
-    cutoff_index = max(
-        0, int(len(sorted_capacities) * (1.0 - cutoff_percentage / 100.0))
+    cutoff_index = min(
+        len(sorted_capacities) - 1,
+        max(0, int(len(sorted_capacities) * (1.0 - cutoff_percentage / 100.0))),
     )
     return sorted_capacities[cutoff_index]
 

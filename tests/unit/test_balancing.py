@@ -304,6 +304,15 @@ class TestComputePercentileCutoff:
         # 1.0 - 80.0/100.0 = 0.1999...9 (float precision), int(10 * 0.1999...) = 1
         assert cutoff == caps[1]
 
+    def test_zero_percentage_does_not_index_past_end(self):
+        # p <= 0 would push cutoff_index to len (IndexError) without the clamp.
+        caps = sorted([100, 200, 300])
+        assert _compute_percentile_cutoff(caps, 0.0) == caps[-1]
+
+    def test_negative_percentage_is_clamped(self):
+        caps = sorted([10, 20, 30, 40])
+        assert _compute_percentile_cutoff(caps, -5.0) == caps[-1]
+
 
 # ---------------------------------------------------------------------------
 # _partition_by_leaf_count (internal helper)
