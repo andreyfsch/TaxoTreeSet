@@ -187,7 +187,10 @@ def build_reject_tasks(
         return []
 
     if near_leaves and far_leaves:
-        n_near = max(0, round(n_reject * near_far_ratio))
+        # Clamp to [0, n_reject] so a mis-set ratio (e.g. --reject-near-far-end > 1,
+        # which the CLI does not bound) cannot drive n_far negative and feed a
+        # negative sample count into extraction.
+        n_near = max(0, min(n_reject, round(n_reject * near_far_ratio)))
         n_far = n_reject - n_near
     elif near_leaves:
         n_near, n_far = n_reject, 0

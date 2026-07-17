@@ -148,3 +148,15 @@ class TestBuildRejectTasks:
 
     def test_zero_budget_returns_empty(self):
         assert build_reject_tasks([object()], [object()], 0, 0.5, 100) == []
+
+    @patch("taxotreeset.core.generation.reject_bucket._allocate_n_across_leaves")
+    def test_ratio_above_one_does_not_produce_negative_far(self, mock_alloc):
+        # --reject-near-far-end is an unbounded float; ratio > 1 must not make
+        # n_far negative (which would feed a negative sample count to extraction).
+        mock_alloc.side_effect = lambda leaves, n, m: [{"n": n}]
+        build_reject_tasks(
+            [object()], [object()], n_reject=100, near_far_ratio=1.5, min_subseq_len=100
+        )
+        allocated = [c.args[1] for c in mock_alloc.call_args_list]
+        assert all(n >= 0 for n in allocated)
+        assert allocated[0] == 100  # near clamped to the full budget; far = 0 (skipped)
