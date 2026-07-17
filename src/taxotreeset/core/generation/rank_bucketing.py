@@ -114,11 +114,13 @@ def classify_children_by_rank(
     if all_ranks:
         return list(children), []
 
-    canonical_rank = _resolve_canonical_rank(children)
-    if canonical_rank is None:
+    # Count ranks once; the modal (most common) rank is the canonical one.
+    rank_counts = _count_ranks_excluding_protected(children)
+    if not rank_counts:
+        # No non-protected children (e.g. the parent has only virtual buckets).
         return list(children), []
 
-    rank_counts = _count_ranks_excluding_protected(children)
+    canonical_rank = rank_counts.most_common(1)[0][0]
     non_canonical_ranks = {rank for rank in rank_counts if rank != canonical_rank}
 
     if not non_canonical_ranks:
@@ -154,26 +156,6 @@ def _count_ranks_excluding_protected(children: list) -> Counter:
             continue
         rank_counts[child_rank] += 1
     return rank_counts
-
-
-def _resolve_canonical_rank(children: list) -> str | None:
-    """Identify the modal rank among the parent's non-protected children.
-
-    The modal rank is the one with the highest count among children
-    not already in virtual buckets. When no non-protected children
-    exist (e.g., parent has only virtual buckets), returns None.
-
-    Args:
-        children: List of direct children to inspect.
-
-    Returns:
-        The canonical rank label, or None when no non-protected
-        children are present.
-    """
-    rank_counts = _count_ranks_excluding_protected(children)
-    if not rank_counts:
-        return None
-    return rank_counts.most_common(1)[0][0]
 
 
 def _materialize_rank_buckets(
