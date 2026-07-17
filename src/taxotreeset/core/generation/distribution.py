@@ -220,7 +220,13 @@ def _compute_leaf_share(
     """
     if is_last_leaf:
         return max(0, n_per_class - running_sum)
-    return int(round(n_per_class * leaf_weight / total_weight))
+    share = int(round(n_per_class * leaf_weight / total_weight))
+    # Cap at the remaining budget: without this, accumulated round-ups (when
+    # many leaves each round n*w/total up) can push the running sum past
+    # n_per_class, and the last leaf can only absorb a non-negative remainder —
+    # so the per-child total would exceed n_per_class. Capping keeps the sum
+    # exactly n_per_class.
+    return min(share, max(0, n_per_class - running_sum))
 
 
 def _compute_leaf_share_weights(

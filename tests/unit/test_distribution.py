@@ -134,6 +134,18 @@ class TestComputeLeafShare:
         )
         assert share == 50
 
+    def test_non_last_share_capped_at_remaining_budget(self):
+        # round(100*1/3)=33 would overspend when only 2 of the budget remain;
+        # capping prevents the per-child total from exceeding n_per_class.
+        share = _compute_leaf_share(
+            n_per_class=100,
+            leaf_weight=1,
+            total_weight=3,
+            running_sum=98,
+            is_last_leaf=False,
+        )
+        assert share == 2
+
 
 # ---------------------------------------------------------------------------
 # _compute_leaf_share_weights
@@ -212,6 +224,20 @@ class TestAllocateNAcrossLeaves:
             tasks = _allocate_n_across_leaves(leaves, n_per_class=97, min_subseq_len=10)
         total = sum(t["n"] for t in tasks)
         assert total == 97
+
+    def test_sum_equals_n_even_when_rounding_overshoots(self):
+        # Regression: for n roughly between len/2 and len, every leaf's
+        # round(n*w/total) rounds up, pushing the running sum past n so the
+        # per-child total exceeded n_per_class (e.g. n=3 over 5 equal leaves
+        # summed to 4). The remaining-budget cap keeps the sum exactly n.
+        for n, n_leaves in [(3, 5), (5, 7), (7, 10), (2, 5), (1, 3), (99, 100)]:
+            leaves = [make_seq_leaf(f"NC_{i}") for i in range(n_leaves)]
+            with patch(_MOCK_SEQ_PATH, return_value="A" * 200):  # equal weights
+                tasks = _allocate_n_across_leaves(
+                    leaves, n_per_class=n, min_subseq_len=100
+                )
+            total = sum(t["n"] for t in tasks)
+            assert total == n, f"n={n}, leaves={n_leaves} -> {total}"
 
     def test_unequal_weights_produce_proportional_distribution(self):
         short_leaf = make_seq_leaf("NC_short")
