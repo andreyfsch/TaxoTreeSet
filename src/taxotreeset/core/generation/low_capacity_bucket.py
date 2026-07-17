@@ -87,34 +87,15 @@ def make_low_capacity_bucket_node(
               'purpose', 'absorbed_taxids' suitable for inclusion in
               the virtual ID registry.
     """
-    resolved_parent_taxid = parent_taxid or str(parent_node.name)
-    resolved_parent_name = parent_name or getattr(
-        parent_node, "scientific_name", resolved_parent_taxid
-    )
-
-    virtual_id = make_virtual_id(resolved_parent_taxid, _LOW_CAPACITY_PURPOSE)
-    bucket_name = f"{_BUCKET_NAME_PREFIX}_{resolved_parent_name}"
-
-    bucket_node = _make_virtual_bucket_node(
-        virtual_id=virtual_id,
-        parent_taxid=resolved_parent_taxid,
-        parent_name=resolved_parent_name,
-        rank=_LOW_CAPACITY_RANK,
-        scientific_name=bucket_name,
+    return _make_absorbing_bucket_node(
         parent_node=parent_node,
+        absorbed_children=low_capacity_children,
+        purpose=_LOW_CAPACITY_PURPOSE,
+        rank=_LOW_CAPACITY_RANK,
+        name_prefix=_BUCKET_NAME_PREFIX,
+        parent_taxid=parent_taxid,
+        parent_name=parent_name,
     )
-
-    for child in low_capacity_children:
-        child.parent = bucket_node
-
-    metadata = {
-        "taxid": virtual_id,
-        "name": bucket_name,
-        "rank": _LOW_CAPACITY_PURPOSE,
-        "purpose": _LOW_CAPACITY_PURPOSE,
-        "absorbed_taxids": [str(child.name) for child in low_capacity_children],
-    }
-    return bucket_node, metadata
 
 
 def make_rare_taxa_bucket_node(
@@ -164,32 +145,74 @@ def make_rare_taxa_bucket_node(
               'purpose', 'absorbed_taxids' suitable for inclusion in
               the virtual ID registry.
     """
+    return _make_absorbing_bucket_node(
+        parent_node=parent_node,
+        absorbed_children=rare_taxa_children,
+        purpose=_RARE_TAXA_PURPOSE,
+        rank=_RARE_TAXA_RANK,
+        name_prefix=_RARE_TAXA_NAME_PREFIX,
+        parent_taxid=parent_taxid,
+        parent_name=parent_name,
+    )
+
+
+def _make_absorbing_bucket_node(
+    parent_node,
+    absorbed_children: list,
+    purpose: str,
+    rank: str,
+    name_prefix: str,
+    parent_taxid: str | None,
+    parent_name: str | None,
+) -> tuple[Node, dict]:
+    """Create a virtual bucket that absorbs (re-parents) a set of children.
+
+    Shared body of ``make_low_capacity_bucket_node`` and
+    ``make_rare_taxa_bucket_node``, which differ only in the purpose / rank /
+    name-prefix constants. The bucket gets a deterministic virtual TaxID from
+    ``(parent_taxid, purpose)``, is attached under the parent, and the absorbed
+    children are re-parented under it.
+
+    Args:
+        parent_node: bigtree parent Node under which the bucket is inserted.
+        absorbed_children: Children re-parented under the new bucket.
+        purpose: Stable purpose string driving the deterministic virtual ID and
+            recorded as the metadata ``rank``/``purpose``.
+        rank: The node's ``virtual_*`` rank label.
+        name_prefix: Prefix for the bucket's human-readable name.
+        parent_taxid: Parent's TaxID. Defaults to ``parent_node.name``.
+        parent_name: Parent's scientific name. Defaults to
+            ``parent_node.scientific_name``.
+
+    Returns:
+        Two-tuple ``(bucket_node, bucket_metadata)``.
+    """
     resolved_parent_taxid = parent_taxid or str(parent_node.name)
     resolved_parent_name = parent_name or getattr(
         parent_node, "scientific_name", resolved_parent_taxid
     )
 
-    virtual_id = make_virtual_id(resolved_parent_taxid, _RARE_TAXA_PURPOSE)
-    bucket_name = f"{_RARE_TAXA_NAME_PREFIX}_{resolved_parent_name}"
+    virtual_id = make_virtual_id(resolved_parent_taxid, purpose)
+    bucket_name = f"{name_prefix}_{resolved_parent_name}"
 
     bucket_node = _make_virtual_bucket_node(
         virtual_id=virtual_id,
         parent_taxid=resolved_parent_taxid,
         parent_name=resolved_parent_name,
-        rank=_RARE_TAXA_RANK,
+        rank=rank,
         scientific_name=bucket_name,
         parent_node=parent_node,
     )
 
-    for child in rare_taxa_children:
+    for child in absorbed_children:
         child.parent = bucket_node
 
     metadata = {
         "taxid": virtual_id,
         "name": bucket_name,
-        "rank": _RARE_TAXA_PURPOSE,
-        "purpose": _RARE_TAXA_PURPOSE,
-        "absorbed_taxids": [str(child.name) for child in rare_taxa_children],
+        "rank": purpose,
+        "purpose": purpose,
+        "absorbed_taxids": [str(child.name) for child in absorbed_children],
     }
     return bucket_node, metadata
 
