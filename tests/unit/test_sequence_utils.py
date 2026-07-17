@@ -83,6 +83,16 @@ class TestValidateExtractionParameters:
         with pytest.raises(ValueError, match="min_len must be <= max_len"):
             _validate_extraction_parameters(n=10, min_len=200, max_len=100)
 
+    def test_zero_min_len_raises_valueerror(self):
+        with pytest.raises(ValueError, match="min_len must be positive"):
+            _validate_extraction_parameters(n=10, min_len=0, max_len=100)
+
+    def test_negative_min_len_raises_valueerror(self):
+        # An unbounded --min-subseq-len (e.g. -W -5) must fail fast rather than
+        # emit degenerate/empty windows into the training data.
+        with pytest.raises(ValueError, match="min_len must be positive"):
+            _validate_extraction_parameters(n=10, min_len=-5, max_len=100)
+
     def test_equal_min_and_max_len_is_valid(self):
         _validate_extraction_parameters(n=10, min_len=100, max_len=100)
 
@@ -100,6 +110,10 @@ class TestExtractSubseqsParameterHandling:
     def test_raises_on_inverted_lengths(self):
         with pytest.raises(ValueError):
             extract_subseqs("ACGT" * 1000, n=10, min_len=200, max_len=100)
+
+    def test_raises_on_nonpositive_min_len(self):
+        with pytest.raises(ValueError):
+            extract_subseqs("ACGT" * 1000, n=10, min_len=0, max_len=100)
 
     def test_sequence_shorter_than_min_len_returns_empty(self):
         result = extract_subseqs("ACGT", n=5, min_len=100, max_len=200)

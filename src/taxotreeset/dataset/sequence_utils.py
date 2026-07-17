@@ -54,7 +54,7 @@ Typical usage::
 References:
     IUPAC nucleotide ambiguity codes: Cornish-Bowden, A. (1985).
     Nucleic Acids Research, 13(9), 3021-3030.
-    https://doi.org/10.1021/bi00822a023
+    https://doi.org/10.1093/nar/13.9.3021
 """
 
 import bisect
@@ -163,7 +163,8 @@ def extract_subseqs(
         scenario when diversity is exhausted.
 
     Raises:
-        ValueError: If n is non-positive or min_len exceeds max_len.
+        ValueError: If n is non-positive, min_len is non-positive, or
+            min_len exceeds max_len.
 
     Example:
         >>> import random
@@ -238,6 +239,8 @@ def _validate_extraction_parameters(n: int, min_len: int, max_len: int) -> None:
     """
     if n <= 0:
         raise ValueError(f"n must be positive (got {n})")
+    if min_len <= 0:
+        raise ValueError(f"min_len must be positive (got {min_len})")
     if min_len > max_len:
         raise ValueError(f"min_len must be <= max_len (got {min_len} > {max_len})")
 
