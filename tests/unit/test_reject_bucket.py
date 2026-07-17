@@ -114,6 +114,20 @@ class TestSampleRejectLeaves:
         assert far == []              # all external are near-clade (under root)
         assert all(leaf.header_id.startswith("o") for leaf in near)  # never own h1
 
+    def test_populates_root_leaf_cache(self):
+        t = _build_tree()
+        sample_reject_leaves(t["p1"])
+        cached = getattr(t["root"], "_reject_seq_leaves_cache", None)
+        assert cached is not None
+        assert {leaf.header_id for leaf in cached} == {"x1", "x2", "y1", "z1"}
+
+    def test_uses_cached_root_leaves(self):
+        # Poison the cache with an empty list: sample_reject_leaves must consult
+        # it (returning no externals) rather than re-scanning root.leaves.
+        t = _build_tree()
+        t["root"]._reject_seq_leaves_cache = []
+        assert sample_reject_leaves(t["p1"]) == ([], [])
+
 
 # ---------------------------------------------------------------------------
 # build_reject_tasks (budget split; allocation itself is covered elsewhere)

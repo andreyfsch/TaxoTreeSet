@@ -131,10 +131,19 @@ def sample_reject_leaves(
     """
     rng = rng if rng is not None else random.Random(0)
     own_leaves = set(current_node.leaves)
-    all_seq_leaves = [
-        leaf for leaf in current_node.root.leaves
-        if getattr(leaf, "rank", "") == _SEQUENCE_RANK
-    ]
+    # The tree's sequence-leaf set is invariant during scheduling — bucketing only
+    # re-parents subtrees within the tree and reject nodes are detached, so no
+    # sequence leaf is added or removed. Cache the list on the root: recomputing
+    # root.leaves (a whole-tree DFS) for every head would make the per-node binary
+    # path O(nodes x tree_size).
+    root = current_node.root
+    all_seq_leaves = getattr(root, "_reject_seq_leaves_cache", None)
+    if all_seq_leaves is None:
+        all_seq_leaves = [
+            leaf for leaf in root.leaves
+            if getattr(leaf, "rank", "") == _SEQUENCE_RANK
+        ]
+        root._reject_seq_leaves_cache = all_seq_leaves
     external = [leaf for leaf in all_seq_leaves if leaf not in own_leaves]
     if not external:
         return [], []
@@ -142,10 +151,16 @@ def sample_reject_leaves(
     near: list = []
     ancestor = current_node.parent
     while ancestor is not None:
-        candidate = [
-            leaf for leaf in ancestor.leaves
-            if getattr(leaf, "rank", "") == _SEQUENCE_RANK and leaf not in own_leaves
-        ]
+        if ancestor is root:
+            # The root's external seq leaves are exactly `external` (already
+            # computed) — reuse it rather than re-scanning the whole tree.
+            candidate = external
+        else:
+            candidate = [
+                leaf for leaf in ancestor.leaves
+                if getattr(leaf, "rank", "") == _SEQUENCE_RANK
+                and leaf not in own_leaves
+            ]
         if candidate:
             near = candidate
             break
