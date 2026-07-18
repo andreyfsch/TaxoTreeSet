@@ -256,6 +256,77 @@ run) over the P7-Part-B `_vault_fixture`.
 
 ---
 
+## 🟠 P9 — Multi-root scope + plasmid datasets (host-taxonomy, tool-free)
+
+**Goal.** Parametrize several scopes as roots (e.g. `--root Viruses,Plasmids`) and,
+specifically, let TaxoTreeSet build datasets for **plasmid recognition in isolation,
+without downloading Bacteria as a whole**.
+
+**Why it isn't covered.** `--root` resolves to one TaxID and walks that taxonomic
+subtree. "Plasmids" is **not a taxon** — there is no NCBI TaxID that roots all
+plasmids; each plasmid record is taxonomically assigned to its **host** organism. So
+a plasmid scope needs a different acquisition path and a non-taxonomic (or
+host-taxonomic) labeling. There is also no 100%-viral or plasmid-only benchmark in
+CAMI — CAMI datasets are mixed metagenomes by environment, with viruses and plasmids
+bundled as a minority ("plasmids and viruses" / "circular elements"), which is why a
+purpose-built viral/plasmid generator is needed rather than reusing a CAMI track.
+
+**Architecture (decided).** The binary belongs/not-belongs methodology already gives
+this for free: `--root all` + `--binary-only` is exactly "empty virtual root → each
+top-level child is a binary head (positive = its subtree, not-belongs = out-of-subtree
+near/far windows)". So:
+- **Empty root** with top-level children `{Viruses, Plasmids}` — two otherwise-isolated
+  subtrees joined only by the empty root.
+- **"Virus vs not-virus"** = the Viruses node's binary head (its not-belongs already
+  includes plasmid windows, being outside the viral subtree); **"plasmid vs
+  not-plasmid"** = the Plasmids node's binary head. No special virus-vs-plasmid
+  discriminator is needed.
+- Cross-domain reject negatives at shallow heads only **if leakage is observed** later
+  (deferred; ties to P4's domain gate). The field's canonical plasmid negative is
+  *chromosome*, not virus — if real metagenomic plasmid detection becomes a target,
+  chromosome negatives enter here (P4).
+
+**Plasmid-branch labeling (decided): host taxonomy — tool-free (v1).** Every RefSeq
+plasmid record already carries its host organism's TaxID, and the existing lineage
+machinery (taxoniq → lineage, with the NCBI fallback) turns that into a tree, built by
+the **same cascade code**. Only the hosts that *have* plasmids are materialized (a
+sparse subset), so "without Bacteria as a whole" holds — no full-kingdom crawl. Task
+framing: this is **host prediction** for plasmids (place a plasmid in its host's tree),
+not intrinsic plasmid typing.
+
+Rejected/deferred alternatives (the field's plasmid schemes all need a reference/tool):
+- Recognition (plasmid vs chromosome) is binary k-mer/ML (PlasClass, PlasFlow, Platon,
+  Deeplasmid, …) — matches our method but is the *root binary head*, not a branch label.
+- Intrinsic typing — replicon/Inc (PlasmidFinder), MOB (MOB-suite, MOBFinder [LM-based]),
+  or **PTU (COPLA)** — is the real "plasmid taxonomy" but each is defined by its
+  reference DB. **Future upgrade (option 2):** ingest a **precomputed** PTU/replicon
+  table (PLSDB/COPLA publish assignments) as a static data input (like `mapping.json`),
+  giving intrinsic typing with **no runtime tool dependency**. Reference-free de-novo
+  k-mer clustering (mge-cluster style) is a last resort — self-contained but produces
+  uninterpretable cluster labels + new ML.
+
+**New architectural pieces (the actual work).**
+1. **Multi-root plumbing** — `--root` accepts a list; the empty-root forest schedules
+   each top-level child. Small (generalizes the existing `all` empty-root path).
+2. **Plasmid acquisition** — pull from the RefSeq `plasmid` division (a curated plasmid
+   collection) directly, reusing the P3 `--exclude-plasmids` molecule detector to
+   *select* plasmids at ingestion. No full-Bacteria download.
+3. **Accession-set-driven discovery entry point** — plasmids have no root taxon to walk
+   top-down, so discovery starts from the plasmid **accession set** (bottom-up: resolve
+   each record's host lineage, assemble the host subtree). Reuses lineage resolution +
+   the cascade; the new part is the entry point, not the tree/head logic.
+
+**Effort.** Moderate. Multi-root is small; the plasmid path (RefSeq plasmid acquisition
++ accession-driven discovery) is the bulk; host-lineage labeling reuses existing code.
+
+Files: `cli/generate.py` (`--root` list), `core/orchestrator.py` (accession-set-driven
+discovery entry), `taxonomy.py` (resolve multiple roots), `io/downloader.py` (RefSeq
+plasmid acquisition; reuse `_is_excluded_molecule`), `core/generation_orchestrator.py`
+(empty-root forest / multi-scope scheduling). Related: P3 (plasmid detection primitive),
+P4 (cross-domain negatives), the `--binary-only` machinery.
+
+---
+
 ## Cross-repo — PhyloCascadeGLM
 
 Inference/evaluation items live in the PhyloCascadeGLM repo's own `docs/BACKLOG.md`.
