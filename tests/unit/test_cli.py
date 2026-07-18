@@ -54,6 +54,14 @@ class TestBuildParser:
             main([])
         assert exc_info.value.code == 1
 
+    def test_single_level_and_stop_at_are_mutually_exclusive(self):
+        # The help promises the two cannot be combined; argparse rejects the
+        # combination up front (exit 2) instead of a deep run_pipeline ValueError.
+        parser = build_parser()
+        with pytest.raises(SystemExit) as exc_info:
+            parser.parse_args(["generate", "--single-level", "--stop-at", "genus"])
+        assert exc_info.value.code == 2
+
     def test_main_dispatches_to_discover_run(self, tmp_path):
         mapping = tmp_path / "mapping.json"
         mapping.write_text(json.dumps({"scopes": {}}), encoding="utf-8")
@@ -298,6 +306,33 @@ class TestGenerateRun:
         ):
             generate.run(args)
         assert exc_info.value.code == 1
+
+    def test_nonpositive_min_subseq_len_exits(self, tmp_path):
+        # Fail fast before the sync/capacity passes rather than crashing deep in
+        # extraction (where _validate_extraction_parameters would raise).
+        args = self._make_args(tmp_path)
+        args.min_subseq_len = 0
+        with (
+            patch("taxotreeset.cli.generate.setup_logging"),
+            patch("taxotreeset.cli.generate.GenerationOrchestrator") as mock_orch,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            generate.run(args)
+        assert exc_info.value.code == 1
+        mock_orch.assert_not_called()  # exits before building the pipeline
+
+    def test_max_subseq_len_below_min_exits(self, tmp_path):
+        args = self._make_args(tmp_path)
+        args.min_subseq_len = 200
+        args.max_subseq_len = 100
+        with (
+            patch("taxotreeset.cli.generate.setup_logging"),
+            patch("taxotreeset.cli.generate.GenerationOrchestrator") as mock_orch,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            generate.run(args)
+        assert exc_info.value.code == 1
+        mock_orch.assert_not_called()
 
     def test_exception_in_pipeline_causes_sys_exit(self, tmp_path):
         args = self._make_args(tmp_path)

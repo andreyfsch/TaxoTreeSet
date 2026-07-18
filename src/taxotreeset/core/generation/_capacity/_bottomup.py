@@ -142,6 +142,7 @@ class _BottomUpCapacityComputer:
 
         if n_workers is None:
             n_workers = max(1, (os.cpu_count() or 1) - 1)
+        n_workers = max(1, n_workers)
         if n_gpu_workers is None:
             n_gpu_workers = _detect_cuda_device_count()
         n_gpu_workers = max(0, n_gpu_workers)

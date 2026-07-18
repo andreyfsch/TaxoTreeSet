@@ -73,20 +73,22 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "a domain shortcut (viruses, bacteria, archaea, eukaryotes), a "
         "numeric NCBI TaxID, or a clade scientific name (e.g. Caudoviricetes).",
     )
-    parser.add_argument(
+    depth_group = parser.add_mutually_exclusive_group()
+    depth_group.add_argument(
         "--stop-at",
         type=str,
         default=None,
         help="Canonical rank where the cascade stops creating heads "
         "(species, genus, family, order, class, phylum, kingdom, "
         "superkingdom). Nodes deeper than this become training labels "
-        "but not heads of their own. Defaults to the deepest rank.",
+        "but not heads of their own. Defaults to the deepest rank. "
+        "Mutually exclusive with --single-level.",
     )
-    parser.add_argument(
+    depth_group.add_argument(
         "--single-level",
         action="store_true",
         help="Generate only the root's head: its direct children become "
-        "training labels with no further recursion. Cannot be combined "
+        "training labels with no further recursion. Mutually exclusive "
         "with --stop-at.",
     )
     parser.add_argument(
@@ -298,6 +300,22 @@ def run(args: argparse.Namespace) -> None:
         level=getattr(logging, args.log_level),
     )
     logger = logging.getLogger("TaxoTreeSet.Generation.CLI")
+
+    # Validate the window bounds up front: they drive capacity, n-distribution,
+    # and extraction, so an invalid pair would otherwise only surface deep in the
+    # extraction stage — after the sync and capacity passes have already run.
+    if args.min_subseq_len <= 0:
+        logger.error(
+            "--min-subseq-len must be positive (got %d).", args.min_subseq_len
+        )
+        sys.exit(1)
+    if args.max_subseq_len < args.min_subseq_len:
+        logger.error(
+            "--max-subseq-len (%d) must be >= --min-subseq-len (%d).",
+            args.max_subseq_len,
+            args.min_subseq_len,
+        )
+        sys.exit(1)
 
     if not os.path.exists(args.registry) and args.no_sync:
         logger.error(

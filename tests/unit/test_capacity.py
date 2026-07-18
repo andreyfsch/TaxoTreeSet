@@ -27,6 +27,7 @@ from taxotreeset.core.generation.capacity import (
     _consume_sequence_into_bloom_vectorized,
     compute_all_capacities,
     compute_node_capacity,
+    _BottomUpCapacityComputer,
 )
 
 
@@ -224,6 +225,30 @@ class TestResolveBottomUpThreshold:
                 sys.modules["psutil"] = original
 
         assert large_result > small_result
+
+
+class TestBottomUpWorkerClamp:
+    """n_workers is normalized to >= 1, symmetric with the n_gpu_workers clamp,
+    so an explicit --workers 0 / negative can't yield a nonsensical worker count
+    (a negative cpu_workers log line or an under-counted GPU pool)."""
+
+    def test_zero_n_workers_clamped_to_one(self):
+        computer = _BottomUpCapacityComputer(
+            min_len=100, spill_dir=None, n_workers=0, n_gpu_workers=0
+        )
+        assert computer.n_workers == 1
+
+    def test_negative_n_workers_clamped_to_one(self):
+        computer = _BottomUpCapacityComputer(
+            min_len=100, spill_dir=None, n_workers=-4, n_gpu_workers=0
+        )
+        assert computer.n_workers == 1
+
+    def test_positive_n_workers_preserved(self):
+        computer = _BottomUpCapacityComputer(
+            min_len=100, spill_dir=None, n_workers=3, n_gpu_workers=0
+        )
+        assert computer.n_workers == 3
 
 
 # ─────────────────────────────────────────────────────────────────────────────
