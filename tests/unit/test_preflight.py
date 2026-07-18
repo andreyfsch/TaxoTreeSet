@@ -154,6 +154,14 @@ class TestFreeBytes:
             result = _free_bytes(str(tmp_path))
         assert result == sys.maxsize
 
+    def test_relative_path_is_resolved_and_checked(self, tmp_path, monkeypatch):
+        # A relative path (e.g. the default --output "taxotreeset-datasets") must
+        # resolve against cwd and get a real free-space reading, not be skipped
+        # as sys.maxsize by walking dirname up to "".
+        monkeypatch.chdir(tmp_path)
+        result = _free_bytes("taxotreeset-datasets")  # relative, does not exist
+        assert 0 < result < sys.maxsize
+
 
 # ---------------------------------------------------------------------------
 # run_preflight — no failures, short run (no prompt)

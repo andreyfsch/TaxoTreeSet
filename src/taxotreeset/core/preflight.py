@@ -74,11 +74,14 @@ def _n_accessions(registry: "NCBIRegistry") -> int:
 def _free_bytes(path: str) -> int:
     """Return free bytes on the filesystem containing path.
 
+    The path is resolved to absolute first (against the cwd) so a relative
+    path — e.g. the default ``--output taxotreeset-datasets`` — resolves to a
+    real filesystem instead of walking up to ``""`` and skipping the check.
     Walks up to the first existing ancestor when path does not yet exist.
     Returns a large sentinel (sys.maxsize) if the check is not possible so
     that a missing path does not cause a false disk-space failure.
     """
-    check = path
+    check = os.path.abspath(path)
     while check and not os.path.exists(check):
         parent = os.path.dirname(check)
         if parent == check:
@@ -248,6 +251,10 @@ def run_preflight(
     disk_checks.append(("Output", output_dir, output_need,
                          _free_bytes(output_dir)))
 
+    # Each path is checked against its own free space independently. When vault,
+    # spill, and output share one filesystem the combined footprint could still
+    # overflow it while every individual check passes; this advisory estimate does
+    # not sum needs per device.
     failures = [(lbl, path, need, free)
                 for lbl, path, need, free in disk_checks
                 if free < need]
