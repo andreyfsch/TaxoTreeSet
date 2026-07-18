@@ -9,7 +9,6 @@ import pytest
 
 from taxotreeset.dataset import utils as utils_module
 from taxotreeset.dataset.utils import (
-    _get_fasta_sequence_length,
     _get_lmdb_env,
     _pool_worker_initializer,
     _read_single_sequence,
@@ -93,6 +92,13 @@ class TestGetLmdbEnv:
         with pytest.raises(FileNotFoundError):
             _get_lmdb_env(str(tmp_path / "nonexistent.lmdb"))
 
+    def test_raises_lmdb_error_for_existing_but_invalid_dir(self, tmp_path):
+        # Directory exists but holds no valid LMDB data (no data.mdb).
+        broken_dir = tmp_path / "broken.lmdb"
+        broken_dir.mkdir()
+        with pytest.raises(lmdb.Error):
+            _get_lmdb_env(str(broken_dir))
+
     def test_pid_change_clears_cache_and_reopens(self, tmp_path):
         lmdb_path = _make_lmdb(tmp_path, {"key": "value"})
         _get_lmdb_env(lmdb_path)
@@ -168,21 +174,10 @@ class TestReadSingleSequence:
         result = _read_single_sequence(str(lmdb_dir), "NC_BAD")
         assert result == ""
 
-
-# ---------------------------------------------------------------------------
-# _get_fasta_sequence_length
-# ---------------------------------------------------------------------------
-
-
-class TestGetFastaSequenceLength:
-    def test_returns_exact_length(self, tmp_path):
-        seq = "ACGT" * 50  # 200 bp
-        lmdb_path = _make_lmdb(tmp_path, {"NC_001": seq})
-        assert _get_fasta_sequence_length(lmdb_path, "NC_001") == 200
-
-    def test_returns_zero_for_missing_key(self, tmp_path):
-        lmdb_path = _make_lmdb(tmp_path, {})
-        assert _get_fasta_sequence_length(lmdb_path, "MISSING") == 0
-
-    def test_returns_zero_for_nonexistent_path(self):
-        assert _get_fasta_sequence_length("/no/such/path.lmdb", "NC_001") == 0
+    def test_returns_empty_when_vault_dir_is_not_a_valid_lmdb(self, tmp_path):
+        # An existing directory with no data.mdb (e.g. a partially-written vault
+        # after a crash) makes lmdb.open raise lmdb.Error; the read must degrade
+        # to "" per the contract instead of crashing the worker.
+        broken_dir = tmp_path / "broken.lmdb"
+        broken_dir.mkdir()
+        assert _read_single_sequence(str(broken_dir), "NC_001") == ""

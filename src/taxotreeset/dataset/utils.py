@@ -96,6 +96,9 @@ def _get_lmdb_env(lmdb_path: str) -> lmdb.Environment:
     Raises:
         FileNotFoundError: If the LMDB directory does not exist at the
             given path.
+        lmdb.Error: If the directory exists but cannot be opened as a
+            valid LMDB environment (e.g. a corrupt or partially-written
+            vault left behind by an interrupted download).
     """
     global _LMDB_ENV_CACHE, _LMDB_CACHE_PID
     current_pid = os.getpid()
@@ -115,13 +118,17 @@ def _get_lmdb_env(lmdb_path: str) -> lmdb.Environment:
             if not os.path.exists(lmdb_path):
                 logger.error(f"LMDB vault path does not exist: {lmdb_path}")
                 raise FileNotFoundError(lmdb_path)
-            env = lmdb.open(
-                lmdb_path,
-                readonly=True,
-                lock=False,
-                max_dbs=0,
-                readahead=False,
-            )
+            try:
+                env = lmdb.open(
+                    lmdb_path,
+                    readonly=True,
+                    lock=False,
+                    max_dbs=0,
+                    readahead=False,
+                )
+            except lmdb.Error:
+                logger.error(f"Failed to open LMDB vault at {lmdb_path}")
+                raise
             logger.debug(f"[LMDB-OPEN] PID={current_pid} path={lmdb_path}")
             _LMDB_ENV_CACHE[lmdb_path] = env
 
@@ -150,7 +157,11 @@ def _read_single_sequence(lmdb_path: str, header_id: str) -> str:
     """
     try:
         env = _get_lmdb_env(lmdb_path)
-    except FileNotFoundError:
+    except (FileNotFoundError, lmdb.Error):
+        # Missing vault dir (FileNotFoundError) or an unopenable/corrupt vault
+        # (lmdb.Error, e.g. a partially-written env after a crash): honor the
+        # "return empty on any failure" contract instead of crashing every worker.
+        # _get_lmdb_env already logged the specific cause.
         return ""
 
     try:
@@ -174,27 +185,3 @@ def _read_single_sequence(lmdb_path: str, header_id: str) -> str:
     except (zlib.error, UnicodeDecodeError) as exc:
         logger.error(f"Failed to decompress '{header_id}': {exc}")
         return ""
-
-
-def _get_fasta_sequence_length(lmdb_path: str, header_id: str) -> int:
-    """Return the length in base pairs of a sequence stored in the vault.
-
-    Equivalent to ``len(_read_single_sequence(lmdb_path, header_id))``
-    but expresses the intent more clearly at call sites where only the
-    length is needed for capacity computations.
-
-    Note that this still incurs the full decompression cost because
-    zlib does not expose the uncompressed length without inflating the
-    stream. For workloads that read the length many times for the same
-    sequence, callers should cache the result.
-
-    Args:
-        lmdb_path: Filesystem path to the LMDB vault directory.
-        header_id: Sequence header identifier used as the LMDB key.
-
-    Returns:
-        Length of the decompressed sequence in characters, or 0 if the
-        sequence could not be read.
-    """
-    sequence = _read_single_sequence(lmdb_path, header_id)
-    return len(sequence)
