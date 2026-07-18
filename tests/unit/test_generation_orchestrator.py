@@ -703,3 +703,96 @@ class TestWriteLabelMapsCollision:
             0: label_map["id2label"]["0"],
             1: label_map["id2label"]["1"],
         }
+
+
+# ---------------------------------------------------------------------------
+# Multi-root scope resolution + empty-root forest (P9 fatia 1)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveScopeTaxids:
+    def test_single_shortcut(self, orchestrator):
+        assert orchestrator._resolve_scope_taxids("viruses") == frozenset({"10239"})
+
+    def test_all_returns_none(self, orchestrator):
+        assert orchestrator._resolve_scope_taxids("all") is None
+
+    def test_multiple_shortcuts(self, orchestrator):
+        assert orchestrator._resolve_scope_taxids("viruses,archaea") == frozenset(
+            {"10239", "2157"}
+        )
+
+    def test_numeric_taxids(self, orchestrator):
+        assert orchestrator._resolve_scope_taxids("10239,2157") == frozenset(
+            {"10239", "2157"}
+        )
+
+    def test_whitespace_stripped_and_deduped(self, orchestrator):
+        assert orchestrator._resolve_scope_taxids(" viruses , viruses ") == frozenset(
+            {"10239"}
+        )
+
+    def test_all_combined_with_others_raises(self, orchestrator):
+        with pytest.raises(ValueError, match="cannot be combined"):
+            orchestrator._resolve_scope_taxids("all,viruses")
+
+    def test_empty_raises(self, orchestrator):
+        with pytest.raises(ValueError):
+            orchestrator._resolve_scope_taxids("  ,  ")
+
+
+class TestScopeAnchor:
+    def test_none_scope_anchors_at_empty_root(self):
+        assert GenerationOrchestrator._scope_anchor(None) is None
+
+    def test_single_domain_anchors_at_its_node(self):
+        assert GenerationOrchestrator._scope_anchor(frozenset({"10239"})) == "10239"
+
+    def test_multi_domain_anchors_at_empty_root(self):
+        assert GenerationOrchestrator._scope_anchor(frozenset({"10239", "2157"})) is None
+
+
+class TestBuildTargetTreeForest:
+    @staticmethod
+    def _fake_tree(taxid):
+        root = Node("root", rank="root")
+        Node(str(taxid), parent=root, rank="superkingdom")
+        return root
+
+    def test_single_str_builds_one_tree(self, orchestrator):
+        with patch(
+            "taxotreeset.core.generation_orchestrator.generate_seqs_by_taxon_tree"
+        ) as mock_gen:
+            mock_gen.side_effect = lambda **kw: self._fake_tree(kw["domain_taxid"])
+            tree = orchestrator._build_target_tree("10239")
+        assert mock_gen.call_count == 1
+        assert [c.name for c in tree.children] == ["10239"]
+
+    def test_single_element_set_builds_one_tree(self, orchestrator):
+        with patch(
+            "taxotreeset.core.generation_orchestrator.generate_seqs_by_taxon_tree"
+        ) as mock_gen:
+            mock_gen.side_effect = lambda **kw: self._fake_tree(kw["domain_taxid"])
+            orchestrator._build_target_tree(frozenset({"10239"}))
+        assert mock_gen.call_count == 1
+
+    def test_multi_root_merges_domains_under_empty_root(self, orchestrator):
+        with patch(
+            "taxotreeset.core.generation_orchestrator.generate_seqs_by_taxon_tree"
+        ) as mock_gen:
+            mock_gen.side_effect = lambda **kw: self._fake_tree(kw["domain_taxid"])
+            tree = orchestrator._build_target_tree(frozenset({"10239", "2157"}))
+        assert mock_gen.call_count == 2
+        assert tree.rank == "root"
+        # both domains become top-level children of the one empty root
+        assert sorted(c.name for c in tree.children) == ["10239", "2157"]
+
+    def test_multi_root_skips_failed_domain_builds(self, orchestrator):
+        def _gen(**kw):
+            return None if kw["domain_taxid"] == "2157" else self._fake_tree(kw["domain_taxid"])
+        with patch(
+            "taxotreeset.core.generation_orchestrator.generate_seqs_by_taxon_tree",
+            side_effect=_gen,
+        ):
+            tree = orchestrator._build_target_tree(frozenset({"10239", "2157"}))
+        assert [c.name for c in tree.children] == ["10239"]

@@ -321,8 +321,18 @@ Rejected/deferred alternatives (the field's plasmid schemes all need a reference
   uninterpretable cluster labels + new ML.
 
 **New architectural pieces (the actual work).**
-1. **Multi-root plumbing** — `--root` accepts a list; the empty-root forest schedules
-   each top-level child. Small (generalizes the existing `all` empty-root path).
+1. **Multi-root plumbing — DONE (2026-07-18).** `--root` accepts a comma-separated
+   list. `_resolve_scope_taxids` resolves it to a frozenset of TaxIDs (or None for
+   `all`, which can't be combined); `_scope_anchor` keeps a one-domain scope anchored
+   at its node (unchanged) while `all`/multi anchor at the empty root. `_build_target_tree`
+   builds several domains by calling the **unchanged** per-domain tree builder once each
+   (own scope config / anchoring / redirections) and grafting their anchors under one
+   empty `root` — the scheduler reuses its empty-root (`None`) path untouched, and
+   `tree_builder.py` is not modified. Sync discovers each requested domain. Tests:
+   14 in `test_generation_orchestrator.py` (resolution, anchor, forest merge); the
+   single-root path is exercised end-to-end by the synthetic-pipeline integration test.
+   NOTE this needs REAL taxa on both sides — `--root Viruses,Plasmids` still awaits the
+   plasmid acquisition (pieces 2-3 below), since "Plasmids" has no TaxID yet.
 2. **Plasmid acquisition** — pull from the RefSeq `plasmid` division (a curated plasmid
    collection) directly, reusing the P3 `--exclude-plasmids` molecule detector to
    *select* plasmids at ingestion. No full-Bacteria download.

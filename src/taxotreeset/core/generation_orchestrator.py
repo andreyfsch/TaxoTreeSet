@@ -423,7 +423,10 @@ class GenerationOrchestrator:
             ui_logger.info("Syncing registry and vault with NCBI.")
             self._sync_with_ncbi(target_group)
 
-        domain_taxid = self._resolve_root_taxid(target_group)
+        scope_taxids = self._resolve_scope_taxids(target_group)
+        # A single domain anchors scheduling at its node (unchanged); the whole
+        # registry (None) and multi-root scopes anchor at the empty root.
+        domain_taxid = self._scope_anchor(scope_taxids)
         tree_root: Node | None = None
 
         for round_num in range(_MAX_REFINEMENT_ROUNDS + 1):
@@ -451,7 +454,7 @@ class GenerationOrchestrator:
             # Stage 2 — tree build
             ui_logger.info(f"Stage 2/4: Building taxonomic tree{suffix}.")
             t2 = time.monotonic()
-            tree_root = self._build_target_tree(domain_taxid)
+            tree_root = self._build_target_tree(scope_taxids)
 
             if tree_root is None or not tree_root.children:
                 if sync:
@@ -570,15 +573,84 @@ class GenerationOrchestrator:
         if target_root in _DOMAIN_GROUP_TO_TAXID:
             return _DOMAIN_GROUP_TO_TAXID[target_root]
         return resolve_to_taxid(target_root)
-    def _build_target_tree(self, domain_taxid: str | None) -> Node | None:
-        """Construct the taxonomic tree anchored at the domain TaxID.
+
+    def _resolve_scope_taxids(self, target_root: str) -> frozenset[str] | None:
+        """Resolve a possibly comma-separated ``--root`` into domain TaxIDs.
+
+        A single token behaves exactly as before. ``"all"`` (which cannot be
+        combined with other roots) resolves to ``None`` — the whole registry, no
+        anchor. Several tokens (e.g. ``--root Viruses,Bacteria``) resolve to the
+        set of their TaxIDs, which builds an empty-root forest with each as a
+        top-level subtree.
 
         Args:
-            domain_taxid: NCBI TaxID of the root domain.
+            target_root: One root, or a comma-separated list of roots (each a
+                domain shortcut, numeric TaxID, or clade name).
+
+        Returns:
+            ``None`` for ``"all"``, else a frozenset of resolved TaxID strings.
+
+        Raises:
+            ValueError: If ``--root`` is empty or mixes ``"all"`` with others.
+        """
+        tokens = [t.strip() for t in target_root.split(",") if t.strip()]
+        if not tokens:
+            raise ValueError("--root resolved to no scopes.")
+        if any(t == _ALL_DOMAINS for t in tokens):
+            if len(tokens) > 1:
+                raise ValueError(
+                    f"'{_ALL_DOMAINS}' cannot be combined with other roots."
+                )
+            return None
+        return frozenset(self._resolve_root_taxid(t) for t in tokens)
+
+    @staticmethod
+    def _scope_anchor(scope_taxids: frozenset[str] | None) -> str | None:
+        """Return the single scheduling anchor, or None for the empty-root forest.
+
+        A one-domain scope anchors scheduling at that domain node (unchanged
+        behaviour); the whole-registry (None) and multi-root scopes anchor at the
+        empty root and schedule over its top-level children.
+        """
+        if scope_taxids is not None and len(scope_taxids) == 1:
+            return next(iter(scope_taxids))
+        return None
+
+    def _build_target_tree(
+        self, scope: str | frozenset[str] | None
+    ) -> Node | None:
+        """Construct the taxonomic tree for one or several domain scopes.
+
+        A single TaxID (str), ``None`` (whole registry), or a one-element set
+        builds one tree exactly as before. A set of several TaxIDs builds each
+        domain's tree independently — each with its own scope config, lineage
+        anchoring, and redirections — and grafts their domain anchors under one
+        empty ``root``, forming the multi-root forest the empty-root scheduling
+        path then walks.
+
+        Args:
+            scope: A single domain TaxID, ``None`` for the whole registry, or a
+                frozenset of TaxIDs for a multi-root forest.
 
         Returns:
             The constructed tree root, or None on construction failure.
         """
+        if scope is None or isinstance(scope, str):
+            return self._generate_domain_tree(scope)
+        taxids = sorted(scope)
+        if len(taxids) <= 1:
+            return self._generate_domain_tree(taxids[0] if taxids else None)
+        combined = Node("root", rank="root")
+        for taxid in taxids:
+            sub = self._generate_domain_tree(taxid)
+            if sub is None:
+                continue
+            for child in list(sub.children):
+                child.parent = combined
+        return combined
+
+    def _generate_domain_tree(self, domain_taxid: str | None) -> Node | None:
+        """Build a single domain's tree (thin wrapper over the tree builder)."""
         return generate_seqs_by_taxon_tree(
             registry_path=self.registry.registry_path,
             vault_path=self.vault_path,

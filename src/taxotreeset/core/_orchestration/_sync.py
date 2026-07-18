@@ -60,7 +60,7 @@ class _SyncManager:
         Args:
             target_group: Domain identifier to synchronize.
         """
-        domain_taxid = self.ctx._resolve_root_taxid(target_group)
+        scope_taxids = self.ctx._resolve_scope_taxids(target_group)
         with open(self.ctx.config_path, encoding="utf-8") as handle:
             mapping_config = json.load(handle)
         discovery = DiscoveryOrchestrator(
@@ -68,17 +68,22 @@ class _SyncManager:
             mapping_config=mapping_config,
             all_ranks=self.ctx.all_ranks,
         )
-        if domain_taxid is None:
+        if scope_taxids is None:
             # "all": re-discover every domain already present in the registry,
             # so a single-domain registry is not surprised by an unrelated
             # full-domain crawl. Falls back to all four when empty.
             for dom_taxid in self._domains_to_sync():
                 discovery.discover_from_root(int(dom_taxid))
         else:
-            discovery.discover_from_root(int(domain_taxid))
+            # One or several explicit roots: discover each requested domain.
+            for dom_taxid in sorted(scope_taxids):
+                discovery.discover_from_root(int(dom_taxid))
         self._reconcile_vault_against_registry()
 
-        pending_volume = self.ctx.registry.get_pending_volume(domain_taxid)
+        # Selective download is scoped to the single-domain anchor; the whole
+        # registry (None) covers the "all" and multi-root cases.
+        anchor = self.ctx._scope_anchor(scope_taxids)
+        pending_volume = self.ctx.registry.get_pending_volume(anchor)
         gib = pending_volume / 1024 ** 3
         threshold_gib = self.ctx.selective_download_threshold / 1024 ** 3
         if pending_volume >= self.ctx.selective_download_threshold:
@@ -87,7 +92,7 @@ class _SyncManager:
                 f"{threshold_gib:.1f} GiB threshold. "
                 "Running selective download selection pass."
             )
-            self._run_selective_download(domain_taxid)
+            self._run_selective_download(anchor)
         else:
             ui_logger.info(
                 f"Pending volume {gib:.1f} GiB is below the "

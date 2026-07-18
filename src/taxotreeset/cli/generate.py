@@ -71,7 +71,10 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         default="viruses",
         help="Root of the taxonomy to generate from: 'all' (every domain), "
         "a domain shortcut (viruses, bacteria, archaea, eukaryotes), a "
-        "numeric NCBI TaxID, or a clade scientific name (e.g. Caudoviricetes).",
+        "numeric NCBI TaxID, or a clade scientific name (e.g. Caudoviricetes). "
+        "Pass a comma-separated list (e.g. 'viruses,archaea') to build a "
+        "multi-root forest: each becomes a top-level subtree under one empty "
+        "root. 'all' cannot be combined with other roots.",
     )
     depth_group = parser.add_mutually_exclusive_group()
     depth_group.add_argument(
