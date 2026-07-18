@@ -83,7 +83,13 @@ def _resolve_name_via_ncbi(name: str) -> str | None:
             payload = json.loads(line)
         except json.JSONDecodeError:
             continue
-        taxonomy = payload.get("taxonomy", {})
+        if not isinstance(payload, dict):
+            continue
+        # A record may carry "taxonomy": null (or a non-object) rather than
+        # omitting the key; guard so a malformed line is skipped, not crashed on.
+        taxonomy = payload.get("taxonomy")
+        if not isinstance(taxonomy, dict):
+            continue
         taxid = taxonomy.get("tax_id")
         if taxid is not None:
             return str(taxid)

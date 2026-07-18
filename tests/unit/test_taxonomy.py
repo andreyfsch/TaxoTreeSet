@@ -143,6 +143,23 @@ class TestResolveNameViaNcbi:
             result = _resolve_name_via_ncbi("Foo")
         assert result is None
 
+    def test_returns_none_when_taxonomy_is_null(self):
+        # "taxonomy": null (present but null) must be skipped, not crash on
+        # None.get(...).
+        mock_result = MagicMock()
+        mock_result.stdout = '{"taxonomy": null}\n'
+        with patch("taxotreeset.taxonomy.subprocess.run", return_value=mock_result):
+            result = _resolve_name_via_ncbi("Foo")
+        assert result is None
+
+    def test_returns_none_when_line_is_not_an_object(self):
+        # A non-object JSON line (bare string/array/number) must be skipped.
+        mock_result = MagicMock()
+        mock_result.stdout = '"just a string"\n[1, 2, 3]\n42\n'
+        with patch("taxotreeset.taxonomy.subprocess.run", return_value=mock_result):
+            result = _resolve_name_via_ncbi("Foo")
+        assert result is None
+
     def test_returns_none_on_subprocess_calledprocesserror(self):
         import subprocess
 
