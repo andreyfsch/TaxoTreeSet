@@ -102,6 +102,15 @@ class TestEnrichLabelMap:
         after = json.loads((tmp_path / "label_map.json").read_text())
         assert after["kmer_separability"]["v"] == 2
 
+    def test_enrich_writes_atomically_no_tmp_left(self, tmp_path):
+        # The write goes through a temp sibling + os.replace; on success no
+        # label_map.json.tmp should remain and the result must be valid JSON.
+        head = _make_head(tmp_path)
+        separability.enrich_label_map(str(head), {"k": 4, "test_f1_macro": 0.7})
+        assert not (tmp_path / "label_map.json.tmp").exists()
+        after = json.loads((tmp_path / "label_map.json").read_text())
+        assert after["kmer_separability"]["test_f1_macro"] == 0.7
+
 
 class TestSurveyDataset:
     def test_survey_enriches_and_returns_rows(self, tmp_path):

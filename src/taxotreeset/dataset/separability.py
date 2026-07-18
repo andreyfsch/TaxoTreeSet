@@ -161,7 +161,9 @@ def enrich_label_map(head_dir: str, metric: dict[str, Any]) -> None:
     """Write the separability metric into a head's ``label_map.json`` in place.
 
     The existing content is preserved; only the ``kmer_separability`` key is
-    added or replaced.
+    added or replaced. The write is atomic (temp sibling + ``os.replace``) so an
+    interrupted run cannot truncate the authoritative label map that training and
+    inference depend on.
 
     Args:
         head_dir: Head directory containing ``label_map.json``.
@@ -171,8 +173,10 @@ def enrich_label_map(head_dir: str, metric: dict[str, Any]) -> None:
     with open(path, "r", encoding="utf-8") as fh:
         label_map = json.load(fh)
     label_map["kmer_separability"] = metric
-    with open(path, "w", encoding="utf-8") as fh:
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
         json.dump(label_map, fh, indent=2)
+    os.replace(tmp_path, path)
 
 
 def survey_dataset(
