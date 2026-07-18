@@ -208,9 +208,21 @@ approximate/Bloom capacity, GPU encoding, disk spill, checkpointing).
   `_bottomup` (668), `_keys` (476), `_bloom` (249), `_gpu` (245), `_spill` (200),
   `_diskdedup` (121), `_encoding` (102). Suite 921, ruff clean.
 
-**Still open (the other half of P7's title):** decompose `generation_orchestrator.py`
-(2507 lines, now the largest module — it grew with the binary-head work). Needs its
-own test groundwork first, the way Part B seeded capacity's behavioral net.
+- **Orchestrator half — done (2026-07-18).** Decomposed `generation_orchestrator.py`
+  **2553 → 819** into a private subpackage `core/_orchestration/` (mirrors
+  `_capacity/`), in 4 staged, suite-green, byte-identical commits: `_splits.py` (leaf
+  train/val/test split helpers — also dropped the dead `_prepare_stratified_split`
+  trio), `_manifest.py` (label-map / run-metadata / artifact writers via a `ctx`
+  handle), `_sync.py` (`_SyncManager` — Stage-1 sync / selective-download /
+  refinement), `_scheduler.py` (`_CascadeScheduler` + module-func tree helpers — the
+  recursive cascade). Same playbook as capacity: the orchestrator stays the public
+  face + patch/test anchor and keeps thin delegators for every private method the
+  tests call on the instance; extracted code reads config via `ctx=self`. The
+  behavioral net was the pre-existing `tests/integration/test_synthetic_pipeline.py`
+  (end-to-end `run_pipeline` → parquet + `label_map` contracts). Suite 957, ruff clean.
+
+**P7 DONE** — both `capacity.py` and `generation_orchestrator.py` decomposed; no
+`src/` module now exceeds ~920 lines.
 
 ## 🟢 P8 — Extraction parallelism (HoreKa)
 
