@@ -141,18 +141,33 @@ should be opt-in. Relevant for the HoreKa scenario (more tokens available).
 
 ---
 
-## 🟢 P6 — Audit length / compositional confound in virtual buckets
+## 🟢 P6 — Audit length / compositional confound in virtual buckets — DONE
 
 **Problem.** Virtual buckets aggregate taxonomically heterogeneous taxa, which
 may be separable for non-phylogenetic reasons. (The "sequence length as a
 shortcut" framing is weak — the model sees bounded windows, not whole-genome
 length; the real risk is *compositional* artifacts in the virtual classes.)
 
-**Approach.** Cheap diagnostic: audit the per-class length and composition
-distributions within a head, especially for virtual classes, and check they are
-comparable to the canonical classes.
+**Status (2026-07-18): implemented.** New `dataset/composition.py` + a
+`taxotreeset composition <dataset_dir>` subcommand (numpy-only, no sklearn).
+`audit_head` groups a split's rows by class and reports per-class length +
+nucleotide composition (mean/std GC, A/C/G/T fractions), then compares each
+**virtual** class (`rank` starts with `virtual_`) against the head's canonical
+classes: a GC **z-score** when there are >= 2 canonical classes, else a raw GC
+**gap** for binary / single-canonical heads. Virtual classes past the threshold
+(`|z| > 2` or `|gap| > 0.05`) are flagged as possible non-phylogenetic
+separators. `survey_dataset` walks all heads, writes a compact
+`composition_audit` summary into each `label_map.json` (atomic, like the
+separability diagnostic) and returns aggregate rows (`--csv` to export). Length
+is reported as a sanity check on the length-confound fix (windows drawn uniformly
+in [min_len, max_len] regardless of class → per-class lengths should match).
+Tests: `tests/unit/test_composition.py` (13). **Interpretation is still manual** —
+the tool surfaces flagged heads; deciding whether a flagged virtual class is a
+genuine confound is a human call.
 
-**Effort.** Low (analysis only).
+**Effort.** Low (analysis only) — done.
+
+Files: `dataset/composition.py`, `cli/composition.py`, `__main__.py`.
 
 ---
 

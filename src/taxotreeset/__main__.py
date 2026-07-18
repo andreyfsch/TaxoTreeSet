@@ -6,7 +6,7 @@ Builds the top-level argument parser with the ``discover`` and
 import argparse
 import sys
 
-from taxotreeset.cli import discover, generate, separability
+from taxotreeset.cli import composition, discover, generate, separability
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(
         dest="command",
-        metavar="{discover,generate,separability}",
+        metavar="{discover,generate,separability,composition}",
         help="Subcommand to run.",
     )
 
@@ -64,6 +64,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     separability.add_arguments(separability_parser)
     separability_parser.set_defaults(_run=separability.run)
+
+    composition_parser = subparsers.add_parser(
+        "composition",
+        parents=[common],
+        help="Audit per-head compositional confounds in virtual classes.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    composition.add_arguments(composition_parser)
+    composition_parser.set_defaults(_run=composition.run)
 
     return parser
 
