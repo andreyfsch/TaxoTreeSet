@@ -9,10 +9,21 @@ rely on. There is no orchestrator state here — every caller passes what it nee
 import random
 
 from taxotreeset.core._orchestration._cluster import cluster_genomes
+from taxotreeset.dataset.utils import _read_single_sequence
 
 _STRATIFIED_TRAIN_RATIO: float = 0.70
 _STRATIFIED_VAL_RATIO: float = 0.15
 _SPLITS: tuple[str, ...] = ("train", "val", "test")
+
+# Cluster-aware window-slicing (few-genome classes): a repeating block -> split
+# pattern (~5:1:1 = 71/14/14) that INTERLEAVES all three splits, so val/test
+# blocks sit among train blocks (representative) instead of the genome's ends.
+_WINDOW_SPLIT_PATTERN: tuple[str, ...] = (
+    "train", "train", "val", "train", "train", "test", "train",
+)
+# Need at least this many blocks (each >= max_subseq_len, so windows keep full
+# length) for the pattern to place every split; below it, keep the contiguous cut.
+_MIN_BLOCKS_FOR_STRATIFY: int = 6
 
 
 def _stratified_cuts(leaf_count: int) -> tuple[int, int]:
@@ -157,12 +168,79 @@ def _cluster_stratified_split(
     return None
 
 
+def _even_split(budget: int, n_blocks: int) -> list[int]:
+    """Split ``budget`` into ``n_blocks`` non-negative ints summing to it."""
+    base, remainder = divmod(budget, n_blocks)
+    return [base + (1 if i < remainder else 0) for i in range(n_blocks)]
+
+
+def _block_stratified_windows(
+    task: dict,
+    class_index: int,
+    max_subseq_len: int,
+    result: dict[str, list[dict]],
+) -> bool:
+    """Spread one genome's windows across interleaved positional blocks.
+
+    A single/few-genome class is window-sliced, and the contiguous cut
+    (train 0-70% / val 70-85% / test 85-100%) puts compositionally-distinct genome
+    regions in different splits — so val (a genome end) can diverge from train even
+    on the same genome. Here the genome is cut into ``L // max_subseq_len`` blocks
+    (each >= ``max_subseq_len`` so windows keep full length) and the blocks are
+    assigned by :data:`_WINDOW_SPLIT_PATTERN`, which INTERLEAVES the splits so
+    val/test blocks sit among train blocks (representative composition). Windows
+    stay confined to their block, so no cross-split window overlaps (leakage-safe).
+
+    Args:
+        task: One genome's per-leaf task (``fasta_path`` / ``header_id`` / ``n``).
+        class_index: Numeric label index.
+        max_subseq_len: Upper window length — also the minimum block size.
+        result: Splits dict to append to (mutated).
+
+    Returns:
+        True when it emitted a block-stratified split; False (do nothing) when the
+        genome is unreadable or too short to hold enough blocks — the caller then
+        keeps the contiguous window-slicing cut.
+    """
+    length = len(_read_single_sequence(task.get("fasta_path", ""),
+                                       task.get("header_id", "")))
+    if length <= 0 or max_subseq_len <= 0:
+        return False
+    n_blocks = length // max_subseq_len
+    if n_blocks < _MIN_BLOCKS_FOR_STRATIFY:
+        return False
+
+    blocks: dict[str, list[int]] = {split: [] for split in _SPLITS}
+    for i in range(n_blocks):
+        blocks[_WINDOW_SPLIT_PATTERN[i % len(_WINDOW_SPLIT_PATTERN)]].append(i)
+
+    n_train, n_val, n_test = _stratified_counts(task["n"])
+    budgets = {"train": n_train, "val": n_val, "test": n_test}
+    emitted = False
+    for split, block_indices in blocks.items():
+        budget = budgets[split]
+        if budget <= 0 or not block_indices:
+            continue
+        for idx, n_block in zip(block_indices, _even_split(budget, len(block_indices))):
+            if n_block <= 0:
+                continue
+            result[split].append(
+                _enrich_task(
+                    {**task, "n": n_block}, class_index, idx / n_blocks,
+                    (idx + 1) / n_blocks,
+                )
+            )
+            emitted = True
+    return emitted
+
+
 def _materialize_leaf_split(
     leaf_tasks: list[dict],
     class_index: int,
     rng: random.Random,
     min_genomes_for_genome_split: int = 3,
     cluster_aware: bool = False,
+    max_subseq_len: int = 2000,
 ) -> dict[str, list[dict]]:
     """Split a single child's per-leaf tasks into train/val/test.
 
@@ -179,11 +257,15 @@ def _materialize_leaf_split(
         rng: Random instance for deterministic shuffling.
         min_genomes_for_genome_split: Threshold below which to use the
             window-slicing fallback (default 3 = the multi-class behaviour).
-        cluster_aware: When True, the genome-level split first MinHash-clusters
-            the genomes and spreads each sub-lineage cluster across the splits
-            (so val/test stay representative of the head's diversity), falling
-            back to the random split when there is no structure or it would empty
-            a split. Off by default — the split is byte-identical to before.
+        cluster_aware: When True, make the split representative: the genome-level
+            path MinHash-clusters the genomes and spreads each sub-lineage across
+            the splits, and the window-slicing path (few-genome classes) spreads
+            each genome's windows across interleaved positional blocks instead of
+            contiguous 0-70/70-85/85-100 regions. Both fall back to the current
+            behaviour when there is no structure / the genome is too short. Off by
+            default — the split is byte-identical to before.
+        max_subseq_len: Upper window length; also the minimum block size for the
+            cluster-aware window-slicing path (so blocked windows keep full length).
 
     Returns:
         Dictionary with 'train', 'val', 'test' keys; each value
@@ -212,6 +294,10 @@ def _materialize_leaf_split(
                 result[split] = assigned[split]
     else:
         for task in shuffled:
+            if cluster_aware and _block_stratified_windows(
+                task, class_index, max_subseq_len, result
+            ):
+                continue
             n_train, n_val, n_test = _stratified_counts(task["n"])
             if n_train > 0:
                 result["train"].append(

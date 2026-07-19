@@ -892,5 +892,6 @@ class GenerationOrchestrator:
         return _materialize_leaf_split_fn(
             leaf_tasks, class_index, rng, min_genomes_for_genome_split,
             cluster_aware=self.cluster_aware_split,
+            max_subseq_len=self.max_subseq_len,
         )
 

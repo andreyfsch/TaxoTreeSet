@@ -9,7 +9,13 @@ from taxotreeset.core._orchestration._cluster import (
     _jaccard,
     cluster_genomes,
 )
-from taxotreeset.core._orchestration._splits import _materialize_leaf_split
+from taxotreeset.core._orchestration._splits import (
+    _block_stratified_windows,
+    _even_split,
+    _materialize_leaf_split,
+)
+
+_SPLIT_MOCK = "taxotreeset.core._orchestration._splits._read_single_sequence"
 
 # Two independent random 2 kbp "genomes": near-disjoint 21-mer sets.
 _SA = "".join(random.Random(1).choices("ACGT", k=2000))
@@ -134,3 +140,62 @@ class TestClusterAwareSplit:
             on = _materialize_leaf_split(tasks, 0, random.Random(7), cluster_aware=True)
         off = _materialize_leaf_split(tasks, 0, random.Random(7))
         assert on == off  # homogeneous -> identical to the random split
+
+
+# ---------------------------------------------------------------------------
+# Block-stratified positional split — the single/few-genome fix (P10 Phase 1b)
+# ---------------------------------------------------------------------------
+
+
+class TestEvenSplit:
+    def test_sums_and_balances(self):
+        assert _even_split(10, 3) == [4, 3, 3]
+        assert sum(_even_split(7, 4)) == 7
+
+
+class TestBlockStratifiedWindows:
+    def test_interleaves_val_and_test_into_the_interior(self):
+        # 1000 bp genome, max_subseq_len 100 -> 10 blocks, pattern places val at
+        # {2,9} and test at {5} (interior), not the contiguous 70-85/85-100 ends.
+        task = {"fasta_path": "/v", "header_id": "g1", "n": 300}
+        result = {s: [] for s in ("train", "val", "test")}
+        with patch(_SPLIT_MOCK, return_value="A" * 1000):
+            emitted = _block_stratified_windows(task, 0, 100, result)
+        assert emitted
+        assert 0.5 in {round(t["start_pct"], 1) for t in result["test"]}  # interior
+        assert any(t["start_pct"] < 0.7 for t in result["val"])          # interior
+        assert all(result[s] for s in ("train", "val", "test"))
+        assert sum(t["n"] for s in result for t in result[s]) == 300      # budget kept
+
+    def test_short_genome_falls_back(self):
+        task = {"fasta_path": "/v", "header_id": "g", "n": 100}
+        result = {s: [] for s in ("train", "val", "test")}
+        with patch(_SPLIT_MOCK, return_value="A" * 300):  # 3 blocks < 6
+            assert _block_stratified_windows(task, 0, 100, result) is False
+        assert all(not result[s] for s in ("train", "val", "test"))
+
+    def test_unreadable_genome_falls_back(self):
+        result = {s: [] for s in ("train", "val", "test")}
+        with patch(_SPLIT_MOCK, return_value=""):
+            assert _block_stratified_windows(
+                {"fasta_path": "/v", "header_id": "g", "n": 100}, 0, 100, result
+            ) is False
+
+
+class TestClusterAwareWindowSlicing:
+    def test_on_uses_interior_blocks(self):
+        # 1 genome (< 3) -> window-slicing; long genome -> block-stratified path.
+        tasks = [{"fasta_path": "/v", "header_id": "g1", "n": 300}]
+        with patch(_SPLIT_MOCK, return_value="A" * 1000):
+            split = _materialize_leaf_split(
+                tasks, 0, random.Random(0), cluster_aware=True, max_subseq_len=100
+            )
+        assert 0.5 in {round(t["start_pct"], 1) for t in split["test"]}
+
+    def test_off_uses_contiguous_regions_without_reading(self):
+        tasks = [{"fasta_path": "/v", "header_id": "g1", "n": 300}]
+        with patch(_SPLIT_MOCK) as m:
+            split = _materialize_leaf_split(tasks, 0, random.Random(0))
+            m.assert_not_called()
+        assert split["val"][0]["start_pct"] == 0.70   # contiguous, unchanged
+        assert split["test"][0]["start_pct"] == 0.85
