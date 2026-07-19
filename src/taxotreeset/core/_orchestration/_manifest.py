@@ -85,6 +85,7 @@ def _write_label_maps(scheduling_artifacts: dict[str, Any]) -> None:
                     "taxid": label_taxid,
                     "name": lv.get("name", label_taxid),
                     "rank": lv.get("rank", "unknown"),
+                    "n_windows": lv.get("n_windows", 0),
                 }
                 for label_taxid, lv in labels.items()
             ],
@@ -101,14 +102,27 @@ def _write_label_maps(scheduling_artifacts: dict[str, Any]) -> None:
             seen_names.add(c["name"])
         id2label = {str(c["class_idx"]): c["name"] for c in classes}
         label2id = {c["name"]: c["class_idx"] for c in classes}
+        balance_mode = v.get("balance_mode", "undersample")
         label_map = {
             "head_taxid": taxid,
             "head_name": v.get("scientific_name", taxid),
             "head_rank": v.get("rank", "unknown"),
+            "balance_mode": balance_mode,
             "id2label": id2label,
             "label2id": label2id,
             "classes": classes,
         }
+        if balance_mode == "keep":
+            # "balanced" class weights (total / (n_classes * n_c)) so a trainer
+            # can offset the on-disk imbalance in its loss (or drive oversampling).
+            total = sum(c["n_windows"] for c in classes)
+            k = len(classes)
+            if total and k:
+                label_map["class_weights"] = {
+                    str(c["class_idx"]): round(total / (k * c["n_windows"]), 4)
+                    for c in classes
+                    if c["n_windows"]
+                }
         os.makedirs(head_dir, exist_ok=True)
         label_map_path = os.path.join(head_dir, "label_map.json")
         with open(label_map_path, "w", encoding="utf-8") as f:

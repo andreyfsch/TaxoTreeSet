@@ -55,6 +55,7 @@ def distribute_n_per_class_across_leaves(
     parent_name: str,
     leaf_cache: dict,
     min_subseq_len: int = _DEFAULT_MIN_SUBSEQ_LEN,
+    per_child_n: dict[str, int] | None = None,
 ) -> dict[str, list[dict]]:
     """Distribute n_per_class samples across each child's sequence leaves.
 
@@ -83,6 +84,11 @@ def distribute_n_per_class_across_leaves(
             full tree scan.
         min_subseq_len: Minimum subseq length, used to compute each
             leaf's share weight. Defaults to 100 bp.
+        per_child_n: Optional per-child target sample count keyed by child
+            taxid string. When given, each child uses its own target instead of
+            the shared ``n_per_class`` (a child absent from the map falls back to
+            ``n_per_class``). This is how the opt-in "keep-imbalance" mode lets
+            each class keep up to its own capacity instead of the sibling minimum.
 
     Returns:
         Dictionary mapping child taxid string to a list of per-leaf
@@ -101,9 +107,14 @@ def distribute_n_per_class_across_leaves(
             distributed[child_taxid] = []
             continue
 
+        child_n = (
+            per_child_n.get(child_taxid, n_per_class)
+            if per_child_n is not None
+            else n_per_class
+        )
         distributed[child_taxid] = _allocate_n_across_leaves(
             child_leaves=child_leaves,
-            n_per_class=n_per_class,
+            n_per_class=child_n,
             min_subseq_len=min_subseq_len,
         )
 

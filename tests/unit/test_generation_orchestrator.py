@@ -706,6 +706,62 @@ class TestWriteLabelMapsCollision:
 
 
 # ---------------------------------------------------------------------------
+# _write_label_maps — keep-imbalance metadata (P5)
+# ---------------------------------------------------------------------------
+
+
+class TestWriteLabelMapsBalanceMode:
+    def test_keep_mode_emits_counts_and_balanced_weights(self, tmp_path, orchestrator):
+        head_dir = str(tmp_path / "head")
+        artifacts = {
+            "master_manifest": {
+                "100": {
+                    "directory_path": head_dir,
+                    "scientific_name": "Parent",
+                    "rank": "genus",
+                    "balance_mode": "keep",
+                    "labels": {
+                        "1": {"class_idx": 0, "name": "A", "rank": "species",
+                              "n_windows": 100},
+                        "2": {"class_idx": 1, "name": "B", "rank": "species",
+                              "n_windows": 300},
+                    },
+                }
+            }
+        }
+        orchestrator._write_label_maps(artifacts)
+        with open(os.path.join(head_dir, "label_map.json"), encoding="utf-8") as f:
+            lm = json.load(f)
+        assert lm["balance_mode"] == "keep"
+        by_idx = {c["class_idx"]: c for c in lm["classes"]}
+        assert by_idx[0]["n_windows"] == 100
+        assert by_idx[1]["n_windows"] == 300
+        # "balanced" weights: total=400, k=2 -> 400/(2*100)=2.0, 400/(2*300)=0.6667
+        assert lm["class_weights"]["0"] == pytest.approx(2.0)
+        assert lm["class_weights"]["1"] == pytest.approx(0.6667, abs=1e-3)
+
+    def test_undersample_mode_has_no_weights(self, tmp_path, orchestrator):
+        head_dir = str(tmp_path / "head")
+        artifacts = {
+            "master_manifest": {
+                "100": {
+                    "directory_path": head_dir, "scientific_name": "P",
+                    "rank": "genus",
+                    "labels": {
+                        "1": {"class_idx": 0, "name": "A", "rank": "species"},
+                        "2": {"class_idx": 1, "name": "B", "rank": "species"},
+                    },
+                }
+            }
+        }
+        orchestrator._write_label_maps(artifacts)
+        with open(os.path.join(head_dir, "label_map.json"), encoding="utf-8") as f:
+            lm = json.load(f)
+        assert lm["balance_mode"] == "undersample"  # default when absent
+        assert "class_weights" not in lm
+
+
+# ---------------------------------------------------------------------------
 # Multi-root scope resolution + empty-root forest (P9 fatia 1)
 # ---------------------------------------------------------------------------
 

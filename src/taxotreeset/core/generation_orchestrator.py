@@ -174,6 +174,7 @@ class GenerationOrchestrator:
         min_num_seqs: int = DEFAULT_MIN_NUM_SEQS,
         cutoff_percentage: float = DEFAULT_CUTOFF_PERCENTAGE,
         max_n_per_class: int = DEFAULT_MAX_N_PER_CLASS,
+        keep_imbalance: bool = False,
         use_exact_capacity: bool = DEFAULT_USE_EXACT_CAPACITY,
         min_leaves_per_class: int = DEFAULT_MIN_LEAVES_PER_CLASS,
         rare_taxa_strategy: str = DEFAULT_RARE_TAXA_STRATEGY,
@@ -273,6 +274,7 @@ class GenerationOrchestrator:
         self.min_num_seqs: int = min_num_seqs
         self.cutoff_percentage: float = cutoff_percentage
         self.max_n_per_class: int = max_n_per_class
+        self.keep_imbalance: bool = keep_imbalance
         self.use_exact_capacity: bool = use_exact_capacity
         self.min_leaves_per_class: int = min_leaves_per_class
         self.rare_taxa_strategy: str = rare_taxa_strategy

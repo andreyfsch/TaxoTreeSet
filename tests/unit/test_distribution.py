@@ -312,6 +312,33 @@ class TestDistributeNPerClassAcrossLeaves:
         )
         assert result["9001"] == []
 
+    def test_per_child_n_overrides_shared_budget(self):
+        # keep-imbalance mode: each class gets its own target; a class absent
+        # from per_child_n falls back to the shared n_per_class.
+        children = [make_taxon_node(t, [make_seq_leaf(f"NC_{t}")])
+                    for t in ("9010", "9011", "9012")]
+        with patch(_MOCK_SEQ_PATH, return_value="A" * 5000):
+            result = distribute_n_per_class_across_leaves(
+                n_per_class=100,
+                children=children,
+                parent_taxid="1000",
+                parent_name="P",
+                leaf_cache={},
+                per_child_n={"9010": 10, "9011": 50},
+            )
+        assert sum(t["n"] for t in result["9010"]) == 10
+        assert sum(t["n"] for t in result["9011"]) == 50
+        assert sum(t["n"] for t in result["9012"]) == 100  # fallback to shared
+
+    def test_per_child_n_none_uses_shared_budget(self):
+        child = make_taxon_node("9020", [make_seq_leaf("NC_X")])
+        with patch(_MOCK_SEQ_PATH, return_value="A" * 5000):
+            result = distribute_n_per_class_across_leaves(
+                n_per_class=30, children=[child], parent_taxid="1",
+                parent_name="P", leaf_cache={}, per_child_n=None,
+            )
+        assert sum(t["n"] for t in result["9020"]) == 30
+
     def test_all_children_covered_in_output(self):
         leaf_a = make_seq_leaf("NC_A")
         leaf_b = make_seq_leaf("NC_B")

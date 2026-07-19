@@ -478,6 +478,19 @@ class _CascadeScheduler:
         if not retained_children or plan["n_per_class"] == 0:
             return
 
+        per_child_n = None
+        if self.ctx.keep_imbalance:
+            # Opt-in: keep each class up to its own capacity (capped by
+            # max_n_per_class) instead of undersampling every sibling to the
+            # shared minimum. Classes with no recorded capacity (e.g. virtual
+            # buckets) fall back to the balanced n_per_class.
+            per_child_n = {
+                str(c.name): min(
+                    plan["capacities"].get(str(c.name)) or plan["n_per_class"],
+                    self.ctx.max_n_per_class,
+                )
+                for c in retained_children
+            }
         per_child_tasks = distribute_n_per_class_across_leaves(
             n_per_class=plan["n_per_class"],
             children=retained_children,
@@ -486,6 +499,7 @@ class _CascadeScheduler:
                 current_node, "scientific_name", str(current_node.name)
             ),
             leaf_cache=leaf_cache,
+            per_child_n=per_child_n,
         )
 
         retained_children = self._maybe_add_reject_class(
@@ -887,6 +901,7 @@ class _CascadeScheduler:
                 "rank": child_rank,
                 "fallback": child_rank.startswith("virtual_"),
                 "capacity": plan["capacities"].get(child_taxid, 0),
+                "n_windows": sum(task["n"] for task in leaf_tasks),
             }
 
         if not any(parent_tasks[split] for split in _SPLITS):
@@ -902,6 +917,7 @@ class _CascadeScheduler:
             "rank": getattr(current_node, "rank", "unknown"),
             "scenario": plan["scenario"],
             "n_per_class": plan["n_per_class"],
+            "balance_mode": "keep" if self.ctx.keep_imbalance else "undersample",
             "num_leaves": num_leaves,
             "labels": labels_metadata,
         }

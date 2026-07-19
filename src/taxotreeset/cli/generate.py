@@ -153,6 +153,17 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "intact (default: 20000).",
     )
     parser.add_argument(
+        "--keep-imbalance",
+        action="store_true",
+        help="Opt-in: keep each class up to its OWN capacity (capped by "
+        "--max-n-per-class) instead of undersampling every sibling down to the "
+        "smallest, preserving signal from data-rich clades. The on-disk dataset "
+        "is then imbalanced; each head's label_map.json records per-class window "
+        "counts, a 'balance_mode' marker, and suggested class weights so a "
+        "trainer can rebalance (class weights / oversampling) at fine-tuning "
+        "time. Off by default (the dataset stays balanced and model-agnostic).",
+    )
+    parser.add_argument(
         "--min-leaves-per-class",
         type=int,
         default=3,
@@ -347,6 +358,7 @@ def run(args: argparse.Namespace) -> None:
             min_num_seqs=args.min_num_seqs,
             cutoff_percentage=args.cutoff_percentage,
             max_n_per_class=args.max_n_per_class,
+            keep_imbalance=args.keep_imbalance,
             use_exact_capacity=not args.approximate_capacity,
             min_leaves_per_class=args.min_leaves_per_class,
             rare_taxa_strategy=args.rare_taxa_strategy,

@@ -124,20 +124,32 @@ Files: `core/generation/reject_bucket.py`, `core/generation_orchestrator.py`.
 
 ---
 
-## 🟡 P5 — Preserve signal: train-time rebalancing vs definitive undersampling
+## 🟡 P5 — Preserve signal: train-time rebalancing vs definitive undersampling — DONE
 
 **Problem.** `n_per_class = min(sibling capacities)` discards data from rich
 clades. The percentile cutoff (`--cutoff-percentage`) and `--max-n-per-class`
 mitigate the extremes, but balancing is still lossy by construction.
 
-**Approach.** Offer keeping richer datasets and rebalancing at fine-tuning time
-(class weights, or oversampling with the existing reverse-complement
-augmentation in `sequence_utils.py`) instead of definitive subsampling on disk.
-Trade-off: this breaks the "balanced, model-agnostic on disk" property, so it
-should be opt-in. Relevant for the HoreKa scenario (more tokens available).
+**Status (2026-07-18): implemented (opt-in `--keep-imbalance`).** With the flag,
+each class keeps up to its OWN capacity (capped by `--max-n-per-class`) instead of
+being undersampled to the sibling minimum: the scheduler builds a per-child target
+`min(capacity, max_n_per_class)` (falling back to the balanced `n_per_class` for
+classes with no recorded capacity, e.g. virtual buckets) and passes it to
+`distribute_n_per_class_across_leaves` via a new backward-compatible `per_child_n`
+override. The on-disk dataset is then imbalanced, so each head's `label_map.json`
+records `balance_mode` (`"keep"`/`"undersample"`), per-class `n_windows`, and
+suggested `class_weights` (sklearn "balanced": `total / (n_classes * n_c)`) so a
+trainer can offset the imbalance with class weights or oversampling (reusing the
+reverse-complement augmentation in `sequence_utils.py`). Off by default — the
+dataset stays balanced and model-agnostic. Tests: distribution `per_child_n` +
+label-map metadata; the default (undersample) path is unchanged (integration green).
 
-**Effort.** Moderate. Files: `core/generation/balancing.py`,
-`dataset/sequence_utils.py`.
+**Effort.** Moderate — done. Files: `cli/generate.py`,
+`core/generation_orchestrator.py`, `core/_orchestration/_scheduler.py`,
+`core/_orchestration/_manifest.py`, `core/generation/distribution.py`.
+**Deferred:** actual train-time oversampling helper (this ships the *metadata*; the
+trainer applies the weights). The `class_weights` are a convenience — a trainer can
+also read per-class row counts straight from the parquet.
 
 ---
 
