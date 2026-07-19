@@ -8,6 +8,8 @@ rely on. There is no orchestrator state here — every caller passes what it nee
 
 import random
 
+from taxotreeset.core._orchestration._cluster import cluster_genomes
+
 _STRATIFIED_TRAIN_RATIO: float = 0.70
 _STRATIFIED_VAL_RATIO: float = 0.15
 _SPLITS: tuple[str, ...] = ("train", "val", "test")
@@ -105,11 +107,62 @@ def _enrich_task(
     }
 
 
+def _assign_stratified(
+    tasks: list[dict],
+    class_index: int,
+    result: dict[str, list[dict]],
+) -> None:
+    """Assign whole genomes to train/val/test by ``_stratified_cuts`` ranges."""
+    train_cut, val_cut = _stratified_cuts(len(tasks))
+    for index, task in enumerate(tasks):
+        enriched = _enrich_task(task, class_index, 0.0, 1.0)
+        if index < train_cut:
+            result["train"].append(enriched)
+        elif index < val_cut:
+            result["val"].append(enriched)
+        else:
+            result["test"].append(enriched)
+
+
+def _cluster_stratified_split(
+    tasks: list[dict],
+    class_index: int,
+    min_genomes: int,
+) -> dict[str, list[dict]] | None:
+    """Spread each MinHash cluster of ``tasks`` across train/val/test.
+
+    Clusters the genomes (see :func:`cluster_genomes`); when there is actionable
+    sub-lineage structure, each cluster with enough genomes is stratified across
+    the splits (small clusters go to train), so every split spans every
+    sub-lineage — the fix for the non-i.i.d.-split instability.
+
+    Returns:
+        The splits dict, or ``None`` when there is no structure OR the cluster
+        split would leave a split empty (the caller then keeps the whole-class
+        random split, preserving the >= 1-genome-per-split guarantee).
+    """
+    clusters = cluster_genomes(tasks)
+    if clusters is None:
+        return None
+    candidate: dict[str, list[dict]] = {split: [] for split in _SPLITS}
+    for cluster in clusters:
+        if len(cluster) >= min_genomes:
+            _assign_stratified(cluster, class_index, candidate)
+        else:
+            # too few genomes to split three ways; keep as training signal
+            for task in cluster:
+                candidate["train"].append(_enrich_task(task, class_index, 0.0, 1.0))
+    if all(candidate[split] for split in _SPLITS):
+        return candidate
+    return None
+
+
 def _materialize_leaf_split(
     leaf_tasks: list[dict],
     class_index: int,
     rng: random.Random,
     min_genomes_for_genome_split: int = 3,
+    cluster_aware: bool = False,
 ) -> dict[str, list[dict]]:
     """Split a single child's per-leaf tasks into train/val/test.
 
@@ -126,6 +179,11 @@ def _materialize_leaf_split(
         rng: Random instance for deterministic shuffling.
         min_genomes_for_genome_split: Threshold below which to use the
             window-slicing fallback (default 3 = the multi-class behaviour).
+        cluster_aware: When True, the genome-level split first MinHash-clusters
+            the genomes and spreads each sub-lineage cluster across the splits
+            (so val/test stay representative of the head's diversity), falling
+            back to the random split when there is no structure or it would empty
+            a split. Off by default — the split is byte-identical to before.
 
     Returns:
         Dictionary with 'train', 'val', 'test' keys; each value
@@ -141,16 +199,17 @@ def _materialize_leaf_split(
     rng.shuffle(shuffled)
 
     if len(shuffled) >= min_genomes_for_genome_split:
-        train_cut, val_cut = _stratified_cuts(len(shuffled))
-
-        for index, task in enumerate(shuffled):
-            enriched = _enrich_task(task, class_index, 0.0, 1.0)
-            if index < train_cut:
-                result["train"].append(enriched)
-            elif index < val_cut:
-                result["val"].append(enriched)
-            else:
-                result["test"].append(enriched)
+        assigned = (
+            _cluster_stratified_split(
+                shuffled, class_index, min_genomes_for_genome_split
+            )
+            if cluster_aware else None
+        )
+        if assigned is None:
+            _assign_stratified(shuffled, class_index, result)
+        else:
+            for split in _SPLITS:
+                result[split] = assigned[split]
     else:
         for task in shuffled:
             n_train, n_val, n_test = _stratified_counts(task["n"])

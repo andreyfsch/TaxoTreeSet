@@ -164,6 +164,17 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "time. Off by default (the dataset stays balanced and model-agnostic).",
     )
     parser.add_argument(
+        "--cluster-aware-split",
+        action="store_true",
+        help="Opt-in: before the genome-level train/val/test split, MinHash-"
+        "cluster each class's genomes (tool-free) and spread every sub-lineage "
+        "cluster across the splits, so val/test stay representative of the "
+        "head's diversity. Fixes the instability where a random split segregates "
+        "a whole sub-lineage into val (tanking it while test looks great). "
+        "Self-verifying: applies only when >= 2 well-separated clusters are "
+        "found, else keeps the random split. Off by default.",
+    )
+    parser.add_argument(
         "--min-leaves-per-class",
         type=int,
         default=3,
@@ -359,6 +370,7 @@ def run(args: argparse.Namespace) -> None:
             cutoff_percentage=args.cutoff_percentage,
             max_n_per_class=args.max_n_per_class,
             keep_imbalance=args.keep_imbalance,
+            cluster_aware_split=args.cluster_aware_split,
             use_exact_capacity=not args.approximate_capacity,
             min_leaves_per_class=args.min_leaves_per_class,
             rare_taxa_strategy=args.rare_taxa_strategy,

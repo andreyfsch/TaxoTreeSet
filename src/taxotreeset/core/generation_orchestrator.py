@@ -175,6 +175,7 @@ class GenerationOrchestrator:
         cutoff_percentage: float = DEFAULT_CUTOFF_PERCENTAGE,
         max_n_per_class: int = DEFAULT_MAX_N_PER_CLASS,
         keep_imbalance: bool = False,
+        cluster_aware_split: bool = False,
         use_exact_capacity: bool = DEFAULT_USE_EXACT_CAPACITY,
         min_leaves_per_class: int = DEFAULT_MIN_LEAVES_PER_CLASS,
         rare_taxa_strategy: str = DEFAULT_RARE_TAXA_STRATEGY,
@@ -275,6 +276,7 @@ class GenerationOrchestrator:
         self.cutoff_percentage: float = cutoff_percentage
         self.max_n_per_class: int = max_n_per_class
         self.keep_imbalance: bool = keep_imbalance
+        self.cluster_aware_split: bool = cluster_aware_split
         self.use_exact_capacity: bool = use_exact_capacity
         self.min_leaves_per_class: int = min_leaves_per_class
         self.rare_taxa_strategy: str = rare_taxa_strategy
@@ -888,6 +890,7 @@ class GenerationOrchestrator:
         see that function for the genome-level vs window-slicing split semantics.
         """
         return _materialize_leaf_split_fn(
-            leaf_tasks, class_index, rng, min_genomes_for_genome_split
+            leaf_tasks, class_index, rng, min_genomes_for_genome_split,
+            cluster_aware=self.cluster_aware_split,
         )
 

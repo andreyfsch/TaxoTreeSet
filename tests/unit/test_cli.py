@@ -231,6 +231,7 @@ class TestGenerateRun:
             min_subclades_per_bucket=5,
             max_n_per_class=20000,
             keep_imbalance=False,
+            cluster_aware_split=False,
             min_leaves_per_class=3,
             rare_taxa_strategy="fallback",
             no_sync=no_sync,

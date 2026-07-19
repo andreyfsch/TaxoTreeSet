@@ -364,6 +364,57 @@ P4 (cross-domain negatives), the `--binary-only` machinery.
 
 ---
 
+## 🟠 P10 — Cluster-aware split (non-i.i.d. genomes across train/val/test)
+
+**Problem (diagnosed on the pilot, 2026-07-19).** Head `1335638` (a deep binary
+belongs/not-belongs head) trained to **test f1 0.98** but its **eval f1 peaked at
+0.75 then degraded to 0.49** (eval_loss rising) → early stop. Both val and test are
+large + balanced (~6000 rows), so it is not a small-sample artifact. A k-mer LR
+baseline reproduces it (VAL 0.66 vs TEST 0.83, **model-agnostic**), and the tell is
+**belongs recall 0.47 on val vs 0.98 on test**: the val "belongs" genomes are a
+distinct **sub-lineage** the model never trained on. **Root cause:** the random
+genome-level split (`_materialize_leaf_split`) treats genomes as i.i.d., but a
+clade's genomes are phylogenetically clustered — a whole sub-lineage can land in
+val, so val (unseen lineage) tanks while test (train-like lineages) looks great.
+This is P1 in reverse: P1 feared clustering *inflating* test via near-clone leakage;
+here it *deflated* val. **General lesson: test ≫ val on a deep head is a non-i.i.d.
+split, not model quality — the val↔test gap is the signal, and a single per-head F1
+is untrustworthy.**
+
+**Design (decided with the user): hybrid + MinHash, conditional + per-class.** The
+clustering self-verifies the need: cluster a class's genomes (MinHash, tool-free)
+and only act on >= 2 well-separated clusters (else keep the random split) — applied
+to positives and negatives independently (negatives can also use the free near/far
+reject tag). Two philosophies combined: stratify clusters across train/val/test for
+STABLE, representative metrics, plus a disjoint holdout for HONEST novel-lineage
+generalization.
+
+**Phase 1 — DONE (2026-07-19): conditional cluster-STRATIFIED split (opt-in).** New
+`core/_orchestration/_cluster.py`: `cluster_genomes` sketches each genome with a
+bottom-k MinHash (stdlib `zlib.crc32` over k-mers — no external tool), single-linkage
+clusters by the KMV Jaccard estimate, and returns clusters only when actionable
+(>= 2 clusters, the two largest each >= `min_cluster_genomes`). `_materialize_leaf_split`
+gains an opt-in `cluster_aware` path (flag `--cluster-aware-split`): it spreads each
+cluster across train/val/test (small clusters → train), and **falls back to the
+random split if there is no structure OR the cluster split would empty a split** (so
+the >= 1-per-split guarantee always holds). Off by default → byte-identical.
+Self-verifying, so homogeneous heads pay nothing. Params (k=21, sketch=200,
+threshold=0.30, min_cluster_genomes=2, max_genomes=300 for the O(n^2) cap) are module
+constants — **need tuning on real data** (validate on `1335638`). Tests:
+`tests/unit/test_cluster.py` (15). Threading: `cli/generate.py` →
+`GenerationOrchestrator.cluster_aware_split` → the `_materialize_leaf_split` delegator.
+
+**Phase 2 — open:** disjoint `test_novel` holdout (a 4th split, only when >= 3
+clusters) + label_map metadata (n_clusters, holdout coverage) + downstream
+propagation (`_SPLITS`, DatasetBuilder, separability/composition). Also: expose the
+MinHash params as flags; consider reusing capacity-pass reads to avoid re-reading
+genomes; per-genome sketch caching.
+
+Files: `core/_orchestration/_cluster.py` (new), `core/_orchestration/_splits.py`,
+`core/generation_orchestrator.py`, `cli/generate.py`.
+
+---
+
 ## Cross-repo — PhyloCascadeGLM
 
 Inference/evaluation items live in the PhyloCascadeGLM repo's own `docs/BACKLOG.md`.
