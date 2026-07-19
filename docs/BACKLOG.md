@@ -430,6 +430,36 @@ positional) is the mechanism that actually helps this dataset; Phase 1 is a corr
 mostly-dormant guard for future GenBank data.** The 2732529 gap is therefore NOT
 sub-lineage — likely the near/far negatives (unaddressed) or normal variance.
 
+**Single-head regeneration — DONE (2026-07-19): `--single-level <taxid>`.**
+Regenerating one existing head (to swap a fixed split into the training queue)
+needs the head's negatives sampled from *outside* its subtree — for binary
+(not-belongs) AND multi-class (reject bucket) alike. `sample_reject_leaves` reads
+`node.root`, so the pool is defined by the **tree** (`--root`), not by which head
+is scheduled: scoping `--root <taxid>` to the target empties the pool and breaks
+the head. Fix: `--single-level` now takes an optional TaxID — keep `--root
+<ancestor>` (e.g. `viruses`, with `--no-sync`) so the whole tree is built, and the
+flag schedules only that one head. Binary path filters the descendant node list;
+multi path locates the node and schedules its decision point directly (rebuilding
+the accumulated path from the ancestry). Same tree + same reject pool + same
+per-head seed → a byte-identical drop-in except for whatever `--cluster-aware-split`
+changes. Files: `_scheduler.py`, `generation_orchestrator.py`, `cli/generate.py`,
+`_manifest.py`. Tested: binary drop-in parity vs a full run, out-of-subtree
+negatives retained, multi interior-node targeting.
+
+**Regeneration verified on the two single-genome pilot heads (2026-07-19).** Of
+the 14 binary pilot heads, only `1335638` and `2739681` take the block-stratified
+window path (1 belongs genome each; the other 12 are diverse multi-genome → Phase 1
+returns None). Regenerated both via `--root viruses --single-level <taxid>
+--cluster-aware-split --no-sync`:
+- `1335638`: belongs-GC spread **0.095 → 0.035** (0.316/0.411/0.316 → 0.362/0.327/
+  0.346). Real composition shift, materially fixed → **replace + retrain**.
+- `2739681`: spread already **0.035** (0.570/0.594/0.605); regen 0.033. The path
+  fired but the genome is compositionally uniform, so there was no shift to fix —
+  the windows moved (interior blocks, leakage-safe) but the distribution is
+  unchanged. Replacing is optional (robustness insurance, not a metric fix).
+So "fires the mechanism" != "meaningfully changes the split": `1335638` was the
+only genuinely broken head.
+
 **Phase 2 — open:** disjoint `test_novel` holdout (a 4th split, only when >= 3
 clusters) + label_map metadata (n_clusters, holdout coverage) + downstream
 propagation (`_SPLITS`, DatasetBuilder, separability/composition). Also: expose the
@@ -437,7 +467,8 @@ MinHash params as flags; consider reusing capacity-pass reads to avoid re-readin
 genomes; per-genome sketch caching.
 
 Files: `core/_orchestration/_cluster.py` (new), `core/_orchestration/_splits.py`,
-`core/generation_orchestrator.py`, `cli/generate.py`.
+`core/_orchestration/_scheduler.py`, `core/generation_orchestrator.py`,
+`cli/generate.py`.
 
 ---
 
