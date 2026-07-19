@@ -417,8 +417,18 @@ blocks; windows stay confined to their block (leakage-safe). Falls back to the
 contiguous cut when unreadable or too short (< 6 blocks). Off by default →
 byte-identical. Validated on NC_021333.1: per-split GC 0.356/0.407/0.316 → 0.359/0.345/
 0.360 (val/test now match train). So P10 addresses **two mechanisms**: multi-genome
-sub-lineage (Phase 1) and single-genome positional (Phase 1b). Still TODO: tune the
-MinHash threshold on a multi-genome head (1335638 can't — 1 genome).
+sub-lineage (Phase 1) and single-genome positional (Phase 1b).
+
+**Phase 1 validated on a multi-genome head (2732529, 146 belongs genomes, the biggest
+val/test gap among trained heads): its genomes are DIVERSE, not clustered** (largest
+MinHash cluster is 4 even at Jaccard 0.10) — as expected for RefSeq (~1 genome/species,
+P1's rationale). So the multi-genome mechanism is largely a **no-op on RefSeq**; it would
+pay off on GenBank-style strain collections. The gate was tightened accordingly (an
+actionable cluster must cover >= 10% of the genomes, >= 2 such) so diverse heads return
+None cleanly instead of clustering + falling back. Net: **Phase 1b (single-genome
+positional) is the mechanism that actually helps this dataset; Phase 1 is a correct but
+mostly-dormant guard for future GenBank data.** The 2732529 gap is therefore NOT
+sub-lineage — likely the near/far negatives (unaddressed) or normal variance.
 
 **Phase 2 — open:** disjoint `test_novel` holdout (a 4th split, only when >= 3
 clusters) + label_map metadata (n_clusters, holdout coverage) + downstream
