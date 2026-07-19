@@ -245,6 +245,7 @@ def _write_run_metadata(
             "abundance_threshold": abundance_threshold,
             "stop_at": ctx._depth_boundary,
             "single_level": ctx._single_level,
+            "single_level_taxid": ctx._single_level_taxid,
             "output_format": ctx.output_format,
             "reject_class": ctx.reject_class,
             "reject_fraction": ctx.reject_fraction,

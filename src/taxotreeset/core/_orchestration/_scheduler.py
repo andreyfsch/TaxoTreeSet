@@ -70,6 +70,32 @@ def _find_domain_node(
             return child
     return None
 
+def _accumulated_path_to(domain_node: Node, target: Node) -> str:
+    """'/'-joined TaxID path from ``domain_node`` down to ``target`` (inclusive).
+
+    The cascade threads ``accumulated_path`` starting at ``domain_node.name`` and
+    appends each child's name on the way down (passthroughs included). When a
+    single-level head is scheduled directly (skipping that descent), this rebuilds
+    the identical path from the target's ancestry, so the head lands in the same
+    output directory a full run would have used.
+
+    Args:
+        domain_node: The domain anchor the cascade would start from.
+        target: The node whose head is being scheduled directly.
+
+    Returns:
+        e.g. ``"10239/2732004/.../1335638"``.
+    """
+    names: list[str] = []
+    node: Node | None = target
+    while node is not None:
+        names.append(str(node.name))
+        if node is domain_node:
+            break
+        node = node.parent
+    names.reverse()
+    return "/".join(names)
+
 def _collect_real_children(node: Node) -> list:
     """Return direct children that are taxonomic nodes (not sequences).
 
@@ -163,14 +189,10 @@ class _CascadeScheduler:
         domain_node = _find_domain_node(tree_root, domain_taxid)
         if domain_node is None:
             logger.warning(f"Domain node {domain_taxid} not found in tree.")
-            return {
-                "extraction_jobs": extraction_jobs,
-                "master_manifest": master_manifest,
-                "passthrough_map": passthrough_map,
-                "virtual_id_registry": virtual_id_registry,
-            }
+            return self._empty_schedule_result(
+                extraction_jobs, master_manifest,
+                passthrough_map, virtual_id_registry)
 
-        children_list = _collect_real_children(domain_node)
         self._schedule_pbar = None
         try:
             if self.ctx.binary_only:
@@ -187,10 +209,21 @@ class _CascadeScheduler:
                 self._schedule_pbar = tqdm(
                     desc="Computing node capacities", unit=" nodes"
                 )
+                start_node, start_path = domain_node, domain_node.name
+                if self.ctx._single_level_taxid is not None:
+                    # ``--single-level <taxid>``: schedule only that node's head.
+                    # The full tree is still built, so its reject bucket samples
+                    # from outside the subtree exactly as a full run would.
+                    start_node = self._find_single_level_target(domain_node)
+                    if start_node is None:
+                        return self._empty_schedule_result(
+                            extraction_jobs, master_manifest,
+                            passthrough_map, virtual_id_registry)
+                    start_path = _accumulated_path_to(domain_node, start_node)
                 self._schedule_decision_point(
-                    current_node=domain_node,
-                    children_list=children_list,
-                    accumulated_path=domain_node.name,
+                    current_node=start_node,
+                    children_list=_collect_real_children(start_node),
+                    accumulated_path=start_path,
                     abundance_threshold=abundance_threshold,
                     extraction_jobs=extraction_jobs,
                     master_manifest=master_manifest,
@@ -203,12 +236,43 @@ class _CascadeScheduler:
                 self._schedule_pbar.close()
             self._schedule_pbar = None
 
+        return self._empty_schedule_result(
+            extraction_jobs, master_manifest,
+            passthrough_map, virtual_id_registry)
+
+    @staticmethod
+    def _empty_schedule_result(
+        extraction_jobs: list,
+        master_manifest: dict,
+        passthrough_map: dict,
+        virtual_id_registry: dict,
+    ) -> dict[str, Any]:
+        """Pack the four scheduling bookkeeping structures into the result dict."""
         return {
             "extraction_jobs": extraction_jobs,
             "master_manifest": master_manifest,
             "passthrough_map": passthrough_map,
             "virtual_id_registry": virtual_id_registry,
         }
+
+    def _find_single_level_target(self, domain_node: Node) -> Node | None:
+        """Locate the ``--single-level <taxid>`` head node under ``domain_node``.
+
+        Returns the domain node itself when it is the target, else the matching
+        descendant. Logs and returns ``None`` when no taxonomic node carries the
+        TaxID (e.g. a typo, or a genome-level ID), so the caller emits nothing.
+        """
+        taxid = self.ctx._single_level_taxid
+        if str(domain_node.name) == taxid:
+            return domain_node
+        target = next(
+            (n for n in domain_node.descendants if str(n.name) == taxid), None
+        )
+        if target is None:
+            ui_logger.warning(
+                "single-level target TaxID %s is not a node under domain %s — "
+                "nothing scheduled.", taxid, domain_node.name)
+        return target
 
     def _on_capacity_computed(self) -> None:
         """Advance the scheduling progress bar by one capacity computation."""
@@ -264,10 +328,21 @@ class _CascadeScheduler:
             passthrough_map: Map of collapsed node -> its single child (mutated).
         """
         caps = self.ctx._all_capacities or {}
+        # ``--single-level <taxid>`` regenerates a single head: keep only that
+        # node. The reject/not-belongs pool below is sampled from ``node.root``
+        # (the full built tree), so the head is identical to the one a full run
+        # would emit — a drop-in replacement.
+        target_taxid = self.ctx._single_level_taxid
         nodes = [
             n for n in domain_node.descendants
             if getattr(n, "rank", "") != "sequence"
+            and (target_taxid is None or str(n.name) == target_taxid)
         ]
+        if target_taxid is not None and not nodes:
+            ui_logger.warning(
+                "single-level target TaxID %s is not a taxonomic node under "
+                "domain %s — no binary head scheduled.",
+                target_taxid, domain_node.name)
         total = len(nodes)
         batch_size = max(1, self.ctx.binary_extract_batch_size)
         ui_logger.info(

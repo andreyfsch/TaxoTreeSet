@@ -296,6 +296,7 @@ class GenerationOrchestrator:
         self._selective_download_active: bool = False
         self._depth_boundary: str | None = None
         self._single_level: bool = False
+        self._single_level_taxid: str | None = None
         self._all_capacities: dict[str, int] | None = None
 
         self.downloader: NCBIDownloader = NCBIDownloader(
@@ -373,7 +374,7 @@ class GenerationOrchestrator:
         max_budget: int = 50_000,
         sync: bool = True,
         stop_at: str | None = None,
-        single_level: bool = False,
+        single_level: bool | str = False,
     ) -> None:
         """Execute the full generation pipeline for a target group.
 
@@ -390,9 +391,16 @@ class GenerationOrchestrator:
                 heads (e.g. 'family'). Nodes at or below this rank
                 become training labels but not heads of their own.
                 None descends to the deepest available rank.
-            single_level: When True, generate only the root's head (its
-                direct children become labels) with no further
-                recursion. Mutually exclusive with stop_at.
+            single_level: ``True`` generates only the root's head (its
+                direct children become labels) with no further recursion.
+                A TaxID string instead generates only the head at that node
+                (anywhere in the ``--root`` tree): the full tree is still
+                built, so the reject / not-belongs negatives are sampled
+                from outside the node's subtree exactly as in a full run —
+                pair it with ``--root <ancestor>`` (not ``--root <TaxID>``,
+                which would leave no external pool) to regenerate a single
+                head as a drop-in replacement. Mutually exclusive with
+                stop_at.
 
         Raises:
             ValueError: If stop_at is not a canonical rank, or if both
@@ -409,7 +417,10 @@ class GenerationOrchestrator:
                 f"Valid ranks: {list(CANONICAL_RANKS_ROOT_TO_SPECIES)}."
             )
         self._depth_boundary = stop_at
-        self._single_level = single_level
+        self._single_level = bool(single_level)
+        self._single_level_taxid = (
+            single_level if isinstance(single_level, str) else None
+        )
         self._selective_download_active = False
         t_pipeline_start = time.monotonic()
 

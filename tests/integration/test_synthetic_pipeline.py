@@ -576,3 +576,126 @@ class TestFullPipelineOutputContracts:
                 assert idx in valid_idxs, (
                     f"class_idx {idx} not in manifest for {head_dir}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# --single-level <taxid>: regenerate a single head, negatives from the whole tree
+# ---------------------------------------------------------------------------
+
+
+def _single_level_orch(synthetic_env, output_dir, **overrides):
+    from taxotreeset.core.generation_orchestrator import GenerationOrchestrator
+    from taxotreeset.io.registry import NCBIRegistry
+
+    registry = NCBIRegistry(registry_path=synthetic_env["registry_path"])
+    kwargs = dict(
+        registry=registry,
+        vault_path=synthetic_env["vault_dir"],
+        output_dir=output_dir,
+        config_path=synthetic_env["mapping_path"],
+        min_subseq_len=_MIN_LEN,
+        max_subseq_len=200,
+        max_n_per_class=100,
+        min_leaves_per_class=1,
+        rare_taxa_strategy="keep",
+        n_gpu_workers=0,
+        n_workers=1,
+    )
+    kwargs.update(overrides)
+    return GenerationOrchestrator(**kwargs)
+
+
+@pytest.fixture(scope="module")
+def binary_single_level_output(synthetic_env, tmp_path_factory):
+    """``--binary-only`` + ``single_level='11118'``: only the Coronaviridae head.
+
+    11118 (Coronaviridae) is a branching family; its not-belongs negatives can
+    only come from OUTSIDE its subtree (the Adenoviridae leaf 10509). Scheduling
+    just this head must still sample that external pool, so the head is a drop-in
+    for the one a full run emits.
+    """
+    output_dir = str(tmp_path_factory.mktemp("binary_single_out"))
+    orch = _single_level_orch(
+        synthetic_env, output_dir, binary_only=True, binary_budget=60)
+    orch.run_pipeline(
+        target_group="viruses", sync=False, abundance_threshold=1,
+        single_level="11118")
+    return {"output_dir": output_dir}
+
+
+def _head_11118_class_counts(output_dir):
+    import pandas as pd
+
+    manifest = json.loads(
+        (Path(output_dir) / "manifest_viruses.json").read_text())
+    head_dir = Path(manifest["11118"]["directory_path"])
+    return {
+        split: dict(sorted(
+            pd.read_parquet(head_dir / f"{split}.parquet")["class_idx"]
+            .value_counts().items()))
+        for split in ("train", "val", "test")
+    }
+
+
+class TestBinarySingleLevelTarget:
+    def test_only_the_target_head_is_scheduled(self, binary_single_level_output):
+        out = Path(binary_single_level_output["output_dir"])
+        manifest = json.loads((out / "manifest_viruses.json").read_text())
+        assert set(manifest) == {"11118"}, (
+            f"single-level run scheduled heads other than 11118: {set(manifest)}")
+        heads = {p.parent.name for p in out.rglob("train.parquet")}
+        assert heads == {"11118"}, f"expected only the 11118 head dir, got {heads}"
+
+    def test_target_head_keeps_out_of_subtree_negatives(
+        self, binary_single_level_output
+    ):
+        # label 0 = not-belongs, drawn from OUTSIDE 11118. Its presence proves the
+        # reject pool is still the whole tree, not the (empty) 11118 subtree.
+        import pandas as pd
+        out = Path(binary_single_level_output["output_dir"])
+        train = next(out.rglob("*/11118/train.parquet"))
+        labels = set(int(x) for x in pd.read_parquet(train)["class_idx"].unique())
+        assert labels == {0, 1}, f"single-level head lost a class: {labels}"
+
+    def test_head_is_identical_to_the_full_run(
+        self, binary_single_level_output, binary_pipeline_output
+    ):
+        # Drop-in parity: per-split, per-class window counts must match the 11118
+        # head a full binary run emits (same tree, same reject pool, same per-head
+        # seed) — the whole point of the flag. Equal label-0 counts prove the
+        # negatives are the same out-of-subtree windows, not a shrunken pool.
+        single = _head_11118_class_counts(binary_single_level_output["output_dir"])
+        full = _head_11118_class_counts(binary_pipeline_output["output_dir"])
+        assert single == full, (
+            f"single-level 11118 head differs from full run: {single} != {full}")
+
+
+@pytest.fixture(scope="module")
+def multi_single_level_output(synthetic_env, tmp_path_factory):
+    """Multi-class + ``single_level='11118'``: only the Coronaviridae decision point."""
+    output_dir = str(tmp_path_factory.mktemp("multi_single_out"))
+    orch = _single_level_orch(synthetic_env, output_dir)
+    orch.run_pipeline(
+        target_group="viruses", sync=False, abundance_threshold=1,
+        single_level="11118")
+    return {"output_dir": output_dir}
+
+
+class TestMultiSingleLevelTarget:
+    def test_only_the_interior_target_head_is_scheduled(
+        self, multi_single_level_output
+    ):
+        # Reaches an interior node (11118) directly and stops: the root (10239)
+        # head above it and the species heads below it are NOT emitted.
+        out = Path(multi_single_level_output["output_dir"])
+        manifest = json.loads((out / "manifest_viruses.json").read_text())
+        assert set(manifest) == {"11118"}, (
+            f"expected only the 11118 head, got {set(manifest)}")
+
+    def test_target_head_is_a_real_multiclass_head(self, multi_single_level_output):
+        # The head has its own classes (the two Coronaviridae species) + whatever
+        # bucketing added — i.e. a genuine decision point, not a degenerate stub.
+        out = Path(multi_single_level_output["output_dir"])
+        manifest = json.loads((out / "manifest_viruses.json").read_text())
+        assert len(manifest["11118"]["labels"]) >= 2, (
+            f"11118 head is not multi-class: {manifest['11118']['labels']}")

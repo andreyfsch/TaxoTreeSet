@@ -89,10 +89,19 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     depth_group.add_argument(
         "--single-level",
-        action="store_true",
-        help="Generate only the root's head: its direct children become "
-        "training labels with no further recursion. Mutually exclusive "
-        "with --stop-at.",
+        nargs="?",
+        const=True,
+        default=False,
+        metavar="TAXID",
+        help="Bare (--single-level): generate only the root's head, its "
+        "direct children becoming training labels with no further "
+        "recursion. With a TaxID (--single-level 1335638): generate only "
+        "the head at that node, anywhere in the tree. The full --root tree "
+        "is still built, so the reject / not-belongs negatives are sampled "
+        "from outside the node's subtree exactly as in a full run — use "
+        "--root <ancestor> (e.g. viruses) with --no-sync, NOT --root "
+        "<TaxID>, to regenerate a single head as a drop-in replacement. "
+        "Mutually exclusive with --stop-at.",
     )
     parser.add_argument(
         "--output-format", "-f",
@@ -403,7 +412,9 @@ def run(args: argparse.Namespace) -> None:
         print("\n" + "=" * 60)
         print("   CASCADED DATASET PRODUCTION SUCCEEDED")
         print(f"   Generation Root    : {args.root}")
-        if args.single_level:
+        if isinstance(args.single_level, str):
+            depth_desc = f"single head (TaxID {args.single_level} only)"
+        elif args.single_level:
             depth_desc = "single level (root head only)"
         elif args.stop_at:
             depth_desc = f"stop at {args.stop_at}"
