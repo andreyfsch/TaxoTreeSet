@@ -15,6 +15,7 @@ random split. The clustering thus self-verifies the need — homogeneous heads p
 nothing and keep the old behaviour.
 """
 
+import math
 import zlib
 from collections import defaultdict
 
@@ -24,6 +25,12 @@ _KMER_K = 21
 _SKETCH_SIZE = 200
 _JACCARD_THRESHOLD = 0.30
 _MIN_CLUSTER_GENOMES = 2
+# The two largest clusters must EACH cover at least this fraction of the genomes
+# for the structure to be actionable. Without it, a diverse head (RefSeq is ~1
+# genome/species, so most genomes are singletons) would pass on a couple of tiny
+# near-clone pairs, then the stratified split would starve val/test and fall back
+# anyway — so require substantial, segregable sub-lineages instead.
+_MIN_CLUSTER_FRAC = 0.10
 # Pairwise clustering is O(n^2); above this genome count, skip it (caller falls
 # back to the random split) rather than stall a wide head.
 _MAX_GENOMES = 300
@@ -72,6 +79,7 @@ def cluster_genomes(
     sketch_size: int = _SKETCH_SIZE,
     threshold: float = _JACCARD_THRESHOLD,
     min_cluster_genomes: int = _MIN_CLUSTER_GENOMES,
+    min_cluster_frac: float = _MIN_CLUSTER_FRAC,
     max_genomes: int = _MAX_GENOMES,
 ) -> list[list[dict]] | None:
     """Cluster a class's genomes by MinHash similarity, if there is structure.
@@ -84,8 +92,11 @@ def cluster_genomes(
         k: k-mer size for the sketch.
         sketch_size: Bottom-k MinHash sketch size per genome.
         threshold: MinHash Jaccard above which two genomes join a cluster.
-        min_cluster_genomes: The two largest clusters must each hold at least
-            this many genomes for the structure to count as actionable.
+        min_cluster_genomes: Absolute floor on a cluster's size to count.
+        min_cluster_frac: A cluster must also cover at least this fraction of the
+            genomes to count; there must be >= 2 such clusters. This rejects
+            diverse heads (mostly singletons + a few near-clone pairs) where the
+            stratified split would gain nothing.
         max_genomes: Skip clustering above this count (the pairwise pass is
             O(n^2)); the caller then keeps the random split.
 
@@ -111,7 +122,10 @@ def cluster_genomes(
         if _jaccard(sketches[i], sketches[j], sketch_size) >= threshold
     ]
     clusters_idx = _connected_components(n, edges)
-    sizes = sorted((len(c) for c in clusters_idx), reverse=True)
-    if len(clusters_idx) < 2 or sizes[1] < min_cluster_genomes:
+    # Actionable only with >= 2 substantial clusters (each >= min_cluster_genomes
+    # AND >= min_cluster_frac of the genomes) — a couple of tiny near-clone pairs
+    # in an otherwise-diverse head is not segregable structure worth splitting on.
+    min_size = max(min_cluster_genomes, math.ceil(min_cluster_frac * n))
+    if sum(1 for cluster in clusters_idx if len(cluster) >= min_size) < 2:
         return None
     return [[tasks[i] for i in cluster] for cluster in clusters_idx]

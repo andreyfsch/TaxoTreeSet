@@ -93,6 +93,20 @@ class TestClusterGenomes:
             assert cluster_genomes(tasks, max_genomes=3) is None
             m.assert_not_called()  # short-circuits before any sequence read
 
+    def test_diverse_head_with_tiny_pairs_returns_none(self):
+        # 26 distinct genomes + 2 near-clone pairs: each pair is < min_cluster_frac
+        # of 30, so not actionable (the real 2732529 / RefSeq-diversity case).
+        seqs = {
+            f"s{i}": "".join(random.Random(100 + i).choices("ACGT", k=1500))
+            for i in range(26)
+        }
+        pa = "".join(random.Random(900).choices("ACGT", k=1500))
+        pb = "".join(random.Random(901).choices("ACGT", k=1500))
+        seqs.update({"pa1": pa, "pa2": pa, "pb1": pb, "pb2": pb})
+        tasks = _tasks(list(seqs))
+        with patch(_MOCK, side_effect=lambda p, h: seqs[h]):
+            assert cluster_genomes(tasks) is None
+
     def test_one_big_cluster_plus_singleton_returns_none(self):
         # a1..a3 identical (cluster of 3) + one lone b -> second-largest is a
         # singleton (< min_cluster_genomes) -> not actionable.

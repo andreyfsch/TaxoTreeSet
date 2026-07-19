@@ -404,6 +404,22 @@ constants — **need tuning on real data** (validate on `1335638`). Tests:
 `tests/unit/test_cluster.py` (15). Threading: `cli/generate.py` →
 `GenerationOrchestrator.cluster_aware_split` → the `_materialize_leaf_split` delegator.
 
+**Phase 1b — DONE (2026-07-19): block-stratified window slicing (2nd mechanism).**
+Validating Phase 1 on `1335638` exposed a *distinct* mechanism: that head has ONE
+belongs genome, so it uses the window-slicing path (not the multi-genome clustering
+Phase 1 fixes). Its contiguous cut (train 0-70% / val 70-85% / test 85-100%) put
+compositionally-distinct genome thirds in different splits (GC 0.356 / 0.407 / 0.316)
+→ val diverges from train on the same genome. Under the SAME `--cluster-aware-split`
+flag, the window-slicing branch now cuts the genome into `L // max_subseq_len` blocks
+(each >= max_subseq_len, so windows keep full length — no length confound) and assigns
+them by an interleaving pattern (~5:1:1) that spreads val/test blocks AMONG train
+blocks; windows stay confined to their block (leakage-safe). Falls back to the
+contiguous cut when unreadable or too short (< 6 blocks). Off by default →
+byte-identical. Validated on NC_021333.1: per-split GC 0.356/0.407/0.316 → 0.359/0.345/
+0.360 (val/test now match train). So P10 addresses **two mechanisms**: multi-genome
+sub-lineage (Phase 1) and single-genome positional (Phase 1b). Still TODO: tune the
+MinHash threshold on a multi-genome head (1335638 can't — 1 genome).
+
 **Phase 2 — open:** disjoint `test_novel` holdout (a 4th split, only when >= 3
 clusters) + label_map metadata (n_clusters, holdout coverage) + downstream
 propagation (`_SPLITS`, DatasetBuilder, separability/composition). Also: expose the
