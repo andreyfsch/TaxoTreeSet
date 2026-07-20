@@ -19,14 +19,31 @@ from taxotreeset.core._orchestration._splits import (
 
 _SPLIT_MOCK = "taxotreeset.core._orchestration._splits._read_single_sequence"
 
-# Two independent random 2 kbp "genomes": near-disjoint 21-mer sets.
+# Three independent random 2 kbp "genomes": near-disjoint 21-mer sets.
 _SA = "".join(random.Random(1).choices("ACGT", k=2000))
 _SB = "".join(random.Random(2).choices("ACGT", k=2000))
+_SC = "".join(random.Random(3).choices("ACGT", k=2000))
 _MOCK = "taxotreeset.core._orchestration._cluster._read_single_sequence"
 
 
 def _tasks(header_ids):
     return [{"fasta_path": "/vault", "header_id": h, "n": 100} for h in header_ids]
+
+
+def _tasks_abc(a=5, b=4, c=3):
+    """Tasks for three distinct clusters of sizes a > b > c (c the smallest)."""
+    return _tasks(
+        [f"a{i}" for i in range(a)]
+        + [f"b{i}" for i in range(b)]
+        + [f"c{i}" for i in range(c)]
+    )
+
+
+def _seq_map_abc(a=5, b=4, c=3):
+    m = {f"a{i}": _SA for i in range(a)}
+    m.update({f"b{i}": _SB for i in range(b)})
+    m.update({f"c{i}": _SC for i in range(c)})
+    return m
 
 
 def _seq_map(**overrides):
@@ -250,6 +267,48 @@ class TestClusterParams:
             for split in ("train", "val", "test"):
                 assert {t["header_id"][0] for t in explicit[split]} == {
                     t["header_id"][0] for t in implicit[split]}
+
+
+class TestNovelHoldout:
+    def test_holds_out_smallest_cluster_as_disjoint_test_novel(self):
+        # a(5) > b(4) > c(3): with >= 3 splittable clusters, the smallest (c) is
+        # carved off WHOLE into test_novel; a + b fill train/val/test.
+        tasks = _tasks_abc(5, 4, 3)
+        with patch(_MOCK, side_effect=lambda p, h: _seq_map_abc()[h]):
+            split = _cluster_stratified_split(
+                tasks, 1, 3, ClusterParams(), novel_holdout=True)
+        assert split is not None
+        assert "test_novel" in split
+        assert {t["header_id"][0] for t in split["test_novel"]} == {"c"}
+        assert len(split["test_novel"]) == 3  # the whole cluster
+        for s in ("train", "val", "test"):
+            assert split[s], f"{s} left empty"
+            assert "c" not in {t["header_id"][0] for t in split[s]}, (
+                f"held-out cluster leaked into {s}")
+
+    def test_no_holdout_below_three_clusters(self):
+        tasks = _tasks_abc(5, 4, 0)  # only two clusters
+        with patch(_MOCK, side_effect=lambda p, h: _seq_map_abc(5, 4, 0)[h]):
+            split = _cluster_stratified_split(
+                tasks, 1, 3, ClusterParams(), novel_holdout=True)
+        assert split is not None
+        assert "test_novel" not in split
+
+    def test_off_by_default_leaves_no_test_novel(self):
+        tasks = _tasks_abc(5, 4, 3)
+        with patch(_MOCK, side_effect=lambda p, h: _seq_map_abc()[h]):
+            split = _cluster_stratified_split(tasks, 1, 3, ClusterParams())
+        assert split is not None
+        assert "test_novel" not in split
+
+    def test_materialize_leaf_split_surfaces_the_holdout(self):
+        tasks = _tasks_abc(5, 4, 3)
+        with patch(_MOCK, side_effect=lambda p, h: _seq_map_abc()[h]):
+            split = _materialize_leaf_split(
+                tasks, 1, random.Random(0), min_genomes_for_genome_split=3,
+                cluster_aware=True, cluster_novel_holdout=True)
+        assert split.get("test_novel")
+        assert {t["header_id"][0] for t in split["test_novel"]} == {"c"}
 
 
 class TestClusterAwareWindowSlicing:

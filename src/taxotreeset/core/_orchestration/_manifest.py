@@ -113,6 +113,11 @@ def _write_label_maps(scheduling_artifacts: dict[str, Any]) -> None:
             "label2id": label2id,
             "classes": classes,
         }
+        # The disjoint novel-lineage holdout (cluster-aware split): present only
+        # on heads that carved off a test_novel cluster, so a trainer/evaluator
+        # knows a test_novel.parquet exists and what it covers.
+        if v.get("novel_holdout"):
+            label_map["novel_holdout"] = v["novel_holdout"]
         if balance_mode == "keep":
             # "balanced" class weights (total / (n_classes * n_c)) so a trainer
             # can offset the on-disk imbalance in its loss (or drive oversampling).
@@ -256,6 +261,7 @@ def _write_run_metadata(
             "binary_budget": ctx.binary_budget,
             "all_ranks": ctx.all_ranks,
             "cluster_aware_split": ctx.cluster_aware_split,
+            "cluster_novel_holdout": ctx.cluster_novel_holdout,
             "cluster_params": (
                 dataclasses.asdict(ctx.cluster_params)
                 if ctx.cluster_aware_split else None

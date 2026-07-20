@@ -364,7 +364,7 @@ P4 (cross-domain negatives), the `--binary-only` machinery.
 
 ---
 
-## 🟠 P10 — Cluster-aware split (non-i.i.d. genomes across train/val/test)
+## 🟢 P10 — Cluster-aware split (non-i.i.d. genomes across train/val/test) — DONE
 
 **Problem (diagnosed on the pilot, 2026-07-19).** Head `1335638` (a deep binary
 belongs/not-belongs head) trained to **test f1 0.98** but its **eval f1 peaked at
@@ -460,15 +460,41 @@ returns None). Regenerated both via `--root viruses --single-level <taxid>
 So "fires the mechanism" != "meaningfully changes the split": `1335638` was the
 only genuinely broken head.
 
-**Phase 2 — open:** disjoint `test_novel` holdout (a 4th split, only when >= 3
-clusters) + label_map metadata (n_clusters, holdout coverage) + downstream
-propagation (`_SPLITS`, DatasetBuilder, separability/composition). Also: expose the
-MinHash params as flags; consider reusing capacity-pass reads to avoid re-reading
-genomes; per-genome sketch caching.
+**MinHash params as flags — DONE (2026-07-20).** The clustering knobs were
+hardcoded constants, but the split rarely fires on RefSeq (diverse genomes), so
+tuning matters for denser data. New frozen `ClusterParams` value object (defaults
+= the old constants) threaded CLI -> orchestrator -> `_materialize_leaf_split` ->
+`_cluster_stratified_split` -> `cluster_genomes`. Three decision knobs exposed:
+`--cluster-jaccard-threshold`, `--cluster-min-genomes`, `--cluster-min-frac`
+(k / sketch_size / max_genomes stay as ClusterParams defaults). Run metadata now
+records `cluster_aware_split` + `cluster_params`.
 
-Files: `core/_orchestration/_cluster.py` (new), `core/_orchestration/_splits.py`,
-`core/_orchestration/_scheduler.py`, `core/generation_orchestrator.py`,
-`cli/generate.py`.
+**Phase 2 (test_novel holdout) — DONE (2026-07-20).** Opt-in
+`--cluster-novel-holdout` (with `--cluster-aware-split`): when a class has
+`>= _MIN_CLUSTERS_FOR_NOVEL_HOLDOUT` (3) splittable MinHash clusters,
+`_cluster_stratified_split` carves the **smallest** one out WHOLE into a 4th
+`test_novel` split (disjoint sub-lineage, never trained on) and fills train/val/
+test from the rest — an honest novel-lineage generalization measure vs the
+in-distribution `test`. Downstream: `_NOVEL_SPLIT`/`_ALL_SPLITS` in `_splits.py`;
+the scheduler merges via `_merge_split_tasks` (binary + multi) and records a
+head-level `novel_holdout` ({n_windows, class_indices}) in the manifest via
+`_novel_holdout_meta`; `builder._SPLITS` gains `test_novel` (skip-empty → no file
+for the common no-holdout head); `_write_label_maps` copies `novel_holdout` into
+label_map.json. separability (reads train/test by name) and composition (default
+`train`) ignore the 4th split — safe, no change needed. Off by default →
+byte-identical. **Rarely triggers on RefSeq** (needs >= 3 well-separated clusters;
+genomes are diverse) — forward-looking infra for GenBank strain data, same as
+Phase 1. Tests: holdout logic (smallest carved out, < 3 clusters → none, off →
+none), merge/meta helpers, builder writes test_novel both paths + absent case.
+
+**Still open (minor follow-ups):** n_clusters in label_map (needs threading the
+cluster count up from the split; holdout coverage is recorded, n_clusters isn't);
+have separability optionally also score `test_novel`; reuse capacity-pass reads /
+cache per-genome sketches to avoid re-reading genomes.
+
+Files: `core/_orchestration/_cluster.py`, `core/_orchestration/_splits.py`,
+`core/_orchestration/_scheduler.py`, `core/_orchestration/_manifest.py`,
+`core/generation_orchestrator.py`, `cli/generate.py`, `dataset/builder.py`.
 
 ---
 

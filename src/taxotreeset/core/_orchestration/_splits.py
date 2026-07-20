@@ -14,6 +14,14 @@ from taxotreeset.dataset.utils import _read_single_sequence
 _STRATIFIED_TRAIN_RATIO: float = 0.70
 _STRATIFIED_VAL_RATIO: float = 0.15
 _SPLITS: tuple[str, ...] = ("train", "val", "test")
+# Optional 4th split: a whole MinHash cluster held out of training entirely, for
+# an honest novel-sub-lineage generalization measurement (opt-in, only when the
+# class has enough clusters to spare one — see ``_cluster_stratified_split``).
+_NOVEL_SPLIT: str = "test_novel"
+_ALL_SPLITS: tuple[str, ...] = (*_SPLITS, _NOVEL_SPLIT)
+# Need at least this many splittable clusters to carve off a novel holdout: hold
+# out one and still keep >= 2 to fill train/val/test.
+_MIN_CLUSTERS_FOR_NOVEL_HOLDOUT: int = 3
 
 # Cluster-aware window-slicing (few-genome classes): a repeating block -> split
 # pattern (~5:1:1 = 71/14/14) that INTERLEAVES all three splits, so val/test
@@ -140,6 +148,7 @@ def _cluster_stratified_split(
     class_index: int,
     min_genomes: int,
     cluster_params: ClusterParams | None = None,
+    novel_holdout: bool = False,
 ) -> dict[str, list[dict]] | None:
     """Spread each MinHash cluster of ``tasks`` across train/val/test.
 
@@ -148,16 +157,26 @@ def _cluster_stratified_split(
     the splits (small clusters go to train), so every split spans every
     sub-lineage — the fix for the non-i.i.d.-split instability.
 
+    When ``novel_holdout`` is set and there are ``>= _MIN_CLUSTERS_FOR_NOVEL_HOLDOUT``
+    splittable clusters, the smallest such cluster is instead held out **whole**
+    into the :data:`_NOVEL_SPLIT` split — a disjoint sub-lineage the model never
+    trains on, so ``test_novel`` measures novel-lineage generalization (vs the
+    in-distribution ``test``). Holding out the smallest keeps training-data loss
+    minimal and still leaves ``>= 2`` clusters to fill train/val/test.
+
     Args:
         tasks: Per-leaf tasks for the class (one per genome).
         class_index: Numeric label index for this child.
         min_genomes: Cluster size at/above which a cluster is split three ways.
         cluster_params: MinHash tuning knobs; ``None`` uses the defaults.
+        novel_holdout: When True, carve off a disjoint ``test_novel`` cluster if
+            there are enough clusters to spare one.
 
     Returns:
-        The splits dict, or ``None`` when there is no structure OR the cluster
-        split would leave a split empty (the caller then keeps the whole-class
-        random split, preserving the >= 1-genome-per-split guarantee).
+        The splits dict (with an optional ``test_novel`` key), or ``None`` when
+        there is no structure OR the cluster split would leave a required split
+        empty (the caller then keeps the whole-class random split, preserving the
+        >= 1-genome-per-split guarantee).
     """
     cp = cluster_params or ClusterParams()
     clusters = cluster_genomes(
@@ -171,17 +190,26 @@ def _cluster_stratified_split(
     )
     if clusters is None:
         return None
+    splittable = [c for c in clusters if len(c) >= min_genomes]
+    small = [c for c in clusters if len(c) < min_genomes]
+    holdout: list[dict] | None = None
+    if novel_holdout and len(splittable) >= _MIN_CLUSTERS_FOR_NOVEL_HOLDOUT:
+        splittable = sorted(splittable, key=len)
+        holdout, splittable = splittable[0], splittable[1:]
     candidate: dict[str, list[dict]] = {split: [] for split in _SPLITS}
-    for cluster in clusters:
-        if len(cluster) >= min_genomes:
-            _assign_stratified(cluster, class_index, candidate)
-        else:
-            # too few genomes to split three ways; keep as training signal
-            for task in cluster:
-                candidate["train"].append(_enrich_task(task, class_index, 0.0, 1.0))
-    if all(candidate[split] for split in _SPLITS):
-        return candidate
-    return None
+    for cluster in splittable:
+        _assign_stratified(cluster, class_index, candidate)
+    for cluster in small:
+        # too few genomes to split three ways; keep as training signal
+        for task in cluster:
+            candidate["train"].append(_enrich_task(task, class_index, 0.0, 1.0))
+    if not all(candidate[split] for split in _SPLITS):
+        return None
+    if holdout is not None:
+        candidate[_NOVEL_SPLIT] = [
+            _enrich_task(task, class_index, 0.0, 1.0) for task in holdout
+        ]
+    return candidate
 
 
 def _even_split(budget: int, n_blocks: int) -> list[int]:
@@ -258,6 +286,7 @@ def _materialize_leaf_split(
     cluster_aware: bool = False,
     max_subseq_len: int = 2000,
     cluster_params: ClusterParams | None = None,
+    cluster_novel_holdout: bool = False,
 ) -> dict[str, list[dict]]:
     """Split a single child's per-leaf tasks into train/val/test.
 
@@ -285,6 +314,10 @@ def _materialize_leaf_split(
             cluster-aware window-slicing path (so blocked windows keep full length).
         cluster_params: MinHash tuning knobs for the genome-level cluster-aware
             path; ``None`` uses the defaults.
+        cluster_novel_holdout: When True (and ``cluster_aware``), the genome-level
+            path may carve off a whole cluster into a disjoint ``test_novel`` split
+            (see :func:`_cluster_stratified_split`). The returned dict then has a
+            4th ``test_novel`` key; otherwise it has only train/val/test.
 
     Returns:
         Dictionary with 'train', 'val', 'test' keys; each value
@@ -303,15 +336,16 @@ def _materialize_leaf_split(
         assigned = (
             _cluster_stratified_split(
                 shuffled, class_index, min_genomes_for_genome_split,
-                cluster_params,
+                cluster_params, novel_holdout=cluster_novel_holdout,
             )
             if cluster_aware else None
         )
         if assigned is None:
             _assign_stratified(shuffled, class_index, result)
         else:
-            for split in _SPLITS:
-                result[split] = assigned[split]
+            # assigned always has the required 3 splits and MAY add test_novel.
+            for split, tasks in assigned.items():
+                result[split] = tasks
     else:
         for task in shuffled:
             if cluster_aware and _block_stratified_windows(

@@ -72,7 +72,10 @@ logger = logging.getLogger("TaxoTreeSet.Dataset.Builder")
 _BUFFER_SIZE_ROWS = 10_000
 _DEFAULT_MIN_SUBSEQ_LEN = 100
 _PARQUET_COMPRESSION = "snappy"
-_SPLITS = ("train", "val", "test")
+# "test_novel" is the optional disjoint novel-lineage holdout (cluster-aware
+# split); most heads have no such split, so the per-split writers below skip it
+# when its task list is empty (no empty parquet is written).
+_SPLITS = ("train", "val", "test", "test_novel")
 _LOW_MEMORY_THRESHOLD_GB = 12
 _LOW_MEMORY_WORKER_COUNT = 2
 _WORKERS_RESERVED_FOR_PARENT = 2

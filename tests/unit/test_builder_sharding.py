@@ -177,6 +177,32 @@ class TestShardedBuild:
         assert _rows(os.path.join(str(shard_dir), "train.parquet")) == 40
         assert not _parts(str(shard_dir), "train")   # parts deleted after merge
 
+    def test_test_novel_holdout_split_is_written_both_paths(self, tmp_path):
+        # The optional 4th split (cluster-aware novel-lineage holdout) must be
+        # written by both the serial and the sharded extraction paths.
+        vault = _make_vault(tmp_path, 14)
+        parent_tasks = self._parent_tasks(vault)
+        parent_tasks["test_novel"] = [
+            _task(vault, f"seq{i}", class_idx=1) for i in (12, 13)
+        ]
+        serial_dir = tmp_path / "serial_novel"
+        serial_dir.mkdir()
+        extract_parent_node_worker(_job("t", str(serial_dir), parent_tasks))
+        shard_dir = tmp_path / "shard_novel"
+        shard_dir.mkdir()
+        _build_sharded_direct(
+            [_job("t", str(shard_dir), parent_tasks)], shard_rows_target=15)
+        for d in (serial_dir, shard_dir):
+            assert _rows(os.path.join(str(d), "test_novel.parquet")) == 2 * _N
+
+    def test_no_test_novel_file_without_a_holdout(self, tmp_path):
+        # Heads without a holdout must not emit an (empty) test_novel parquet.
+        vault = _make_vault(tmp_path, 12)
+        target = tmp_path / "plain"
+        target.mkdir()
+        extract_parent_node_worker(_job("t", str(target), self._parent_tasks(vault)))
+        assert not os.path.exists(os.path.join(str(target), "test_novel.parquet"))
+
     def test_single_task_head_one_shard(self, tmp_path):
         vault = _make_vault(tmp_path, 1)
         target = tmp_path / "one"

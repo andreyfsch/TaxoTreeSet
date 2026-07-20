@@ -14,6 +14,8 @@ from bigtree import Node
 from taxotreeset.core._orchestration._scheduler import (
     _CascadeScheduler,
     _accumulated_path_to,
+    _merge_split_tasks,
+    _novel_holdout_meta,
 )
 
 
@@ -59,3 +61,34 @@ class TestFindSingleLevelTarget:
         domain = Node("10239", parent=Node("root"))
         Node("11118", parent=domain)
         assert self._scheduler("99999")._find_single_level_target(domain) is None
+
+
+class TestSplitMergeAndHoldout:
+    def test_merges_per_class_splits_over_all_splits(self):
+        pos = {
+            "train": [{"n": 1, "class_idx": 1}], "val": [], "test": [],
+            "test_novel": [{"n": 2, "class_idx": 1}],
+        }
+        neg = {
+            "train": [{"n": 3, "class_idx": 0}],
+            "val": [{"n": 1, "class_idx": 0}], "test": [],
+        }  # note: no test_novel key on the negatives
+        merged = _merge_split_tasks(pos, neg)
+        assert set(merged) == {"train", "val", "test", "test_novel"}
+        assert len(merged["train"]) == 2  # pos + neg concatenated
+        assert len(merged["val"]) == 1
+        assert merged["test"] == []
+        assert len(merged["test_novel"]) == 1  # only pos held one out
+
+    def test_novel_meta_is_none_without_holdout(self):
+        assert _novel_holdout_meta({"train": [{"n": 1, "class_idx": 0}]}) is None
+        assert _novel_holdout_meta({"test_novel": []}) is None
+
+    def test_novel_meta_summarizes_windows_and_classes(self):
+        parent_tasks = {
+            "test_novel": [
+                {"n": 10, "class_idx": 1}, {"n": 5, "class_idx": 1},
+            ]
+        }
+        assert _novel_holdout_meta(parent_tasks) == {
+            "n_windows": 15, "class_indices": [1]}
