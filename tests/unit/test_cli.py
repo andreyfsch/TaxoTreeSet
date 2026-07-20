@@ -54,6 +54,22 @@ class TestBuildParser:
             main([])
         assert exc_info.value.code == 1
 
+    def test_cluster_aware_split_is_on_by_default(self):
+        parser = build_parser()
+        assert parser.parse_args(["generate"]).cluster_aware_split is True
+
+    def test_no_cluster_aware_split_opts_out(self):
+        parser = build_parser()
+        args = parser.parse_args(["generate", "--no-cluster-aware-split"])
+        assert args.cluster_aware_split is False
+
+    def test_cluster_aware_flags_are_mutually_exclusive(self):
+        parser = build_parser()
+        with pytest.raises(SystemExit) as exc_info:
+            parser.parse_args(
+                ["generate", "--cluster-aware-split", "--no-cluster-aware-split"])
+        assert exc_info.value.code == 2
+
     def test_single_level_and_stop_at_are_mutually_exclusive(self):
         # The help promises the two cannot be combined; argparse rejects the
         # combination up front (exit 2) instead of a deep run_pipeline ValueError.

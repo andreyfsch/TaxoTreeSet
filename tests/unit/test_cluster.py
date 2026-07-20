@@ -183,6 +183,17 @@ class TestBlockStratifiedWindows:
         assert all(result[s] for s in ("train", "val", "test"))
         assert sum(t["n"] for s in result for t in result[s]) == 300      # budget kept
 
+    def test_uses_precomputed_length_without_reading(self):
+        # When the task carries "length" (attached during task distribution), the
+        # block split must use it and NOT re-read the genome.
+        task = {"fasta_path": "/v", "header_id": "g1", "n": 300, "length": 1000}
+        result = {s: [] for s in ("train", "val", "test")}
+        with patch(_SPLIT_MOCK) as m:
+            emitted = _block_stratified_windows(task, 0, 100, result)  # 10 blocks
+            m.assert_not_called()
+        assert emitted
+        assert all(result[s] for s in ("train", "val", "test"))
+
     def test_short_genome_falls_back(self):
         task = {"fasta_path": "/v", "header_id": "g", "n": 100}
         result = {s: [] for s in ("train", "val", "test")}

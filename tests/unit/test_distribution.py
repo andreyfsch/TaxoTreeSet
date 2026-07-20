@@ -276,9 +276,12 @@ class TestAllocateNAcrossLeaves:
         leaf = make_seq_leaf("NC_001", "/vault/path")
         with patch(_MOCK_SEQ_PATH, return_value="A" * 200):
             tasks = _allocate_n_across_leaves([leaf], n_per_class=10, min_subseq_len=10)
-        assert tasks[0].keys() == {"fasta_path", "header_id", "n"}
+        assert tasks[0].keys() == {"fasta_path", "header_id", "n", "length"}
         assert tasks[0]["fasta_path"] == "/vault/path"
         assert tasks[0]["header_id"] == "NC_001"
+        # length is recovered from the share weight (len - min_subseq_len + 1),
+        # so it equals the true genome length without an extra read.
+        assert tasks[0]["length"] == 200
 
 
 # ---------------------------------------------------------------------------

@@ -250,11 +250,11 @@ genome is assigned entirely to a single split, so no sliding window is ever
 shared between splits — there is no leakage. Only when a class has fewer than
 three genomes does it fall back to slicing a single sequence positionally
 (70 / 15 / 15), accepting some intra-genome leakage as the price of having any
-data at all for that class. Both modes have an optional **cluster-aware** variant
-(`--cluster-aware-split`) that keeps the split representative when a class's
-genomes are phylogenetically clustered — see below.
+data at all for that class. Both modes are **cluster-aware by default**
+(`--no-cluster-aware-split` to disable), keeping the split representative when a
+class's genomes are phylogenetically clustered — see below.
 
-### Cluster-aware splitting (optional)
+### Cluster-aware splitting (default)
 
 ![Cluster-aware splitting: a random split can segregate a whole sub-lineage into val, collapsing it; --cluster-aware-split spreads each MinHash cluster across all splits so val stays representative of test](docs/figures/cluster_aware_split.png)
 
@@ -265,9 +265,10 @@ clustered** genomes, and a random assignment can drop a whole sub-lineage into
 resembles `train`) looks great. A single per-head F1 then hides an unstable,
 non-representative split; the `val`↔`test` gap is the tell.
 
-`--cluster-aware-split` (off by default → byte-identical output) makes the split
-representative, and is **self-verifying** so it costs nothing where it is not
-needed:
+The cluster-aware split is **on by default** (`--no-cluster-aware-split` opts out,
+restoring the plain random / contiguous split). It makes the split representative
+and is **self-verifying** — where genomes aren't clustered it falls back to the
+plain split, so it is never *wrong*, only occasionally unnecessary:
 
 - **Genome-level.** It MinHash-clusters the class's genomes (tool-free: a bottom-k
   sketch of each genome's k-mers, single-linkage by the Jaccard estimate) and, only
@@ -364,7 +365,7 @@ Key options:
 | `--min-leaves-per-class` | 3             | Minimum sequence leaves for a child to stay a standalone class |
 | `--rare-taxa-strategy`   | fallback      | `fallback` (divert rare taxa) or `keep` (retain all classes)   |
 | `--keep-imbalance`       | off           | Keep each class up to its own capacity (capped by `--max-n-per-class`) instead of undersampling to the sibling minimum; records `class_weights` in `label_map.json` |
-| `--cluster-aware-split`  | off           | Make train/val/test representative for non-i.i.d. genomes (MinHash cluster-stratified + block-stratified windows); self-verifying. Tune with `--cluster-jaccard-threshold` / `--cluster-min-genomes` / `--cluster-min-frac` |
+| `--no-cluster-aware-split` | (on)        | Cluster-aware splitting is **on by default** (MinHash cluster-stratified + block-stratified windows keep train/val/test representative for non-i.i.d. genomes; self-verifying). This flag opts out; tune the default with `--cluster-jaccard-threshold` / `--cluster-min-genomes` / `--cluster-min-frac` |
 | `--all-ranks`            | off           | Resolve lineages at full NCBI granularity (sub-ranks/clades), not just the 8 canonical ranks |
 | `--binary-only`          | off           | One belongs/not-belongs head per node instead of multi-class heads (with `--binary-budget`, `--extract-batch-size`) |
 
@@ -381,7 +382,7 @@ Behind these options, the per-head mechanics are illustrated in
 [virtual buckets](#virtual-buckets); `--max-subseq-len` sets the window for
 [extraction and the leakage-safe split](#splitting-whole-genomes-leakage-safe);
 and `--cluster-aware-split` makes that split representative for non-i.i.d.
-genomes ([cluster-aware splitting](#cluster-aware-splitting-optional)).
+genomes ([cluster-aware splitting](#cluster-aware-splitting-default)).
 What actually gets downloaded is decided by
 [selective download with capacity-driven refinement](#selective-download-with-capacity-driven-refinement).
 

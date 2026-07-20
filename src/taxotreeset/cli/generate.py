@@ -173,16 +173,27 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "trainer can rebalance (class weights / oversampling) at fine-tuning "
         "time. Off by default (the dataset stays balanced and model-agnostic).",
     )
-    parser.add_argument(
+    cluster_group = parser.add_mutually_exclusive_group()
+    cluster_group.add_argument(
         "--cluster-aware-split",
+        dest="cluster_aware_split",
         action="store_true",
-        help="Opt-in: before the genome-level train/val/test split, MinHash-"
-        "cluster each class's genomes (tool-free) and spread every sub-lineage "
-        "cluster across the splits, so val/test stay representative of the "
-        "head's diversity. Fixes the instability where a random split segregates "
-        "a whole sub-lineage into val (tanking it while test looks great). "
-        "Self-verifying: applies only when >= 2 well-separated clusters are "
-        "found, else keeps the random split. Off by default.",
+        default=True,
+        help="ON BY DEFAULT (this flag is the explicit form): before the "
+        "genome-level train/val/test split, MinHash-cluster each class's genomes "
+        "(tool-free) and spread every sub-lineage cluster across the splits, so "
+        "val/test stay representative of the head's diversity. Single/few-genome "
+        "classes get a block-stratified positional split instead of a contiguous "
+        "one. Self-verifying: applies only when there is actionable structure, "
+        "else keeps the random/contiguous split. Use --no-cluster-aware-split "
+        "to disable.",
+    )
+    cluster_group.add_argument(
+        "--no-cluster-aware-split",
+        dest="cluster_aware_split",
+        action="store_false",
+        help="Opt out of the cluster-aware split (use the plain random "
+        "genome-level / contiguous positional split).",
     )
     parser.add_argument(
         "--cluster-jaccard-threshold",

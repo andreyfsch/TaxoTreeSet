@@ -983,11 +983,11 @@ def fig_cluster_aware_split() -> None:
             dot(px + 15 + i * 4.2, by + 4, c)
 
     panels = [
-        (4, "default (random split)", BLUE,
+        (4, "--no-cluster-aware-split (opt out)", RED,
          [("train", [A, A, B, B]), ("val", [C, C, C]), ("test", [A, B])],
          "a whole sub-lineage (C) lands in val  →\nval f1 collapses; test "
          "(like train) looks great", RED),
-        (54, "--cluster-aware-split (on)", GREEN,
+        (54, "default (--cluster-aware-split)", GREEN,
          [("train", [A, B, C]), ("val", [A, B, C]), ("test", [A, B, C])],
          "each MinHash cluster is spread across\nall splits  →  val ≈ test "
          "(representative)", GREEN),

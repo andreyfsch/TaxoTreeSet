@@ -208,7 +208,9 @@ def _block_stratified_windows(
     stay confined to their block, so no cross-split window overlaps (leakage-safe).
 
     Args:
-        task: One genome's per-leaf task (``fasta_path`` / ``header_id`` / ``n``).
+        task: One genome's per-leaf task (``fasta_path`` / ``header_id`` / ``n``,
+            and optionally ``length`` — the genome length, precomputed during task
+            distribution so this path need not re-read the genome).
         class_index: Numeric label index.
         max_subseq_len: Upper window length — also the minimum block size.
         result: Splits dict to append to (mutated).
@@ -218,8 +220,12 @@ def _block_stratified_windows(
         genome is unreadable or too short to hold enough blocks — the caller then
         keeps the contiguous window-slicing cut.
     """
-    length = len(_read_single_sequence(task.get("fasta_path", ""),
-                                       task.get("header_id", "")))
+    # Prefer the length precomputed during task distribution (no I/O); fall back
+    # to reading the genome only when it is absent (e.g. reject-bucket tasks).
+    length = task.get("length")
+    if length is None:
+        length = len(_read_single_sequence(task.get("fasta_path", ""),
+                                           task.get("header_id", "")))
     if length <= 0 or max_subseq_len <= 0:
         return False
     n_blocks = length // max_subseq_len
@@ -278,9 +284,11 @@ def _materialize_leaf_split(
             path MinHash-clusters the genomes and spreads each sub-lineage across
             the splits, and the window-slicing path (few-genome classes) spreads
             each genome's windows across interleaved positional blocks instead of
-            contiguous 0-70/70-85/85-100 regions. Both fall back to the current
-            behaviour when there is no structure / the genome is too short. Off by
-            default — the split is byte-identical to before.
+            contiguous 0-70/70-85/85-100 regions. Both fall back to the plain
+            split when there is no structure / the genome is too short. The
+            generation pipeline enables this **by default** (``--no-cluster-aware-
+            split`` opts out); this helper's parameter defaults to False so a bare
+            call still gets the plain split.
         max_subseq_len: Upper window length; also the minimum block size for the
             cluster-aware window-slicing path (so blocked windows keep full length).
         cluster_params: MinHash tuning knobs for the genome-level cluster-aware

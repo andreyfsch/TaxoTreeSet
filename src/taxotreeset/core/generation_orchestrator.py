@@ -176,7 +176,7 @@ class GenerationOrchestrator:
         cutoff_percentage: float = DEFAULT_CUTOFF_PERCENTAGE,
         max_n_per_class: int = DEFAULT_MAX_N_PER_CLASS,
         keep_imbalance: bool = False,
-        cluster_aware_split: bool = False,
+        cluster_aware_split: bool = True,
         cluster_params: ClusterParams | None = None,
         use_exact_capacity: bool = DEFAULT_USE_EXACT_CAPACITY,
         min_leaves_per_class: int = DEFAULT_MIN_LEAVES_PER_CLASS,

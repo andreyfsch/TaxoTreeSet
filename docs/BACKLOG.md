@@ -469,6 +469,21 @@ tuning matters for denser data. New frozen `ClusterParams` value object (default
 (k / sketch_size / max_genomes stay as ClusterParams defaults). Run metadata now
 records `cluster_aware_split` + `cluster_params`.
 
+**Default flipped ON — DONE (2026-07-20).** The cluster-aware split is now the
+**default** (`--no-cluster-aware-split` opts out), because the plain split has a
+known latent confound (the single-genome contiguous cut — 1335638) and the
+cluster-aware path is self-verifying (falls back where genomes aren't clustered,
+so it is never *wrong*, only occasionally unnecessary). To keep the common
+single-genome case cheap, the block-stratified path no longer re-reads the genome
+for its length: `distribute_n_per_class_across_leaves` attaches `length` to each
+task, recovered for free from the share weight (`weight = len - min_subseq_len + 1`),
+and `_block_stratified_windows` reads `task["length"]` (falling back to a read only
+for tasks without it, e.g. reject-bucket negatives). Only the multi-genome MinHash
+clustering still reads sequences (bounded, `max_genomes` cap). Note: default-on is
+NOT byte-identical to prior runs. The orchestrator/CLI default is True; the pure
+`_materialize_leaf_split` helper keeps `cluster_aware=False` so a bare call is
+unchanged.
+
 **Phase 2 (test_novel holdout) — BUILT then REMOVED (2026-07-20).** A
 `--cluster-novel-holdout` flag was implemented (carve the smallest of >= 3 MinHash
 clusters into a disjoint `test_novel` 4th split for novel-lineage generalization),

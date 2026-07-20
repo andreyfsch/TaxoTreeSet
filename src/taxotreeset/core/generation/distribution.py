@@ -196,6 +196,11 @@ def _allocate_n_across_leaves(
                 "fasta_path": getattr(leaf, "fasta_path", ""),
                 "header_id": getattr(leaf, "header_id", ""),
                 "n": share,
+                # Genome length, recovered for free from the share weight
+                # (weight = len - min_subseq_len + 1, and share > 0 implies
+                # weight > 0). Lets the cluster-aware block-stratified split read
+                # the length here instead of re-reading the genome.
+                "length": leaf_weights[leaf_index] + min_subseq_len - 1,
             }
         )
 
