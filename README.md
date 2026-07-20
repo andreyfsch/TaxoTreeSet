@@ -250,7 +250,51 @@ genome is assigned entirely to a single split, so no sliding window is ever
 shared between splits — there is no leakage. Only when a class has fewer than
 three genomes does it fall back to slicing a single sequence positionally
 (70 / 15 / 15), accepting some intra-genome leakage as the price of having any
-data at all for that class.
+data at all for that class. Both modes have an optional **cluster-aware** variant
+(`--cluster-aware-split`) that keeps the split representative when a class's
+genomes are phylogenetically clustered — see below.
+
+### Cluster-aware splitting (optional)
+
+![Cluster-aware splitting: a random split can segregate a whole sub-lineage into val; --cluster-aware-split spreads each MinHash cluster across all splits, and --cluster-novel-holdout carves the smallest cluster out as a disjoint test_novel split](docs/figures/cluster_aware_split.png)
+
+The whole-genome split above assumes a class's genomes are interchangeable. They
+often are not: a class spanning several sub-lineages has **phylogenetically
+clustered** genomes, and a random assignment can drop a whole sub-lineage into
+`val` — the model never trains on it, so `val` collapses while `test` (which
+resembles `train`) looks great. A single per-head F1 then hides an unstable,
+non-representative split; the `val`↔`test` gap is the tell.
+
+`--cluster-aware-split` (off by default → byte-identical output) makes the split
+representative, and is **self-verifying** so it costs nothing where it is not
+needed:
+
+- **Genome-level.** It MinHash-clusters the class's genomes (tool-free: a bottom-k
+  sketch of each genome's k-mers, single-linkage by the Jaccard estimate) and, only
+  when it finds actionable structure (≥ 2 well-separated clusters), spreads each
+  cluster across train/val/test so every split spans every sub-lineage. With no
+  such structure it keeps the random split. On RefSeq (≈ 1 genome/species) genomes
+  are usually diverse, so this is mostly a guard for denser collections (e.g.
+  GenBank strain sets); tune when it engages with `--cluster-jaccard-threshold`,
+  `--cluster-min-genomes`, and `--cluster-min-frac`.
+- **Single / few-genome classes.** These have no genomes to redistribute, so the
+  positional fallback is the risk instead: cutting one genome into three contiguous
+  regions can put compositionally-distinct thirds in different splits (e.g. a
+  GC-skewed end in `val`). Here the flag instead cuts the genome into
+  `length // --max-subseq-len` blocks and interleaves the splits across them
+  (~5 : 1 : 1), so `val`/`test` blocks sit among `train` blocks — representative
+  composition, while each window still stays within one block (no cross-split leak).
+
+**`--cluster-novel-holdout`** goes one step further for the well-clustered case:
+when a class has ≥ 3 clusters, the smallest is held out **whole** into a fourth
+`test_novel` split — a sub-lineage the model *never* trains on. Where `test`
+measures in-distribution accuracy, `test_novel` measures generalization to an
+*unseen* lineage; the gap between them is the honest novelty penalty. It is written
+as `test_novel.parquet` beside the usual splits (only for heads that have one) and
+recorded per head in `label_map.json` under `novel_holdout`. Note it is a **held-out
+evaluation set, not a training input**: training still uses train/val/test, so a
+trainer must *explicitly* score `test_novel` after training to read the metric — the
+reference `examples/finetune_head.py` reads only train/val/test today.
 
 ### Parameterizing generation
 
@@ -262,7 +306,12 @@ Two parameters shape the generated tree. `--root` chooses where it starts:
 `Caudoviricetes`). `--stop-at` chooses
 how deep heads are created — nodes deeper than the given canonical rank still
 become training labels, but not heads of their own — while `--single-level`
-generates only the root's head. Every node from `--root` down to `--stop-at`
+generates only the root's head, or, given a TaxID (`--single-level 1335638`),
+only that one node's head. The latter regenerates a single head in place while
+still building the whole `--root` tree, so its reject / not-belongs negatives are
+sampled from outside the node exactly as in a full run (keep `--root` at an
+ancestor, e.g. `viruses`, not the node itself). Every node from `--root` down to
+`--stop-at`
 becomes one balanced classifier; each head classifies its direct children into a
 single balanced train/val/test dataset.
 
@@ -316,7 +365,7 @@ Key options:
 |--------------------------|---------------|----------------------------------------------------------------|
 | `--root, -g`             | viruses       | Where generation starts: `all` (every domain), a domain shortcut, NCBI TaxID, or clade name |
 | `--stop-at`              | (deepest)     | Canonical rank where heads stop; deeper taxa become labels only |
-| `--single-level`         | off           | Generate only the root's head (no recursion into children)     |
+| `--single-level [TAXID]` | off           | Generate only the root's head; with a TaxID, only that one node's head (regenerate one head, negatives still drawn from the whole `--root` tree) |
 | `--output, -o`           | data/datasets | Output directory for shards and manifests                      |
 | `--max-subseq-len, -w`   | 2000          | Sliding-window size (bp) for subsequence extraction            |
 | `--approximate-capacity` | off           | Bloom filter for capacity (~12MB, ~1% error); default is exact, memory-bounded |
@@ -325,6 +374,9 @@ Key options:
 | `--max-n-per-class`      | 20000         | Hard ceiling on subseqs per class                              |
 | `--min-leaves-per-class` | 3             | Minimum sequence leaves for a child to stay a standalone class |
 | `--rare-taxa-strategy`   | fallback      | `fallback` (divert rare taxa) or `keep` (retain all classes)   |
+| `--keep-imbalance`       | off           | Keep each class up to its own capacity (capped by `--max-n-per-class`) instead of undersampling to the sibling minimum; records `class_weights` in `label_map.json` |
+| `--cluster-aware-split`  | off           | Make train/val/test representative for non-i.i.d. genomes (MinHash cluster-stratified + block-stratified windows); self-verifying. Tune with `--cluster-jaccard-threshold` / `--cluster-min-genomes` / `--cluster-min-frac` |
+| `--cluster-novel-holdout`| off           | With `--cluster-aware-split`: hold the smallest of ≥ 3 clusters out whole as a disjoint `test_novel` split (novel-lineage generalization) |
 | `--all-ranks`            | off           | Resolve lineages at full NCBI granularity (sub-ranks/clades), not just the 8 canonical ranks |
 | `--binary-only`          | off           | One belongs/not-belongs head per node instead of multi-class heads (with `--binary-budget`, `--extract-batch-size`) |
 
@@ -338,8 +390,11 @@ Behind these options, the per-head mechanics are illustrated in
 `--cutoff-percentage` and `--max-n-per-class` drive
 [per-class balancing and the percentile cutoff](#per-class-balancing-and-the-percentile-cutoff);
 `--min-leaves-per-class` and `--rare-taxa-strategy` govern the
-[virtual buckets](#virtual-buckets); and `--max-subseq-len` sets the window for
-[extraction and the leakage-safe split](#splitting-whole-genomes-leakage-safe).
+[virtual buckets](#virtual-buckets); `--max-subseq-len` sets the window for
+[extraction and the leakage-safe split](#splitting-whole-genomes-leakage-safe);
+and `--cluster-aware-split` / `--cluster-novel-holdout` make that split
+representative for non-i.i.d. genomes
+([cluster-aware splitting](#cluster-aware-splitting-optional)).
 What actually gets downloaded is decided by
 [selective download with capacity-driven refinement](#selective-download-with-capacity-driven-refinement).
 

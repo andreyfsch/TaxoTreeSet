@@ -948,6 +948,83 @@ def fig_binary_heads() -> None:
     plt.close(fig)
 
 
+def fig_cluster_aware_split() -> None:
+    """--cluster-aware-split: representative splits when genomes are non-i.i.d.
+
+    A class's genomes are often phylogenetically clustered, so a random split can
+    put a whole sub-lineage in val — val collapses while test (resembling train)
+    looks great. Panel 1 shows that failure; panel 2 the cluster-stratified fix
+    (each MinHash cluster spread across all splits); panel 3 the optional
+    test_novel holdout (--cluster-novel-holdout).
+    """
+    fig, ax = _canvas(14, 6.8)
+    ax.text(50, 97, "Cluster-aware splitting: representative train / val / test "
+            "when a class's genomes are non-i.i.d. (--cluster-aware-split)",
+            ha="center", fontsize=11.5, weight="bold")
+
+    A, B, C = GREEN, ORANGE, PINK  # three MinHash sub-lineage clusters
+    lgt = {A: "#dcecdc", B: "#fae6d0", C: "#f7d4e1"}
+
+    def dot(cx, cy, c, r=1.15):
+        ax.add_patch(Circle((cx, cy), r, fc=lgt[c], ec=c, lw=1.2, zorder=3))
+
+    # legend
+    for i, (c, lab) in enumerate([(A, "cluster A"), (B, "cluster B"),
+                                  (C, "cluster C")]):
+        dot(28 + i * 15, 91, c)
+        ax.text(29.6 + i * 15, 91, lab, va="center", fontsize=6.6, color=c)
+
+    def bin_box(px, by, lab, contents):
+        ec = PINK if lab == "test_novel" else BLUE
+        ax.add_patch(FancyBboxPatch((px + 3, by), 24, 7,
+                     boxstyle="round,pad=0.1,rounding_size=0.5",
+                     fc="#fbfbfb", ec=ec, lw=1.3))
+        ax.text(px + 6.5, by + 3.5, lab, ha="right", va="center",
+                fontsize=6.6, weight="bold", color=ec)
+        for i, c in enumerate(contents):
+            dot(px + 9 + i * 3.0, by + 3.5, c)
+
+    panels = [
+        (2, "default (random split)", BLUE,
+         [("train", [A, A, B, B]), ("val", [C, C, C]), ("test", [A, B])],
+         "a whole sub-lineage (C) lands in val  →\nval f1 collapses; test (like "
+         "train) looks great", RED),
+        (35, "--cluster-aware-split", GREEN,
+         [("train", [A, B, C]), ("val", [A, B, C]), ("test", [A, B, C])],
+         "each MinHash cluster is spread across\nall splits  →  val ≈ test "
+         "(representative)", GREEN),
+        (68, "+ --cluster-novel-holdout", PINK,
+         [("train", [A, A, B]), ("val", [A, B]), ("test", [A, B]),
+          ("test_novel", [C, C, C])],
+         "the smallest of >= 3 clusters is held out\nWHOLE as test_novel "
+         "— never trained on", PINK),
+    ]
+    genomes = [A, A, A, B, B, B, C, C, C]
+    for px, title, tc, bins, note, nc in panels:
+        ax.add_patch(FancyBboxPatch((px, 7), 30, 81,
+                     boxstyle="round,pad=0.3,rounding_size=1.0",
+                     fc="#ffffff", ec="#cccccc", lw=1.2))
+        ax.text(px + 15, 84, title, ha="center", fontsize=8.4, weight="bold",
+                color=tc)
+        ax.text(px + 15, 78.5, "the class's genomes", ha="center", fontsize=6.0,
+                style="italic", color="#888888")
+        for i, c in enumerate(genomes):
+            dot(px + 4.5 + i * 2.6, 74, c)
+        _arrow(ax, (px + 15, 70), (px + 15, 61.5), color="#bbbbbb", lw=1.4)
+        for j, (lab, contents) in enumerate(bins):
+            bin_box(px, 52 - j * 10.5, lab, contents)
+        ax.text(px + 15, 11, note, ha="center", fontsize=6.2, color=nc)
+
+    ax.text(50, 2.2, "Self-verifying: applies only when MinHash finds actionable "
+            "structure, else keeps the random split.  Single / few-genome classes "
+            "instead spread one genome's windows across interleaved positional "
+            "blocks (no compositional skew).",
+            ha="center", fontsize=6.6, style="italic", color="#555555")
+
+    fig.savefig(FIG / "cluster_aware_split.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     fig_taxotreeset()
     fig_generate_detail()
@@ -959,6 +1036,7 @@ if __name__ == "__main__":
     fig_distribution_split()
     fig_selective_download()
     fig_tree_of_heads()
+    fig_cluster_aware_split()
     print(f"Figures written to {FIG}/")
     for p in sorted(FIG.glob("*.png")):
         print(f"  {p.name}")
