@@ -256,7 +256,7 @@ genomes are phylogenetically clustered — see below.
 
 ### Cluster-aware splitting (optional)
 
-![Cluster-aware splitting: a random split can segregate a whole sub-lineage into val; --cluster-aware-split spreads each MinHash cluster across all splits, and --cluster-novel-holdout carves the smallest cluster out as a disjoint test_novel split](docs/figures/cluster_aware_split.png)
+![Cluster-aware splitting: a random split can segregate a whole sub-lineage into val, collapsing it; --cluster-aware-split spreads each MinHash cluster across all splits so val stays representative of test](docs/figures/cluster_aware_split.png)
 
 The whole-genome split above assumes a class's genomes are interchangeable. They
 often are not: a class spanning several sub-lineages has **phylogenetically
@@ -284,17 +284,6 @@ needed:
   `length // --max-subseq-len` blocks and interleaves the splits across them
   (~5 : 1 : 1), so `val`/`test` blocks sit among `train` blocks — representative
   composition, while each window still stays within one block (no cross-split leak).
-
-**`--cluster-novel-holdout`** goes one step further for the well-clustered case:
-when a class has ≥ 3 clusters, the smallest is held out **whole** into a fourth
-`test_novel` split — a sub-lineage the model *never* trains on. Where `test`
-measures in-distribution accuracy, `test_novel` measures generalization to an
-*unseen* lineage; the gap between them is the honest novelty penalty. It is written
-as `test_novel.parquet` beside the usual splits (only for heads that have one) and
-recorded per head in `label_map.json` under `novel_holdout`. Note it is a **held-out
-evaluation set, not a training input**: training still uses train/val/test, so a
-trainer must *explicitly* score `test_novel` after training to read the metric — the
-reference `examples/finetune_head.py` reads only train/val/test today.
 
 ### Parameterizing generation
 
@@ -376,7 +365,6 @@ Key options:
 | `--rare-taxa-strategy`   | fallback      | `fallback` (divert rare taxa) or `keep` (retain all classes)   |
 | `--keep-imbalance`       | off           | Keep each class up to its own capacity (capped by `--max-n-per-class`) instead of undersampling to the sibling minimum; records `class_weights` in `label_map.json` |
 | `--cluster-aware-split`  | off           | Make train/val/test representative for non-i.i.d. genomes (MinHash cluster-stratified + block-stratified windows); self-verifying. Tune with `--cluster-jaccard-threshold` / `--cluster-min-genomes` / `--cluster-min-frac` |
-| `--cluster-novel-holdout`| off           | With `--cluster-aware-split`: hold the smallest of ≥ 3 clusters out whole as a disjoint `test_novel` split (novel-lineage generalization) |
 | `--all-ranks`            | off           | Resolve lineages at full NCBI granularity (sub-ranks/clades), not just the 8 canonical ranks |
 | `--binary-only`          | off           | One belongs/not-belongs head per node instead of multi-class heads (with `--binary-budget`, `--extract-batch-size`) |
 
@@ -392,9 +380,8 @@ Behind these options, the per-head mechanics are illustrated in
 `--min-leaves-per-class` and `--rare-taxa-strategy` govern the
 [virtual buckets](#virtual-buckets); `--max-subseq-len` sets the window for
 [extraction and the leakage-safe split](#splitting-whole-genomes-leakage-safe);
-and `--cluster-aware-split` / `--cluster-novel-holdout` make that split
-representative for non-i.i.d. genomes
-([cluster-aware splitting](#cluster-aware-splitting-optional)).
+and `--cluster-aware-split` makes that split representative for non-i.i.d.
+genomes ([cluster-aware splitting](#cluster-aware-splitting-optional)).
 What actually gets downloaded is decided by
 [selective download with capacity-driven refinement](#selective-download-with-capacity-driven-refinement).
 

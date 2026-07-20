@@ -232,7 +232,6 @@ class TestGenerateRun:
             max_n_per_class=20000,
             keep_imbalance=False,
             cluster_aware_split=False,
-            cluster_novel_holdout=False,
             cluster_jaccard_threshold=None,
             cluster_min_genomes=None,
             cluster_min_frac=None,

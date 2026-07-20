@@ -35,11 +35,7 @@ from taxotreeset.core.generation import (
     sample_reject_leaves,
 )
 from taxotreeset.core.generation.constants import is_recursion_terminator
-from taxotreeset.core._orchestration._splits import (
-    _ALL_SPLITS,
-    _NOVEL_SPLIT,
-    _SPLITS,
-)
+from taxotreeset.core._orchestration._splits import _SPLITS
 from taxotreeset.logging_utils import get_ui_logger
 from taxotreeset.ranks import (
     is_below_boundary,
@@ -99,29 +95,6 @@ def _accumulated_path_to(domain_node: Node, target: Node) -> str:
         node = node.parent
     names.reverse()
     return "/".join(names)
-
-def _merge_split_tasks(*per_class_splits: dict) -> dict[str, list[dict]]:
-    """Merge per-class split dicts into one ``parent_tasks`` over all splits.
-
-    Concatenates each class's tasks per split, including the optional
-    ``test_novel`` holdout (absent on most classes — hence ``.get``). The result
-    always has the required train/val/test keys plus ``test_novel`` (empty when no
-    class held one out; the builder skips empty splits, so no file is written).
-    """
-    return {
-        split: [t for sp in per_class_splits for t in sp.get(split, [])]
-        for split in _ALL_SPLITS
-    }
-
-def _novel_holdout_meta(parent_tasks: dict) -> dict | None:
-    """Head-level ``test_novel`` provenance, or ``None`` when there is no holdout."""
-    novel = parent_tasks.get(_NOVEL_SPLIT, [])
-    if not novel:
-        return None
-    return {
-        "n_windows": sum(t.get("n", 0) for t in novel),
-        "class_indices": sorted({t["class_idx"] for t in novel}),
-    }
 
 def _collect_real_children(node: Node) -> list:
     """Return direct children that are taxonomic nodes (not sequences).
@@ -439,7 +412,7 @@ class _CascadeScheduler:
                 pos_tasks, 1, rng, min_genomes_for_genome_split=4)
             neg_split = self.ctx._materialize_leaf_split(
                 neg_tasks, 0, rng, min_genomes_for_genome_split=4)
-            parent_tasks = _merge_split_tasks(pos_split, neg_split)
+            parent_tasks = {s: pos_split[s] + neg_split[s] for s in _SPLITS}
             if not any(parent_tasks[s] for s in _SPLITS):
                 skipped += 1
                 continue
@@ -472,9 +445,6 @@ class _CascadeScheduler:
                     },
                 },
             }
-            holdout_meta = _novel_holdout_meta(parent_tasks)
-            if holdout_meta is not None:
-                master_manifest[taxid]["novel_holdout"] = holdout_meta
             batch.append((
                 taxid, target_dir, parent_tasks,
                 self.ctx.max_subseq_len, self.ctx.seed, self.ctx.output_format,
@@ -978,7 +948,7 @@ class _CascadeScheduler:
         target_dir = os.path.join(self.ctx.output_dir, *accumulated_path.split("/"))
         os.makedirs(target_dir, exist_ok=True)
 
-        parent_tasks: dict[str, list[dict]] = {split: [] for split in _ALL_SPLITS}
+        parent_tasks: dict[str, list[dict]] = {split: [] for split in _SPLITS}
         labels_metadata: dict[str, dict] = {}
 
         rng = random.Random(self.ctx.seed)
@@ -995,8 +965,8 @@ class _CascadeScheduler:
                 rng=rng,
             )
 
-            for split_name, split_tasks in leaf_split.items():
-                parent_tasks[split_name].extend(split_tasks)
+            for split_name in _SPLITS:
+                parent_tasks[split_name].extend(leaf_split[split_name])
 
             child_rank = getattr(child, "rank", "unknown")
             labels_metadata[child_taxid] = {
@@ -1026,9 +996,6 @@ class _CascadeScheduler:
             "num_leaves": num_leaves,
             "labels": labels_metadata,
         }
-        holdout_meta = _novel_holdout_meta(parent_tasks)
-        if holdout_meta is not None:
-            master_manifest[parent_taxid]["novel_holdout"] = holdout_meta
 
         return (
             parent_taxid,

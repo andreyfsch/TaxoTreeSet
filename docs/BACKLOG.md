@@ -469,32 +469,20 @@ tuning matters for denser data. New frozen `ClusterParams` value object (default
 (k / sketch_size / max_genomes stay as ClusterParams defaults). Run metadata now
 records `cluster_aware_split` + `cluster_params`.
 
-**Phase 2 (test_novel holdout) — DONE (2026-07-20).** Opt-in
-`--cluster-novel-holdout` (with `--cluster-aware-split`): when a class has
-`>= _MIN_CLUSTERS_FOR_NOVEL_HOLDOUT` (3) splittable MinHash clusters,
-`_cluster_stratified_split` carves the **smallest** one out WHOLE into a 4th
-`test_novel` split (disjoint sub-lineage, never trained on) and fills train/val/
-test from the rest — an honest novel-lineage generalization measure vs the
-in-distribution `test`. Downstream: `_NOVEL_SPLIT`/`_ALL_SPLITS` in `_splits.py`;
-the scheduler merges via `_merge_split_tasks` (binary + multi) and records a
-head-level `novel_holdout` ({n_windows, class_indices}) in the manifest via
-`_novel_holdout_meta`; `builder._SPLITS` gains `test_novel` (skip-empty → no file
-for the common no-holdout head); `_write_label_maps` copies `novel_holdout` into
-label_map.json. separability (reads train/test by name) and composition (default
-`train`) ignore the 4th split — safe, no change needed. Off by default →
-byte-identical. **Rarely triggers on RefSeq** (needs >= 3 well-separated clusters;
-genomes are diverse) — forward-looking infra for GenBank strain data, same as
-Phase 1. Tests: holdout logic (smallest carved out, < 3 clusters → none, off →
-none), merge/meta helpers, builder writes test_novel both paths + absent case.
+**Phase 2 (test_novel holdout) — BUILT then REMOVED (2026-07-20).** A
+`--cluster-novel-holdout` flag was implemented (carve the smallest of >= 3 MinHash
+clusters into a disjoint `test_novel` 4th split for novel-lineage generalization),
+then removed at the user's call: its utility is narrow (it removes training data,
+rarely triggers on RefSeq, and needs a post-training eval consumer that doesn't
+exist — `finetune_head.py` reads only train/val/test), whereas `--cluster-aware-split`
+is broadly useful. Not worth carrying unused infra. If novel-lineage generalization
+becomes a needed metric on denser (GenBank) data, resurrect from commit `81c58ce`.
 
-**Still open (minor follow-ups):** n_clusters in label_map (needs threading the
-cluster count up from the split; holdout coverage is recorded, n_clusters isn't);
-have separability optionally also score `test_novel`; reuse capacity-pass reads /
-cache per-genome sketches to avoid re-reading genomes.
+**Still open (minor follow-ups):** reuse capacity-pass reads / cache per-genome
+sketches to avoid re-reading genomes for the genome-level clustering.
 
 Files: `core/_orchestration/_cluster.py`, `core/_orchestration/_splits.py`,
-`core/_orchestration/_scheduler.py`, `core/_orchestration/_manifest.py`,
-`core/generation_orchestrator.py`, `cli/generate.py`, `dataset/builder.py`.
+`core/generation_orchestrator.py`, `cli/generate.py`.
 
 ---
 

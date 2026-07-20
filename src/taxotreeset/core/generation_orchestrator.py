@@ -178,7 +178,6 @@ class GenerationOrchestrator:
         keep_imbalance: bool = False,
         cluster_aware_split: bool = False,
         cluster_params: ClusterParams | None = None,
-        cluster_novel_holdout: bool = False,
         use_exact_capacity: bool = DEFAULT_USE_EXACT_CAPACITY,
         min_leaves_per_class: int = DEFAULT_MIN_LEAVES_PER_CLASS,
         rare_taxa_strategy: str = DEFAULT_RARE_TAXA_STRATEGY,
@@ -281,7 +280,6 @@ class GenerationOrchestrator:
         self.keep_imbalance: bool = keep_imbalance
         self.cluster_aware_split: bool = cluster_aware_split
         self.cluster_params: ClusterParams = cluster_params or ClusterParams()
-        self.cluster_novel_holdout: bool = cluster_novel_holdout
         self.use_exact_capacity: bool = use_exact_capacity
         self.min_leaves_per_class: int = min_leaves_per_class
         self.rare_taxa_strategy: str = rare_taxa_strategy
@@ -910,6 +908,5 @@ class GenerationOrchestrator:
             cluster_aware=self.cluster_aware_split,
             max_subseq_len=self.max_subseq_len,
             cluster_params=self.cluster_params,
-            cluster_novel_holdout=self.cluster_novel_holdout,
         )
 

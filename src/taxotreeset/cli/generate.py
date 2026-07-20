@@ -185,16 +185,6 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "found, else keeps the random split. Off by default.",
     )
     parser.add_argument(
-        "--cluster-novel-holdout",
-        action="store_true",
-        help="With --cluster-aware-split: when a class has >= 3 well-separated "
-        "MinHash clusters, hold the smallest one out ENTIRELY as a 4th "
-        "'test_novel' split (a sub-lineage never trained on), for an honest "
-        "novel-lineage generalization measure alongside the in-distribution "
-        "test split. Removes that cluster from training. Off by default; rarely "
-        "triggers on RefSeq (diverse genomes), aimed at denser strain data.",
-    )
-    parser.add_argument(
         "--cluster-jaccard-threshold",
         type=float,
         default=None,
@@ -429,7 +419,6 @@ def run(args: argparse.Namespace) -> None:
             keep_imbalance=args.keep_imbalance,
             cluster_aware_split=args.cluster_aware_split,
             cluster_params=cluster_params,
-            cluster_novel_holdout=args.cluster_novel_holdout,
             use_exact_capacity=not args.approximate_capacity,
             min_leaves_per_class=args.min_leaves_per_class,
             rare_taxa_strategy=args.rare_taxa_strategy,

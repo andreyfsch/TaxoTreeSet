@@ -954,74 +954,65 @@ def fig_cluster_aware_split() -> None:
     A class's genomes are often phylogenetically clustered, so a random split can
     put a whole sub-lineage in val — val collapses while test (resembling train)
     looks great. Panel 1 shows that failure; panel 2 the cluster-stratified fix
-    (each MinHash cluster spread across all splits); panel 3 the optional
-    test_novel holdout (--cluster-novel-holdout).
+    (each MinHash cluster spread across all splits).
     """
-    fig, ax = _canvas(14, 6.8)
+    fig, ax = _canvas(12, 6.8)
     ax.text(50, 97, "Cluster-aware splitting: representative train / val / test "
             "when a class's genomes are non-i.i.d. (--cluster-aware-split)",
-            ha="center", fontsize=11.5, weight="bold")
+            ha="center", fontsize=11, weight="bold")
 
     A, B, C = GREEN, ORANGE, PINK  # three MinHash sub-lineage clusters
     lgt = {A: "#dcecdc", B: "#fae6d0", C: "#f7d4e1"}
 
-    def dot(cx, cy, c, r=1.15):
+    def dot(cx, cy, c, r=1.35):
         ax.add_patch(Circle((cx, cy), r, fc=lgt[c], ec=c, lw=1.2, zorder=3))
 
     # legend
     for i, (c, lab) in enumerate([(A, "cluster A"), (B, "cluster B"),
                                   (C, "cluster C")]):
-        dot(28 + i * 15, 91, c)
-        ax.text(29.6 + i * 15, 91, lab, va="center", fontsize=6.6, color=c)
+        dot(24 + i * 18, 91, c)
+        ax.text(26.2 + i * 18, 91, lab, va="center", fontsize=7.2, color=c)
 
     def bin_box(px, by, lab, contents):
-        ec = PINK if lab == "test_novel" else BLUE
-        ax.add_patch(FancyBboxPatch((px + 2, by), 26, 7,
+        ax.add_patch(FancyBboxPatch((px + 2, by), 40, 8,
                      boxstyle="round,pad=0.1,rounding_size=0.5",
-                     fc="#fbfbfb", ec=ec, lw=1.3))
-        # Labels right-aligned at a common edge (px + 11), wide enough for the
-        # longest ("test_novel"); dots start well clear of it so nothing overlaps.
-        ax.text(px + 11, by + 3.5, lab, ha="right", va="center",
-                fontsize=6.6, weight="bold", color=ec)
+                     fc="#fbfbfb", ec=BLUE, lw=1.3))
+        ax.text(px + 11, by + 4, lab, ha="right", va="center",
+                fontsize=7.6, weight="bold", color=BLUE)
         for i, c in enumerate(contents):
-            dot(px + 14 + i * 3.0, by + 3.5, c)
+            dot(px + 15 + i * 4.2, by + 4, c)
 
     panels = [
-        (2, "default (random split)", BLUE,
+        (4, "default (random split)", BLUE,
          [("train", [A, A, B, B]), ("val", [C, C, C]), ("test", [A, B])],
-         "a whole sub-lineage (C) lands in val  →\nval f1 collapses; test (like "
-         "train) looks great", RED),
-        (35, "--cluster-aware-split", GREEN,
+         "a whole sub-lineage (C) lands in val  →\nval f1 collapses; test "
+         "(like train) looks great", RED),
+        (54, "--cluster-aware-split (on)", GREEN,
          [("train", [A, B, C]), ("val", [A, B, C]), ("test", [A, B, C])],
          "each MinHash cluster is spread across\nall splits  →  val ≈ test "
          "(representative)", GREEN),
-        (68, "+ --cluster-novel-holdout", PINK,
-         [("train", [A, A, B]), ("val", [A, B]), ("test", [A, B]),
-          ("test_novel", [C, C, C])],
-         "the smallest of >= 3 clusters is held out\nWHOLE as test_novel "
-         "— never trained on", PINK),
     ]
     genomes = [A, A, A, B, B, B, C, C, C]
     for px, title, tc, bins, note, nc in panels:
-        ax.add_patch(FancyBboxPatch((px, 7), 30, 81,
+        ax.add_patch(FancyBboxPatch((px, 7), 44, 81,
                      boxstyle="round,pad=0.3,rounding_size=1.0",
                      fc="#ffffff", ec="#cccccc", lw=1.2))
-        ax.text(px + 15, 84, title, ha="center", fontsize=8.4, weight="bold",
+        ax.text(px + 22, 84, title, ha="center", fontsize=9.5, weight="bold",
                 color=tc)
-        ax.text(px + 15, 78.5, "the class's genomes", ha="center", fontsize=6.0,
+        ax.text(px + 22, 78, "the class's genomes", ha="center", fontsize=6.6,
                 style="italic", color="#888888")
         for i, c in enumerate(genomes):
-            dot(px + 4.5 + i * 2.6, 74, c)
-        _arrow(ax, (px + 15, 70), (px + 15, 61.5), color="#bbbbbb", lw=1.4)
+            dot(px + 8 + i * 3.4, 73, c)
+        _arrow(ax, (px + 22, 68.5), (px + 22, 60), color="#bbbbbb", lw=1.5)
         for j, (lab, contents) in enumerate(bins):
-            bin_box(px, 52 - j * 10.5, lab, contents)
-        ax.text(px + 15, 11, note, ha="center", fontsize=6.2, color=nc)
+            bin_box(px, 49 - j * 12, lab, contents)
+        ax.text(px + 22, 11, note, ha="center", fontsize=7.0, color=nc)
 
-    ax.text(50, 2.2, "Self-verifying: applies only when MinHash finds actionable "
+    ax.text(50, 2.4, "Self-verifying: applies only when MinHash finds actionable "
             "structure, else keeps the random split.  Single / few-genome classes "
             "instead spread one genome's windows across interleaved positional "
             "blocks (no compositional skew).",
-            ha="center", fontsize=6.6, style="italic", color="#555555")
+            ha="center", fontsize=7.0, style="italic", color="#555555")
 
     fig.savefig(FIG / "cluster_aware_split.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
