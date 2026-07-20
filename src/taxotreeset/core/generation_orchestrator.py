@@ -77,6 +77,7 @@ from taxotreeset.ranks import (
 )
 from taxotreeset.taxonomy import resolve_to_taxid
 from taxotreeset.io.downloader import NCBIDownloader
+from taxotreeset.core._orchestration._cluster import ClusterParams
 from taxotreeset.core._orchestration._splits import (
     _materialize_leaf_split as _materialize_leaf_split_fn,
     _stratified_counts as _stratified_counts,
@@ -176,6 +177,7 @@ class GenerationOrchestrator:
         max_n_per_class: int = DEFAULT_MAX_N_PER_CLASS,
         keep_imbalance: bool = False,
         cluster_aware_split: bool = False,
+        cluster_params: ClusterParams | None = None,
         use_exact_capacity: bool = DEFAULT_USE_EXACT_CAPACITY,
         min_leaves_per_class: int = DEFAULT_MIN_LEAVES_PER_CLASS,
         rare_taxa_strategy: str = DEFAULT_RARE_TAXA_STRATEGY,
@@ -277,6 +279,7 @@ class GenerationOrchestrator:
         self.max_n_per_class: int = max_n_per_class
         self.keep_imbalance: bool = keep_imbalance
         self.cluster_aware_split: bool = cluster_aware_split
+        self.cluster_params: ClusterParams = cluster_params or ClusterParams()
         self.use_exact_capacity: bool = use_exact_capacity
         self.min_leaves_per_class: int = min_leaves_per_class
         self.rare_taxa_strategy: str = rare_taxa_strategy
@@ -904,5 +907,6 @@ class GenerationOrchestrator:
             leaf_tasks, class_index, rng, min_genomes_for_genome_split,
             cluster_aware=self.cluster_aware_split,
             max_subseq_len=self.max_subseq_len,
+            cluster_params=self.cluster_params,
         )
 

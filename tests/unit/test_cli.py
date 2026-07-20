@@ -232,6 +232,9 @@ class TestGenerateRun:
             max_n_per_class=20000,
             keep_imbalance=False,
             cluster_aware_split=False,
+            cluster_jaccard_threshold=None,
+            cluster_min_genomes=None,
+            cluster_min_frac=None,
             min_leaves_per_class=3,
             rare_taxa_strategy="fallback",
             no_sync=no_sync,
@@ -299,6 +302,41 @@ class TestGenerateRun:
         assert kwargs["binary_budget"] == 25000
         assert kwargs["binary_extract_batch_size"] == 128
         assert kwargs["all_ranks"] is True
+
+    def test_cluster_flags_thread_to_orchestrator(self, tmp_path):
+        args = self._make_args(tmp_path)
+        args.cluster_aware_split = True
+        args.cluster_jaccard_threshold = 0.5
+        args.cluster_min_genomes = 4
+        args.cluster_min_frac = 0.2
+        with (
+            patch("taxotreeset.cli.generate.setup_logging"),
+            patch("taxotreeset.cli.generate.NCBIRegistry"),
+            patch("taxotreeset.cli.generate.GenerationOrchestrator") as mock_orch,
+        ):
+            mock_orch.return_value.run_pipeline.return_value = None
+            generate.run(args)
+        kwargs = mock_orch.call_args.kwargs
+        assert kwargs["cluster_aware_split"] is True
+        cp = kwargs["cluster_params"]
+        assert cp.jaccard_threshold == 0.5
+        assert cp.min_cluster_genomes == 4
+        assert cp.min_cluster_frac == 0.2
+        # unset knobs keep their defaults
+        from taxotreeset.core._orchestration._cluster import _KMER_K
+        assert cp.k == _KMER_K
+
+    def test_cluster_flags_default_to_none_giving_default_params(self, tmp_path):
+        args = self._make_args(tmp_path)  # cluster_* all None
+        with (
+            patch("taxotreeset.cli.generate.setup_logging"),
+            patch("taxotreeset.cli.generate.NCBIRegistry"),
+            patch("taxotreeset.cli.generate.GenerationOrchestrator") as mock_orch,
+        ):
+            mock_orch.return_value.run_pipeline.return_value = None
+            generate.run(args)
+        from taxotreeset.core._orchestration._cluster import ClusterParams
+        assert mock_orch.call_args.kwargs["cluster_params"] == ClusterParams()
 
     def test_no_sync_with_missing_registry_exits(self, tmp_path):
         args = self._make_args(tmp_path, no_sync=True, registry_exists=False)

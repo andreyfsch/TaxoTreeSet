@@ -11,6 +11,7 @@ import sys
 from taxotreeset import paths
 from taxotreeset.logging_utils import setup_logging
 from taxotreeset.core.generation_orchestrator import GenerationOrchestrator
+from taxotreeset.core._orchestration._cluster import ClusterParams
 from taxotreeset.io.registry import NCBIRegistry
 
 
@@ -182,6 +183,33 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "a whole sub-lineage into val (tanking it while test looks great). "
         "Self-verifying: applies only when >= 2 well-separated clusters are "
         "found, else keeps the random split. Off by default.",
+    )
+    parser.add_argument(
+        "--cluster-jaccard-threshold",
+        type=float,
+        default=None,
+        metavar="J",
+        help="Tuning knob for --cluster-aware-split: MinHash Jaccard (0-1) above "
+        "which two genomes join a cluster (default 0.30). Lower it to cluster "
+        "more loosely (denser sub-lineages, e.g. GenBank strain collections).",
+    )
+    parser.add_argument(
+        "--cluster-min-genomes",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Tuning knob for --cluster-aware-split: minimum genomes for a "
+        "cluster to be split three ways across train/val/test (default 2).",
+    )
+    parser.add_argument(
+        "--cluster-min-frac",
+        type=float,
+        default=None,
+        metavar="F",
+        help="Tuning knob for --cluster-aware-split: a cluster must cover at "
+        "least this fraction (0-1) of the class's genomes to count as actionable "
+        "structure, with >= 2 such (default 0.10). Lower it to act on smaller "
+        "sub-lineages.",
     )
     parser.add_argument(
         "--min-leaves-per-class",
@@ -365,6 +393,16 @@ def run(args: argparse.Namespace) -> None:
         registry = NCBIRegistry(registry_path=args.registry)
 
         logger.info("Assembling pipeline execution blocks...")
+        cluster_overrides = {
+            k: v
+            for k, v in (
+                ("jaccard_threshold", args.cluster_jaccard_threshold),
+                ("min_cluster_genomes", args.cluster_min_genomes),
+                ("min_cluster_frac", args.cluster_min_frac),
+            )
+            if v is not None
+        }
+        cluster_params = ClusterParams(**cluster_overrides)
         pipeline = GenerationOrchestrator(
             registry=registry,
             vault_path=args.vault,
@@ -380,6 +418,7 @@ def run(args: argparse.Namespace) -> None:
             max_n_per_class=args.max_n_per_class,
             keep_imbalance=args.keep_imbalance,
             cluster_aware_split=args.cluster_aware_split,
+            cluster_params=cluster_params,
             use_exact_capacity=not args.approximate_capacity,
             min_leaves_per_class=args.min_leaves_per_class,
             rare_taxa_strategy=args.rare_taxa_strategy,

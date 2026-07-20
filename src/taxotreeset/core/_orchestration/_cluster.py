@@ -18,6 +18,7 @@ nothing and keep the old behaviour.
 import math
 import zlib
 from collections import defaultdict
+from dataclasses import dataclass
 
 from taxotreeset.dataset.utils import _read_single_sequence
 
@@ -34,6 +35,27 @@ _MIN_CLUSTER_FRAC = 0.10
 # Pairwise clustering is O(n^2); above this genome count, skip it (caller falls
 # back to the random split) rather than stall a wide head.
 _MAX_GENOMES = 300
+
+
+@dataclass(frozen=True)
+class ClusterParams:
+    """Tunable MinHash-clustering knobs for the cluster-aware split.
+
+    Defaults mirror the module constants. The clustering rarely fires on RefSeq
+    (~1 genome/species, so genomes are diverse), so a dataset with denser
+    sub-lineages (e.g. a GenBank strain collection) can lower ``threshold`` /
+    ``min_cluster_frac`` to make it engage. ``jaccard_threshold``,
+    ``min_cluster_genomes`` and ``min_cluster_frac`` are the decision knobs the
+    CLI exposes (``--cluster-*``); ``k`` / ``sketch_size`` / ``max_genomes`` are
+    cost/quality constants, overridable here in code if ever needed.
+    """
+
+    k: int = _KMER_K
+    sketch_size: int = _SKETCH_SIZE
+    jaccard_threshold: float = _JACCARD_THRESHOLD
+    min_cluster_genomes: int = _MIN_CLUSTER_GENOMES
+    min_cluster_frac: float = _MIN_CLUSTER_FRAC
+    max_genomes: int = _MAX_GENOMES
 
 
 def _genome_sketch(seq: str, k: int, sketch_size: int) -> frozenset[int]:

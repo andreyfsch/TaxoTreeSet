@@ -4,6 +4,7 @@ import random
 from unittest.mock import patch
 
 from taxotreeset.core._orchestration._cluster import (
+    ClusterParams,
     _connected_components,
     _genome_sketch,
     _jaccard,
@@ -11,6 +12,7 @@ from taxotreeset.core._orchestration._cluster import (
 )
 from taxotreeset.core._orchestration._splits import (
     _block_stratified_windows,
+    _cluster_stratified_split,
     _even_split,
     _materialize_leaf_split,
 )
@@ -194,6 +196,60 @@ class TestBlockStratifiedWindows:
             assert _block_stratified_windows(
                 {"fasta_path": "/v", "header_id": "g", "n": 100}, 0, 100, result
             ) is False
+
+
+class TestClusterParams:
+    def test_defaults_match_module_constants(self):
+        from taxotreeset.core._orchestration import _cluster as C
+        cp = ClusterParams()
+        assert (cp.k, cp.sketch_size, cp.jaccard_threshold) == (
+            C._KMER_K, C._SKETCH_SIZE, C._JACCARD_THRESHOLD)
+        assert (cp.min_cluster_genomes, cp.min_cluster_frac, cp.max_genomes) == (
+            C._MIN_CLUSTER_GENOMES, C._MIN_CLUSTER_FRAC, C._MAX_GENOMES)
+
+    def test_params_are_forwarded_to_cluster_genomes(self):
+        # The dataclass fields must reach cluster_genomes under its kwarg names
+        # (jaccard_threshold -> threshold), so the CLI knobs actually take effect.
+        tasks = _tasks(["a1", "a2", "a3", "b1", "b2", "b3"])
+        cp = ClusterParams(
+            k=15, sketch_size=64, jaccard_threshold=0.55,
+            min_cluster_genomes=4, min_cluster_frac=0.25, max_genomes=99)
+        with patch(
+            "taxotreeset.core._orchestration._splits.cluster_genomes",
+            return_value=None,
+        ) as m:
+            _materialize_leaf_split(
+                tasks, 0, random.Random(0), cluster_aware=True, cluster_params=cp)
+        m.assert_called_once()
+        kwargs = m.call_args.kwargs
+        assert kwargs["k"] == 15
+        assert kwargs["sketch_size"] == 64
+        assert kwargs["threshold"] == 0.55
+        assert kwargs["min_cluster_genomes"] == 4
+        assert kwargs["min_cluster_frac"] == 0.25
+        assert kwargs["max_genomes"] == 99
+
+    def test_high_min_frac_suppresses_actionable_structure(self):
+        # 3 identical a's + 3 identical b's: default fires (two size-3 clusters);
+        # requiring each cluster to cover 90% of the 6 genomes disqualifies both.
+        tasks = _tasks(["a1", "a2", "a3", "b1", "b2", "b3"])
+        with patch(_MOCK, side_effect=lambda p, h: _seq_map()[h]):
+            fired = _cluster_stratified_split(tasks, 0, 3, ClusterParams())
+            suppressed = _cluster_stratified_split(
+                tasks, 0, 3, ClusterParams(min_cluster_frac=0.9))
+        assert fired is not None
+        assert suppressed is None
+
+    def test_none_params_behave_like_defaults(self):
+        tasks = _tasks(["a1", "a2", "a3", "b1", "b2", "b3"])
+        with patch(_MOCK, side_effect=lambda p, h: _seq_map()[h]):
+            explicit = _cluster_stratified_split(tasks, 0, 3, ClusterParams())
+            implicit = _cluster_stratified_split(tasks, 0, 3, None)
+        assert (explicit is None) == (implicit is None)
+        if explicit is not None:
+            for split in ("train", "val", "test"):
+                assert {t["header_id"][0] for t in explicit[split]} == {
+                    t["header_id"][0] for t in implicit[split]}
 
 
 class TestClusterAwareWindowSlicing:

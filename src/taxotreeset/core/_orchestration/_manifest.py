@@ -8,6 +8,7 @@ artifacts; the run-metadata / artifact writers read orchestrator config through 
 orchestrator so log output is unchanged.
 """
 
+import dataclasses
 import json
 import logging
 import os
@@ -254,6 +255,11 @@ def _write_run_metadata(
             "binary_only": ctx.binary_only,
             "binary_budget": ctx.binary_budget,
             "all_ranks": ctx.all_ranks,
+            "cluster_aware_split": ctx.cluster_aware_split,
+            "cluster_params": (
+                dataclasses.asdict(ctx.cluster_params)
+                if ctx.cluster_aware_split else None
+            ),
         },
         "summary": {
             "n_heads": n_heads,

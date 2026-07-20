@@ -8,7 +8,7 @@ rely on. There is no orchestrator state here — every caller passes what it nee
 
 import random
 
-from taxotreeset.core._orchestration._cluster import cluster_genomes
+from taxotreeset.core._orchestration._cluster import ClusterParams, cluster_genomes
 from taxotreeset.dataset.utils import _read_single_sequence
 
 _STRATIFIED_TRAIN_RATIO: float = 0.70
@@ -139,6 +139,7 @@ def _cluster_stratified_split(
     tasks: list[dict],
     class_index: int,
     min_genomes: int,
+    cluster_params: ClusterParams | None = None,
 ) -> dict[str, list[dict]] | None:
     """Spread each MinHash cluster of ``tasks`` across train/val/test.
 
@@ -147,12 +148,27 @@ def _cluster_stratified_split(
     the splits (small clusters go to train), so every split spans every
     sub-lineage — the fix for the non-i.i.d.-split instability.
 
+    Args:
+        tasks: Per-leaf tasks for the class (one per genome).
+        class_index: Numeric label index for this child.
+        min_genomes: Cluster size at/above which a cluster is split three ways.
+        cluster_params: MinHash tuning knobs; ``None`` uses the defaults.
+
     Returns:
         The splits dict, or ``None`` when there is no structure OR the cluster
         split would leave a split empty (the caller then keeps the whole-class
         random split, preserving the >= 1-genome-per-split guarantee).
     """
-    clusters = cluster_genomes(tasks)
+    cp = cluster_params or ClusterParams()
+    clusters = cluster_genomes(
+        tasks,
+        k=cp.k,
+        sketch_size=cp.sketch_size,
+        threshold=cp.jaccard_threshold,
+        min_cluster_genomes=cp.min_cluster_genomes,
+        min_cluster_frac=cp.min_cluster_frac,
+        max_genomes=cp.max_genomes,
+    )
     if clusters is None:
         return None
     candidate: dict[str, list[dict]] = {split: [] for split in _SPLITS}
@@ -241,6 +257,7 @@ def _materialize_leaf_split(
     min_genomes_for_genome_split: int = 3,
     cluster_aware: bool = False,
     max_subseq_len: int = 2000,
+    cluster_params: ClusterParams | None = None,
 ) -> dict[str, list[dict]]:
     """Split a single child's per-leaf tasks into train/val/test.
 
@@ -266,6 +283,8 @@ def _materialize_leaf_split(
             default — the split is byte-identical to before.
         max_subseq_len: Upper window length; also the minimum block size for the
             cluster-aware window-slicing path (so blocked windows keep full length).
+        cluster_params: MinHash tuning knobs for the genome-level cluster-aware
+            path; ``None`` uses the defaults.
 
     Returns:
         Dictionary with 'train', 'val', 'test' keys; each value
@@ -283,7 +302,8 @@ def _materialize_leaf_split(
     if len(shuffled) >= min_genomes_for_genome_split:
         assigned = (
             _cluster_stratified_split(
-                shuffled, class_index, min_genomes_for_genome_split
+                shuffled, class_index, min_genomes_for_genome_split,
+                cluster_params,
             )
             if cluster_aware else None
         )
