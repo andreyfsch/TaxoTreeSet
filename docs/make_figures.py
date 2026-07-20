@@ -976,13 +976,15 @@ def fig_cluster_aware_split() -> None:
 
     def bin_box(px, by, lab, contents):
         ec = PINK if lab == "test_novel" else BLUE
-        ax.add_patch(FancyBboxPatch((px + 3, by), 24, 7,
+        ax.add_patch(FancyBboxPatch((px + 2, by), 26, 7,
                      boxstyle="round,pad=0.1,rounding_size=0.5",
                      fc="#fbfbfb", ec=ec, lw=1.3))
-        ax.text(px + 6.5, by + 3.5, lab, ha="right", va="center",
+        # Labels right-aligned at a common edge (px + 11), wide enough for the
+        # longest ("test_novel"); dots start well clear of it so nothing overlaps.
+        ax.text(px + 11, by + 3.5, lab, ha="right", va="center",
                 fontsize=6.6, weight="bold", color=ec)
         for i, c in enumerate(contents):
-            dot(px + 9 + i * 3.0, by + 3.5, c)
+            dot(px + 14 + i * 3.0, by + 3.5, c)
 
     panels = [
         (2, "default (random split)", BLUE,
