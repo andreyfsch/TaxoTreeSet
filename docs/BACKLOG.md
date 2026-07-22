@@ -501,6 +501,34 @@ Files: `core/_orchestration/_cluster.py`, `core/_orchestration/_splits.py`,
 
 ---
 
+## 🔴 P11 — Clade-holdout open-set benchmark
+
+**Goal.** Turn TaxoTreeSet from a dataset generator into the *evaluation instrument* for
+open-set taxonomic classification: generate training data with whole clades (genera/families)
+withheld, plus a matched eval set of reads from those novel clades, and score any classifier
+on whether it correctly backs off to the deepest **retained** ancestor rank instead of
+over-committing to a wrong in-index label. This is the highest-value research item — it
+measures the exact regime (novel-clade generalization + calibrated back-off) where learned
+representations are supposed to beat exact matching, and where the published literature is
+weakest (split type / calibration / production baselines routinely unreported).
+
+**Why now.** It is the direct, buildable realization of the standardized-benchmark roadmap:
+in-index vs open-set × short vs long-noisy tracks, per-rank + per-ANI-bin metrics, PPV anchors,
+calibration, compute, and a mandatory **head-to-head against retained-only Kraken2/Centrifuge**.
+Reuses existing machinery (scope resolution, MinHash sketches for distance bins, the binary/multi
+head + reject-bucket path, the cluster-aware split for the in-index control, extraction).
+
+**Phased plan** (each phase independently useful): P1 holdout selection + tree pruning +
+manifest with per-clade expected commit rank `ρ*`; P2 open-set eval-set builder; P3 long-noisy
+read track + error model; P4 scorer (per-rank/per-bin metrics + calibration + compute);
+P5 retained-only k-mer baseline runners. **Full design: `docs/clade_holdout_benchmark.md`.**
+
+Files (new): `benchmark/` subpackage (holdout selection, eval-set builder, scorer, baseline
+runners); generation-side hooks in `core/generation_orchestrator.py` / `cli/generate.py`
+(`--holdout-rank` / `--holdout-clades` / `--holdout-fraction` / `--holdout-seed`).
+
+---
+
 ## Cross-repo — PhyloCascadeGLM
 
 Inference/evaluation items live in the PhyloCascadeGLM repo's own `docs/BACKLOG.md`.
