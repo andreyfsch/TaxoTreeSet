@@ -251,6 +251,11 @@ class TestGenerateRun:
             cluster_jaccard_threshold=None,
             cluster_min_genomes=None,
             cluster_min_frac=None,
+            holdout_clades=None,
+            holdout_rank=None,
+            holdout_fraction=None,
+            holdout_seed=0,
+            holdout_manifest=None,
             min_leaves_per_class=3,
             rare_taxa_strategy="fallback",
             no_sync=no_sync,
@@ -353,6 +358,35 @@ class TestGenerateRun:
             generate.run(args)
         from taxotreeset.core._orchestration._cluster import ClusterParams
         assert mock_orch.call_args.kwargs["cluster_params"] == ClusterParams()
+
+    def test_holdout_flags_thread_to_orchestrator(self, tmp_path):
+        args = self._make_args(tmp_path)
+        args.holdout_clades = "11234, 10509"
+        args.holdout_seed = 3
+        with (
+            patch("taxotreeset.cli.generate.setup_logging"),
+            patch("taxotreeset.cli.generate.NCBIRegistry"),
+            patch("taxotreeset.cli.generate.GenerationOrchestrator") as mock_orch,
+        ):
+            mock_orch.return_value.run_pipeline.return_value = None
+            generate.run(args)
+        kwargs = mock_orch.call_args.kwargs
+        assert kwargs["holdout_clades"] == ["11234", "10509"]  # parsed + trimmed
+        assert kwargs["holdout_seed"] == 3
+
+    def test_holdout_clades_and_rank_are_mutually_exclusive(self, tmp_path):
+        args = self._make_args(tmp_path)
+        args.holdout_clades = "11234"
+        args.holdout_rank = "genus"
+        with pytest.raises(SystemExit):
+            generate.run(args)
+
+    def test_holdout_rank_requires_a_fraction(self, tmp_path):
+        args = self._make_args(tmp_path)
+        args.holdout_rank = "genus"
+        args.holdout_fraction = None
+        with pytest.raises(SystemExit):
+            generate.run(args)
 
     def test_no_sync_with_missing_registry_exits(self, tmp_path):
         args = self._make_args(tmp_path, no_sync=True, registry_exists=False)

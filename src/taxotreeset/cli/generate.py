@@ -223,6 +223,48 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "sub-lineages.",
     )
     parser.add_argument(
+        "--holdout-clades",
+        type=str,
+        default=None,
+        metavar="TAXIDS",
+        help="Open-set benchmark: comma-separated TaxIDs of whole clades to "
+        "WITHHOLD from training (they appear only in a downstream eval set). "
+        "Writes benchmark_manifest_<scope>.json with each clade's expected commit "
+        "rank + divergence bin. Mutually exclusive with --holdout-rank. Pair with "
+        "--no-sync (a frozen reference snapshot).",
+    )
+    parser.add_argument(
+        "--holdout-rank",
+        type=str,
+        default=None,
+        metavar="RANK",
+        help="Open-set benchmark: withhold a seeded fraction (--holdout-fraction) "
+        "of the clades at this rank (e.g. genus, family). Mutually exclusive with "
+        "--holdout-clades.",
+    )
+    parser.add_argument(
+        "--holdout-fraction",
+        type=float,
+        default=None,
+        metavar="F",
+        help="Fraction (0-1) of eligible --holdout-rank clades to withhold "
+        "(required with --holdout-rank).",
+    )
+    parser.add_argument(
+        "--holdout-seed",
+        type=int,
+        default=0,
+        help="Seed for --holdout-rank clade sampling (default 0).",
+    )
+    parser.add_argument(
+        "--holdout-manifest",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Where to write the holdout manifest (default: "
+        "benchmark_manifest_<scope>.json in --output).",
+    )
+    parser.add_argument(
         "--min-leaves-per-class",
         type=int,
         default=3,
@@ -399,6 +441,20 @@ def run(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
+    if args.holdout_clades and args.holdout_rank:
+        logger.error("--holdout-clades and --holdout-rank are mutually exclusive.")
+        sys.exit(1)
+    if args.holdout_rank and (
+        args.holdout_fraction is None or not 0.0 < args.holdout_fraction <= 1.0
+    ):
+        logger.error("--holdout-rank requires --holdout-fraction in (0, 1].")
+        sys.exit(1)
+    holdout_clades = (
+        [t.strip() for t in args.holdout_clades.split(",") if t.strip()]
+        if args.holdout_clades
+        else None
+    )
+
     try:
         logger.info("Initializing active metadata registry...")
         registry = NCBIRegistry(registry_path=args.registry)
@@ -430,6 +486,11 @@ def run(args: argparse.Namespace) -> None:
             keep_imbalance=args.keep_imbalance,
             cluster_aware_split=args.cluster_aware_split,
             cluster_params=cluster_params,
+            holdout_clades=holdout_clades,
+            holdout_rank=args.holdout_rank,
+            holdout_fraction=args.holdout_fraction,
+            holdout_seed=args.holdout_seed,
+            holdout_manifest_path=args.holdout_manifest,
             use_exact_capacity=not args.approximate_capacity,
             min_leaves_per_class=args.min_leaves_per_class,
             rare_taxa_strategy=args.rare_taxa_strategy,

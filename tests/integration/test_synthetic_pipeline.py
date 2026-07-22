@@ -681,6 +681,45 @@ def multi_single_level_output(synthetic_env, tmp_path_factory):
     return {"output_dir": output_dir}
 
 
+@pytest.fixture(scope="module")
+def binary_holdout_output(synthetic_env, tmp_path_factory):
+    """--binary-only with Mouse hepatitis virus (11234) withheld as a novel clade."""
+    output_dir = str(tmp_path_factory.mktemp("binary_holdout_out"))
+    orch = _single_level_orch(
+        synthetic_env, output_dir, binary_only=True, binary_budget=60,
+        holdout_clades=["11234"])
+    orch.run_pipeline(
+        target_group="viruses", sync=False, abundance_threshold=1)
+    return {"output_dir": output_dir}
+
+
+class TestCladeHoldout:
+    def test_held_out_clade_gets_no_head(self, binary_holdout_output):
+        out = Path(binary_holdout_output["output_dir"])
+        heads = {p.parent.name for p in out.rglob("train.parquet")}
+        assert heads, "no heads produced at all"
+        assert "11234" not in heads, "withheld clade must not be trained on"
+
+    def test_manifest_records_expected_commit_rank(self, binary_holdout_output):
+        out = Path(binary_holdout_output["output_dir"])
+        mani = json.loads(
+            (out / "benchmark_manifest_viruses.json").read_text())
+        entries = {e["taxid"]: e for e in mani["holdout"]}
+        assert "11234" in entries
+        e = entries["11234"]
+        # a read from held-out MHV should back off to Coronaviridae (11118)
+        assert e["expected_commit_taxid"] == "11118"
+        assert e["n_genomes"] >= 1
+        assert e["member_headers"]  # NC_001846 recorded before pruning
+
+    def test_manifest_params_echoed(self, binary_holdout_output):
+        out = Path(binary_holdout_output["output_dir"])
+        mani = json.loads(
+            (out / "benchmark_manifest_viruses.json").read_text())
+        assert mani["params"]["holdout_clades"] == ["11234"]
+        assert mani["n_holdout_clades"] == 1
+
+
 class TestMultiSingleLevelTarget:
     def test_only_the_interior_target_head_is_scheduled(
         self, multi_single_level_output

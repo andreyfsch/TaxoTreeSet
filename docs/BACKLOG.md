@@ -518,14 +518,27 @@ calibration, compute, and a mandatory **head-to-head against retained-only Krake
 Reuses existing machinery (scope resolution, MinHash sketches for distance bins, the binary/multi
 head + reject-bucket path, the cluster-aware split for the in-index control, extraction).
 
-**Phased plan** (each phase independently useful): P1 holdout selection + tree pruning +
-manifest with per-clade expected commit rank `ρ*`; P2 open-set eval-set builder; P3 long-noisy
-read track + error model; P4 scorer (per-rank/per-bin metrics + calibration + compute);
-P5 retained-only k-mer baseline runners. **Full design: `docs/clade_holdout_benchmark.md`.**
+**Phased plan** (each phase independently useful): **P1 DONE (2026-07-22)**; P2 open-set
+eval-set builder; P3 long-noisy read track + error model; P4 scorer (per-rank/per-bin metrics +
+calibration + compute); P5 retained-only k-mer baseline runners. **Full design:
+`docs/clade_holdout_benchmark.md`.**
 
-Files (new): `benchmark/` subpackage (holdout selection, eval-set builder, scorer, baseline
-runners); generation-side hooks in `core/generation_orchestrator.py` / `cli/generate.py`
-(`--holdout-rank` / `--holdout-clades` / `--holdout-fraction` / `--holdout-seed`).
+**P1 — DONE (2026-07-22): holdout selection + pruning + manifest.** New `benchmark/holdout.py`
+(`select_holdout_taxids` — explicit TaxIDs or seeded fraction at a rank, eligibility = has
+genomes + leaves the parent still branching, nested selections deduped; `build_holdout_manifest`
+— per-clade members, expected commit rank `ρ*` = deepest retained ancestor, nearest retained
+relative + MinHash/Mash ANI-proxy bin; `prune_holdout` — detach held-out subtrees). Orchestrator
+selects + records on the FULL tree then prunes before the capacity pass (holdout forces a fresh
+bottom-up capacity so retained ancestors aren't credited with pruned descendants), and writes
+`benchmark_manifest_<scope>.json`. CLI: `--holdout-clades` / `--holdout-rank` +
+`--holdout-fraction` / `--holdout-seed` / `--holdout-manifest` (mutually exclusive clades-vs-rank;
+pair with `--no-sync`). Tests: 13 unit (eligibility/selection/dedup/`ρ*`/pruning/manifest) +
+3 CLI (thread + mutual-exclusion) + 3 integration (held-out clade gets no head; manifest records
+`ρ*`=parent). Suite 1050.
+
+Files: `benchmark/holdout.py` (new), `benchmark/__init__.py` (new), `core/generation_orchestrator.py`,
+`cli/generate.py`. **Next: P2 eval-set builder** (extract reads from the held-out clades with
+true-lineage + `ρ*` + distance-bin labels; short track first).
 
 ---
 

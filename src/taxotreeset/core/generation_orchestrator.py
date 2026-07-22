@@ -50,6 +50,7 @@ Typical usage::
     pipeline.run_pipeline(target_group="viruses", abundance_threshold=2)
 """
 
+import json
 import logging
 import os
 import random
@@ -78,6 +79,11 @@ from taxotreeset.ranks import (
 from taxotreeset.taxonomy import resolve_to_taxid
 from taxotreeset.io.downloader import NCBIDownloader
 from taxotreeset.core._orchestration._cluster import ClusterParams
+from taxotreeset.benchmark.holdout import (
+    build_holdout_manifest,
+    prune_holdout,
+    select_holdout_taxids,
+)
 from taxotreeset.core._orchestration._splits import (
     _materialize_leaf_split as _materialize_leaf_split_fn,
     _stratified_counts as _stratified_counts,
@@ -178,6 +184,11 @@ class GenerationOrchestrator:
         keep_imbalance: bool = False,
         cluster_aware_split: bool = True,
         cluster_params: ClusterParams | None = None,
+        holdout_clades: list[str] | None = None,
+        holdout_rank: str | None = None,
+        holdout_fraction: float | None = None,
+        holdout_seed: int = 0,
+        holdout_manifest_path: str | None = None,
         use_exact_capacity: bool = DEFAULT_USE_EXACT_CAPACITY,
         min_leaves_per_class: int = DEFAULT_MIN_LEAVES_PER_CLASS,
         rare_taxa_strategy: str = DEFAULT_RARE_TAXA_STRATEGY,
@@ -280,6 +291,16 @@ class GenerationOrchestrator:
         self.keep_imbalance: bool = keep_imbalance
         self.cluster_aware_split: bool = cluster_aware_split
         self.cluster_params: ClusterParams = cluster_params or ClusterParams()
+        # Clade-holdout open-set benchmark (P11-P1): withhold whole clades from
+        # training; the eval set + scorer live in later phases.
+        self.holdout_clades: list[str] | None = holdout_clades
+        self.holdout_rank: str | None = holdout_rank
+        self.holdout_fraction: float | None = holdout_fraction
+        self.holdout_seed: int = holdout_seed
+        self.holdout_manifest_path: str | None = holdout_manifest_path
+        self._holdout_requested: bool = bool(holdout_clades or holdout_rank)
+        self._holdout_taxids: set[str] | None = None
+        self._holdout_manifest: list[dict] | None = None
         self.use_exact_capacity: bool = use_exact_capacity
         self.min_leaves_per_class: int = min_leaves_per_class
         self.rare_taxa_strategy: str = rare_taxa_strategy
@@ -490,19 +511,15 @@ class GenerationOrchestrator:
                     )
                 return
 
-            # Capacity pass (part of Stage 2)
-            if round_num == 0:
-                self._all_capacities = self._load_or_compute_capacities(tree_root)
-            else:
-                ui_logger.info(
-                    f"Computing node capacities via bottom-up pass "
-                    f"(min_len={self.min_subseq_len})."
-                )
-                self._all_capacities = compute_all_capacities(
-                    tree_root, self.min_subseq_len,
-                    spill_dir=self.spill_dir, n_workers=self.n_workers,
-                    n_gpu_workers=self.n_gpu_workers,
-                )
+            # Clade-holdout (P11-P1): withhold whole clades from training so they
+            # appear only in a downstream open-set eval set. Select + record the
+            # manifest on the FULL tree, then prune before capacity + scheduling so
+            # the label space and balancing reflect only the retained set.
+            if self._holdout_requested:
+                self._apply_holdout(tree_root, domain_taxid)
+
+            # Capacity pass (part of Stage 2).
+            self._all_capacities = self._run_capacity_pass(tree_root, round_num)
 
             n_taxa = sum(1 for _ in tree_root.descendants)
             n_cap = len(self._all_capacities)
@@ -526,6 +543,8 @@ class GenerationOrchestrator:
 
         if tree_root is None:
             return
+
+        self._write_holdout_manifest(target_group)  # no-op unless holdout ran
 
         # Stage 3 — scheduling
         ui_logger.info("Stage 3/4: Scheduling extraction jobs.")
@@ -564,6 +583,81 @@ class GenerationOrchestrator:
         )
 
         ui_logger.info("Pipeline finished successfully.")
+
+    def _run_capacity_pass(self, tree_root: Node, round_num: int) -> dict[str, int]:
+        """Compute node capacities for the (possibly pruned) tree.
+
+        Round 0 of a non-holdout run may reuse cached capacities; a holdout run
+        forces a fresh bottom-up pass so retained ancestors are not credited with
+        pruned descendants, and refinement rounds always recompute.
+        """
+        if round_num == 0 and not self._holdout_requested:
+            return self._load_or_compute_capacities(tree_root)
+        ui_logger.info(
+            f"Computing node capacities via bottom-up pass "
+            f"(min_len={self.min_subseq_len})."
+        )
+        return compute_all_capacities(
+            tree_root, self.min_subseq_len,
+            spill_dir=self.spill_dir, n_workers=self.n_workers,
+            n_gpu_workers=self.n_gpu_workers,
+        )
+
+    def _apply_holdout(self, tree_root: Node, domain_taxid: str | None) -> None:
+        """Select + record + prune the held-out clades (open-set benchmark, P11-P1).
+
+        Selection and the manifest are computed once, on the full tree, then the
+        held-out subtrees are pruned in place so the retained tree drives capacity
+        and scheduling. On a refinement re-build the stable selection is re-pruned.
+        """
+        scope_node = self._find_domain_node(tree_root, domain_taxid) or tree_root
+        if self._holdout_taxids is None:
+            self._holdout_taxids = select_holdout_taxids(
+                scope_node,
+                explicit=self.holdout_clades,
+                rank=self.holdout_rank,
+                fraction=self.holdout_fraction,
+                seed=self.holdout_seed,
+            )
+            self._holdout_manifest = build_holdout_manifest(
+                scope_node, self._holdout_taxids, seed=self.holdout_seed
+            )
+            if not self._holdout_taxids:
+                ui_logger.warning(
+                    "Clade-holdout requested but no eligible clades selected "
+                    "(check --holdout-clades / --holdout-rank / --holdout-fraction)."
+                )
+            else:
+                n_genomes = sum(e["n_genomes"] for e in self._holdout_manifest)
+                ui_logger.info(
+                    "Clade-holdout: withholding %s clades (%s genomes) from training.",
+                    f"{len(self._holdout_taxids):,}", f"{n_genomes:,}",
+                )
+        n_pruned = prune_holdout(scope_node, self._holdout_taxids)
+        logger.info("Clade-holdout: pruned %d held-out subtree(s).", n_pruned)
+
+    def _write_holdout_manifest(self, target_group: str) -> None:
+        """Persist the held-out-clade manifest to the output directory."""
+        if self._holdout_manifest is None:
+            return
+        os.makedirs(self.output_dir, exist_ok=True)
+        path = self.holdout_manifest_path or os.path.join(
+            self.output_dir, f"benchmark_manifest_{target_group}.json"
+        )
+        payload = {
+            "scope": target_group,
+            "params": {
+                "holdout_clades": self.holdout_clades,
+                "holdout_rank": self.holdout_rank,
+                "holdout_fraction": self.holdout_fraction,
+                "holdout_seed": self.holdout_seed,
+            },
+            "n_holdout_clades": len(self._holdout_taxids or ()),
+            "holdout": self._holdout_manifest,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        ui_logger.info("Clade-holdout manifest written: %s", path)
 
     @staticmethod
     def _resolve_root_taxid(target_root: str) -> str | None:
