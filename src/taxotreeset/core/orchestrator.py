@@ -179,6 +179,108 @@ class DiscoveryOrchestrator:
         self.registry.save()
         logger.info("Metadata registration and tree construction completed.")
 
+    def discover_from_reports(
+        self,
+        reports: list[dict[str, Any]],
+        root_id_str: str,
+        vault_lmdb_path: str | None = None,
+        checkpoint_interval: int = _DEFAULT_CHECKPOINT_INTERVAL,
+    ) -> None:
+        """Register a *pre-acquired* accession set (grouped by host TaxID).
+
+        The bottom-up counterpart to :meth:`discover_from_root`. Some scopes have
+        no root taxon to walk top-down — most notably plasmids, which are not a
+        taxon: each RefSeq plasmid record is assigned to its **host** organism, so
+        acquisition starts from the plasmid accession *set* (parsed from the
+        RefSeq plasmid release) and resolves each record's host lineage. This
+        method takes the synthetic assembly reports that acquisition produced
+        (``io/plasmid_release.record_to_report``), groups them by host TaxID, and
+        reuses the same lineage-resolution + tree-build + registration path as the
+        top-down walk (:meth:`_build_hierarchy`).
+
+        When ``vault_lmdb_path`` is given, each registered accession is marked
+        downloaded against that vault — the sequences were ingested directly from
+        the release (standalone nucleotide accessions cannot go through the
+        assembly-oriented ``datasets download`` path), so there is nothing left to
+        fetch. Reports whose host lineage cannot be resolved are skipped by
+        ``_build_hierarchy`` and thus never marked downloaded (a harmless vault
+        orphan), consistent with the top-down path's tolerance.
+
+        Args:
+            reports: Flat list of synthetic assembly reports, each carrying its
+                host TaxID at ``organism.tax_id``.
+            root_id_str: Scope key for mapping redirections/labels (the host
+                lineage still builds the full path when the scope has no rules).
+            vault_lmdb_path: Vault the sequences were ingested into; when set,
+                registered accessions are marked downloaded against it.
+            checkpoint_interval: Registry save cadence, in processed taxa.
+        """
+        reports_by_taxid = self._group_reports_by_host(reports)
+        if not reports_by_taxid:
+            return
+
+        logger.info(
+            "Registering %d pre-acquired accession(s) across %d host taxa.",
+            len(reports), len(reports_by_taxid),
+        )
+        self._build_hierarchy(
+            reports_by_taxid=reports_by_taxid,
+            root_id_str=root_id_str,
+            checkpoint_interval=checkpoint_interval,
+        )
+        if vault_lmdb_path is not None:
+            self._mark_reports_downloaded(reports_by_taxid, vault_lmdb_path)
+
+        self.registry.mark_updated()
+        self.registry.save()
+        logger.info("Pre-acquired accession registration completed.")
+
+    @staticmethod
+    def _group_reports_by_host(
+        reports: list[dict[str, Any]],
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Group flat reports by their host TaxID string.
+
+        Mirrors ``_consume_jsonlines_stream``'s grouping of assembly reports by
+        ``organism.tax_id``. Reports with no host TaxID are dropped (nothing to
+        place them under).
+        """
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for report in reports:
+            taxid = report.get("organism", {}).get("tax_id")
+            if not taxid:
+                continue
+            grouped.setdefault(str(taxid), []).append(report)
+        return grouped
+
+    def _mark_reports_downloaded(
+        self,
+        reports_by_taxid: dict[str, list[dict[str, Any]]],
+        vault_lmdb_path: str,
+    ) -> None:
+        """Flag each registered accession as already present in the vault.
+
+        The plasmid sequence for an accession is ingested directly (its record id
+        is the LMDB key), so the accession is complete the moment it is
+        registered: mark it downloaded with a single header whose ``id`` is the
+        vault key. Mirrors the downloader's post-batch registry update.
+        """
+        accessions = self.registry.registry["accessions"]
+        marked = 0
+        for reports in reports_by_taxid.values():
+            for report in reports:
+                accession = report.get("accession")
+                info = accessions.get(accession)
+                if info is None:
+                    continue
+                organism = report.get("organism", {}).get("organism_name")
+                info["downloaded"] = True
+                info["local_path"] = vault_lmdb_path
+                info["headers"] = [{"id": accession, "name": organism or accession}]
+                info.pop("download_attempts", None)
+                marked += 1
+        logger.info("Marked %d pre-acquired accession(s) as downloaded.", marked)
+
     @staticmethod
     def _log_api_key_status() -> None:
         """Emit an informational log line if an NCBI API key is set.
