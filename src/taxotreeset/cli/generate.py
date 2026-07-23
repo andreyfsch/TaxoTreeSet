@@ -402,6 +402,29 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "overwrites the registry lineages, so a later run without --all-ranks "
         "reverts to canonical.",
     )
+    parser.add_argument(
+        "--plasmids",
+        action="store_true",
+        help="Generate a plasmid dataset: the auto-sync fetches the RefSeq plasmid "
+        "release, ingests each plasmid into the vault, and registers it under its "
+        "host organism's lineage, then heads are built over the (sparse) host "
+        "forest — so --root is ignored. The plasmid-branch counterpart to the "
+        "taxon-walk sync; needs a sync (incompatible with --no-sync).",
+    )
+    parser.add_argument(
+        "--plasmid-release",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help="With --plasmids, where to store/read the RefSeq plasmid release "
+        "files (default: <vault>/refseq_plasmid). Resumable and md5-verified.",
+    )
+    parser.add_argument(
+        "--no-fetch",
+        action="store_true",
+        help="With --plasmids, skip the release download and use the files "
+        "already present in the release directory (offline / pre-fetched).",
+    )
 
 
 def run(args: argparse.Namespace) -> None:
@@ -439,6 +462,13 @@ def run(args: argparse.Namespace) -> None:
             "discover' first, or drop --no-sync to build it via sync.",
             args.registry,
         )
+        sys.exit(1)
+
+    if args.plasmids and args.no_sync:
+        logger.error(
+            "--plasmids IS the sync (it fetches + registers the plasmid release), "
+            "so it cannot be combined with --no-sync. To generate from an "
+            "already-acquired plasmid registry, use '--root all --no-sync'.")
         sys.exit(1)
 
     if args.holdout_clades and args.holdout_rank:
@@ -507,6 +537,9 @@ def run(args: argparse.Namespace) -> None:
             binary_budget=args.binary_budget,
             binary_extract_batch_size=args.extract_batch_size,
             all_ranks=args.all_ranks,
+            plasmids=args.plasmids,
+            plasmid_release=args.plasmid_release,
+            plasmid_no_fetch=args.no_fetch,
         )
 
         logger.info(

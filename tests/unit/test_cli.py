@@ -493,6 +493,9 @@ class TestGenerateRun:
             binary_budget=30000,
             extract_batch_size=300,
             all_ranks=False,
+            plasmids=False,
+            plasmid_release=None,
+            no_fetch=False,
             log_level="INFO",
         )
 
@@ -506,6 +509,32 @@ class TestGenerateRun:
             mock_orch.return_value.run_pipeline.return_value = None
             generate.run(args)
         mock_orch.return_value.run_pipeline.assert_called_once()
+
+    def test_plasmids_flag_threads_to_orchestrator(self, tmp_path):
+        args = self._make_args(tmp_path)
+        args.plasmids = True
+        args.plasmid_release = "/data/release"
+        with (
+            patch("taxotreeset.cli.generate.setup_logging"),
+            patch("taxotreeset.cli.generate.NCBIRegistry"),
+            patch("taxotreeset.cli.generate.GenerationOrchestrator") as mock_orch,
+        ):
+            mock_orch.return_value.run_pipeline.return_value = None
+            generate.run(args)
+        kwargs = mock_orch.call_args.kwargs
+        assert kwargs["plasmids"] is True
+        assert kwargs["plasmid_release"] == "/data/release"
+
+    def test_plasmids_with_no_sync_is_rejected(self, tmp_path):
+        args = self._make_args(tmp_path)
+        args.plasmids = True
+        args.no_sync = True
+        with (
+            patch("taxotreeset.cli.generate.setup_logging"),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            generate.run(args)
+        assert exc_info.value.code == 1
 
     def test_reject_flags_thread_to_orchestrator(self, tmp_path):
         args = self._make_args(tmp_path)

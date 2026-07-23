@@ -205,6 +205,9 @@ class GenerationOrchestrator:
         binary_budget: int = 30000,
         binary_extract_batch_size: int = 300,
         all_ranks: bool = False,
+        plasmids: bool = False,
+        plasmid_release: str | None = None,
+        plasmid_no_fetch: bool = False,
     ) -> None:
         """Initialize the orchestrator and its collaborating components.
 
@@ -311,6 +314,9 @@ class GenerationOrchestrator:
         self.binary_budget: int = binary_budget
         self.binary_extract_batch_size: int = binary_extract_batch_size
         self.all_ranks: bool = all_ranks
+        self.plasmids: bool = plasmids
+        self.plasmid_release: str | None = plasmid_release
+        self.plasmid_no_fetch: bool = plasmid_no_fetch
         self.selective_download_threshold: int = selective_download_threshold
         self.spill_dir: str | None = spill_dir
         self.tmp_dir: str | None = tmp_dir
@@ -343,6 +349,23 @@ class GenerationOrchestrator:
         :meth:`taxotreeset.core._orchestration._sync._SyncManager._sync_with_ncbi`.
         """
         _SyncManager(self)._sync_with_ncbi(target_group)
+
+    def _sync_plasmids(self) -> None:
+        """Acquire the RefSeq plasmid release as the Stage-1 sync (``--plasmids``).
+
+        Thin delegator to
+        :meth:`taxotreeset.core._orchestration._sync._SyncManager._sync_plasmids`.
+        """
+        _SyncManager(self)._sync_plasmids()
+
+    def _run_sync_stage(self, target_group: str) -> None:
+        """Dispatch Stage-1 sync: plasmid acquisition or the NCBI taxon walk."""
+        if self.plasmids:
+            ui_logger.info("Acquiring the RefSeq plasmid release (host taxonomy).")
+            self._sync_plasmids()
+        else:
+            ui_logger.info("Syncing registry and vault with NCBI.")
+            self._sync_with_ncbi(target_group)
 
     def _domains_to_sync(self) -> list[str]:
         """Return the superkingdom TaxIDs to re-discover for an ``all`` sync.
@@ -458,10 +481,12 @@ class GenerationOrchestrator:
         )
 
         if sync:
-            ui_logger.info("Syncing registry and vault with NCBI.")
-            self._sync_with_ncbi(target_group)
+            self._run_sync_stage(target_group)
 
-        scope_taxids = self._resolve_scope_taxids(target_group)
+        # Plasmids register under a sparse host forest (bacteria/archaea/...), so
+        # the tree spans every registered domain regardless of --root ("all").
+        scope_taxids = (
+            None if self.plasmids else self._resolve_scope_taxids(target_group))
         # A single domain anchors scheduling at its node (unchanged); the whole
         # registry (None) and multi-root scopes anchor at the empty root.
         domain_taxid = self._scope_anchor(scope_taxids)

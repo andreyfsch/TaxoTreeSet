@@ -166,6 +166,56 @@ class TestDomainsToSync:
 
 
 # ---------------------------------------------------------------------------
+# _sync_plasmids — the --plasmids auto-sync (fetch + ingest + register)
+# ---------------------------------------------------------------------------
+
+
+class TestSyncPlasmids:
+    def _plasmid_orch(self, tmp_path, no_fetch=False):
+        mapping = tmp_path / "mapping.json"
+        mapping.write_text('{"scopes": {}}', encoding="utf-8")
+        orch = _make_orchestrator(tmp_path)
+        orch.config_path = str(mapping)
+        orch.plasmids = True
+        orch.plasmid_release = None
+        orch.plasmid_no_fetch = no_fetch
+        return orch
+
+    def test_fetches_ingests_and_registers_by_host(self, tmp_path):
+        orch = self._plasmid_orch(tmp_path)
+        reports = [{"accession": "NZ_P1.1"}]
+        with (
+            patch("taxotreeset.core._orchestration._sync.fetch_release") as m_fetch,
+            patch("taxotreeset.core._orchestration._sync.iter_release_records",
+                  return_value=iter([])),
+            patch("taxotreeset.core._orchestration._sync.ingest_records_to_vault",
+                  return_value=reports) as m_ingest,
+            patch("taxotreeset.core._orchestration._sync.DiscoveryOrchestrator")
+            as m_disc,
+        ):
+            orch._sync_plasmids()
+        assert m_fetch.call_args.args[0].endswith("refseq_plasmid")  # default dir
+        m_ingest.assert_called_once()
+        call = m_disc.return_value.discover_from_reports.call_args
+        assert call.args[0] == reports
+        assert call.kwargs["root_id_str"] == "plasmids"
+        assert call.kwargs["vault_lmdb_path"].endswith("sequences.lmdb")
+
+    def test_no_fetch_skips_the_download(self, tmp_path):
+        orch = self._plasmid_orch(tmp_path, no_fetch=True)
+        with (
+            patch("taxotreeset.core._orchestration._sync.fetch_release") as m_fetch,
+            patch("taxotreeset.core._orchestration._sync.iter_release_records",
+                  return_value=iter([])),
+            patch("taxotreeset.core._orchestration._sync.ingest_records_to_vault",
+                  return_value=[]),
+            patch("taxotreeset.core._orchestration._sync.DiscoveryOrchestrator"),
+        ):
+            orch._sync_plasmids()
+        m_fetch.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # _find_domain_node
 # ---------------------------------------------------------------------------
 

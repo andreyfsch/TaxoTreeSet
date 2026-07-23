@@ -13,19 +13,13 @@ from taxotreeset import paths
 from taxotreeset.logging_utils import setup_logging
 from taxotreeset.core.orchestrator import DiscoveryOrchestrator
 from taxotreeset.io.plasmid_release import (
+    PLASMID_RELEASE_SUBDIR,
+    PLASMID_SCOPE_KEY,
     fetch_release,
     ingest_records_to_vault,
     iter_release_records,
 )
 from taxotreeset.io.registry import NCBIRegistry
-
-# Sub-directory of the vault where the RefSeq plasmid release is synced by default.
-_PLASMID_RELEASE_SUBDIR = "refseq_plasmid"
-
-# Scope key the plasmid host tree registers under. It has no NCBI TaxID (plasmid
-# is not a taxon); a user may add a "plasmids" scope with redirections to
-# mapping.json, otherwise host names pass through unmapped.
-_PLASMID_SCOPE_KEY = "plasmids"
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -89,7 +83,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         metavar="DIR",
         help="Where to store/read the RefSeq plasmid release files (default: "
-        "<vault>/" + _PLASMID_RELEASE_SUBDIR + "). Reused across runs (the fetch "
+        "<vault>/" + PLASMID_RELEASE_SUBDIR + "). Reused across runs (the fetch "
         "is resumable and md5-verified).",
     )
     parser.add_argument(
@@ -188,7 +182,7 @@ def _validate_plasmid_args(args: argparse.Namespace, logger: logging.Logger) -> 
 def _plasmid_release_dir(args: argparse.Namespace) -> str:
     """The release directory: the override, else a default under the vault."""
     return args.plasmid_release or os.path.join(
-        args.vault, _PLASMID_RELEASE_SUBDIR)
+        args.vault, PLASMID_RELEASE_SUBDIR)
 
 
 def _run_plasmid_discovery(
@@ -211,7 +205,7 @@ def _run_plasmid_discovery(
         iter_release_records(release_dir), lmdb_path)
     orchestrator.discover_from_reports(
         reports,
-        root_id_str=_PLASMID_SCOPE_KEY,
+        root_id_str=PLASMID_SCOPE_KEY,
         vault_lmdb_path=lmdb_path,
     )
     return f"RefSeq plasmid release ({len(reports)} record(s))"

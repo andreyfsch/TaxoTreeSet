@@ -11,6 +11,7 @@ calls stay ``self._...``; anything on the orchestrator is ``self.ctx.``.
 
 import json
 import logging
+import os
 from typing import TYPE_CHECKING
 
 from bigtree import Node
@@ -21,6 +22,13 @@ from taxotreeset.core.generation import (
 )
 from taxotreeset.core.generation.constants import is_recursion_terminator
 from taxotreeset.core.orchestrator import DiscoveryOrchestrator
+from taxotreeset.io.plasmid_release import (
+    PLASMID_RELEASE_SUBDIR,
+    PLASMID_SCOPE_KEY,
+    fetch_release,
+    ingest_records_to_vault,
+    iter_release_records,
+)
 from taxotreeset.logging_utils import get_ui_logger
 from taxotreeset.ranks import is_below_boundary
 
@@ -99,6 +107,41 @@ class _SyncManager:
                 f"{threshold_gib:.1f} GiB threshold; "
                 "all pending accessions will be downloaded."
             )
+
+    def _sync_plasmids(self) -> None:
+        """Stage-1 sync for ``generate --plasmids``: acquire the plasmid release.
+
+        The bottom-up counterpart to :meth:`_sync_with_ncbi`. Plasmids are not a
+        taxon, so instead of walking a root TaxID this fetches the RefSeq plasmid
+        release (unless ``--no-fetch``), ingests each plasmid sequence into the
+        vault, and registers it under its host organism's lineage via
+        :meth:`DiscoveryOrchestrator.discover_from_reports` — the same call the
+        ``discover --plasmids`` subcommand makes, so the two entry points build an
+        identical host-taxonomy registry. The host forest built afterwards is
+        sparse (only hosts that carry plasmids). No vault reconciliation /
+        selective-download pass runs: the sequences are ingested here directly and
+        marked downloaded, so there is nothing pending to fetch.
+        """
+        release_dir = self.ctx.plasmid_release or os.path.join(
+            self.ctx.vault_path, PLASMID_RELEASE_SUBDIR)
+        if not self.ctx.plasmid_no_fetch:
+            ui_logger.info("Fetching the RefSeq plasmid release into %s", release_dir)
+            fetch_release(release_dir)
+
+        lmdb_path = os.path.join(self.ctx.vault_path, "sequences.lmdb")
+        ui_logger.info("Ingesting plasmid sequences into %s", lmdb_path)
+        reports = ingest_records_to_vault(
+            iter_release_records(release_dir), lmdb_path)
+
+        with open(self.ctx.config_path, encoding="utf-8") as handle:
+            mapping_config = json.load(handle)
+        discovery = DiscoveryOrchestrator(
+            registry=self.ctx.registry,
+            mapping_config=mapping_config,
+            all_ranks=self.ctx.all_ranks,
+        )
+        discovery.discover_from_reports(
+            reports, root_id_str=PLASMID_SCOPE_KEY, vault_lmdb_path=lmdb_path)
 
     def _domains_to_sync(self) -> list[str]:
         """Return the superkingdom TaxIDs to re-discover for an ``all`` sync.

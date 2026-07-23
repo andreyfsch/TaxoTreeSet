@@ -403,6 +403,20 @@ with `--binary-only`, the plasmid host tree's root becomes a "plasmid
 vs. not-plasmid" head whose negatives are drawn from outside the plasmid subtree
 (see [Binary heads](#binary-heads-optional) and multi-root `--root A,B`).
 
+**One-step generation.** Just as `generate` auto-runs the taxon-walk discovery
+for a viral scope, `generate --plasmids` auto-runs this plasmid acquisition as its
+sync stage — no separate `discover` needed. It fetches + ingests + registers, then
+builds heads over the (sparse) host forest, so `--root` is ignored:
+
+```
+python3 -m taxotreeset generate --plasmids --binary-only \
+  --vault /data/vault --output data/plasmid_datasets
+```
+
+Same `--plasmid-release` / `--no-fetch` knobs apply. `--plasmids` performs the
+sync, so it cannot be combined with `--no-sync` (to generate from an
+already-acquired plasmid registry, use `--root all --no-sync`).
+
 ### Stage 2: Generation
 
 `taxotreeset generate` builds the taxonomic tree from the registry, runs the

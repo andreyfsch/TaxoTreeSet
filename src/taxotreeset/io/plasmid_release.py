@@ -49,6 +49,12 @@ _INGEST_COMMIT_EVERY = 1000
 # RefSeq plasmid release location + layout. The release ships a *.files.installed
 # manifest (``<md5>  <path>`` pairs) alongside the data files; the directory HTML
 # listing is the fallback when the manifest cannot be read.
+# Registry scope key the plasmid host tree registers under (plasmid is not a
+# taxon), and the default release sub-directory under the vault. Shared by the
+# discover CLI and the generate --plasmids auto-sync.
+PLASMID_SCOPE_KEY = "plasmids"
+PLASMID_RELEASE_SUBDIR = "refseq_plasmid"
+
 _RELEASE_BASE_URL = "https://ftp.ncbi.nlm.nih.gov/refseq/release/plasmid/"
 _MANIFEST_NAME = "plasmid.files.installed"
 _GBFF_SUFFIX = ".genomic.gbff.gz"
