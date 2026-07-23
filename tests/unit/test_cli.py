@@ -274,6 +274,8 @@ class TestDiscoverRun:
             registry=str(tmp_path / "registry.json"),
             reset=reset,
             all_ranks=False,
+            plasmid_release=None,
+            vault=None,
             log_level="INFO",
         )
 
@@ -321,6 +323,44 @@ class TestDiscoverRun:
             mock_orch.return_value.discover_from_root.return_value = None
             discover.run(args)
         assert not registry_path.exists()
+
+    def test_plasmid_release_path_ingests_and_registers(self, tmp_path):
+        release_dir = tmp_path / "release"
+        release_dir.mkdir()
+        args = self._make_args(tmp_path)
+        args.plasmid_release = str(release_dir)
+        args.vault = str(tmp_path / "vault")
+        with (
+            patch("taxotreeset.cli.discover.setup_logging"),
+            patch("taxotreeset.cli.discover.NCBIRegistry"),
+            patch("taxotreeset.cli.discover.DiscoveryOrchestrator") as mock_orch,
+            patch(
+                "taxotreeset.cli.discover.ingest_records_to_vault",
+                return_value=[{"accession": "NZ_P1.1"}],
+            ) as mock_ingest,
+        ):
+            discover.run(args)
+        mock_ingest.assert_called_once()
+        # Takes the bottom-up path, not the taxon walk.
+        mock_orch.return_value.discover_from_root.assert_not_called()
+        call = mock_orch.return_value.discover_from_reports.call_args
+        assert call.args[0] == [{"accession": "NZ_P1.1"}]
+        assert call.kwargs["vault_lmdb_path"].endswith("sequences.lmdb")
+
+    def test_plasmid_release_requires_vault(self, tmp_path):
+        release_dir = tmp_path / "release"
+        release_dir.mkdir()
+        args = self._make_args(tmp_path)
+        args.plasmid_release = str(release_dir)
+        args.vault = None
+        with (
+            patch("taxotreeset.cli.discover.setup_logging"),
+            patch("taxotreeset.cli.discover.NCBIRegistry"),
+            patch("taxotreeset.cli.discover.DiscoveryOrchestrator"),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            discover.run(args)
+        assert exc_info.value.code == 1
 
     def test_reset_os_error_causes_sys_exit(self, tmp_path):
         registry_path = tmp_path / "registry.json"

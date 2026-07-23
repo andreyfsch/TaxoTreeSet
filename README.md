@@ -367,6 +367,36 @@ Key options:
 | `--registry, -r`  | XDG data dir          | Destination inventory file                       |
 | `--reset, -f`     | off                   | Delete the old registry before a fresh discovery |
 
+#### Plasmids: bottom-up discovery from the RefSeq plasmid release
+
+A plasmid is **not a taxon** — there is no NCBI TaxID that roots all plasmids;
+every RefSeq plasmid record is taxonomically assigned to its **host** organism.
+So plasmids cannot be discovered by walking `--taxon-id` top-down. Instead,
+point `discover` at a local copy of the curated
+[RefSeq plasmid release](https://ftp.ncbi.nlm.nih.gov/refseq/release/plasmid/)
+(its GenBank flat files, `plasmid.N.genomic.gbff.gz`, fetched separately — no
+full-Bacteria crawl). Each record's sequence is ingested into the vault and the
+record is registered under its host organism's lineage, so only hosts that
+actually carry plasmids are materialized (a sparse subtree). This is
+*host prediction* for plasmids, not intrinsic plasmid typing.
+
+```
+python3 -m taxotreeset discover \
+  --plasmid-release /data/refseq_plasmid/ \
+  --vault /data/vault \
+  --registry registry_plasmids.json
+```
+
+| Option              | Purpose                                                              |
+|---------------------|----------------------------------------------------------------------|
+| `--plasmid-release` | Directory of RefSeq plasmid release GBFF files (`.gbff` / `.gbff.gz`) |
+| `--vault`           | Vault to ingest plasmid sequences into (LMDB at `<DIR>/sequences.lmdb`); required with `--plasmid-release` |
+
+Generation then runs on the resulting registry like any other scope. Combined
+with `--binary-only`, the plasmid host tree's root becomes a "plasmid
+vs. not-plasmid" head whose negatives are drawn from outside the plasmid subtree
+(see [Binary heads](#binary-heads-optional) and multi-root `--root A,B`).
+
 ### Stage 2: Generation
 
 `taxotreeset generate` builds the taxonomic tree from the registry, runs the

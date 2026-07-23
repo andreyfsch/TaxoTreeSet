@@ -283,7 +283,7 @@ run) over the P7-Part-B `_vault_fixture`.
 
 ---
 
-## 🟠 P9 — Multi-root scope + plasmid datasets (host-taxonomy, tool-free)
+## ✅ P9 — Multi-root scope + plasmid datasets (host-taxonomy, tool-free) — code DONE (2026-07-23)
 
 **Goal.** Parametrize several scopes as roots (e.g. `--root Viruses,Plasmids`) and,
 specifically, let TaxoTreeSet build datasets for **plasmid recognition in isolation,
@@ -345,22 +345,40 @@ Rejected/deferred alternatives (the field's plasmid schemes all need a reference
    single-root path is exercised end-to-end by the synthetic-pipeline integration test.
    NOTE this needs REAL taxa on both sides — `--root Viruses,Plasmids` still awaits the
    plasmid acquisition (pieces 2-3 below), since "Plasmids" has no TaxID yet.
-2. **Plasmid acquisition** — pull from the RefSeq `plasmid` division (a curated plasmid
-   collection) directly, reusing the P3 `--exclude-plasmids` molecule detector to
-   *select* plasmids at ingestion. No full-Bacteria download.
-3. **Accession-set-driven discovery entry point** — plasmids have no root taxon to walk
-   top-down, so discovery starts from the plasmid **accession set** (bottom-up: resolve
-   each record's host lineage, assemble the host subtree). Reuses lineage resolution +
-   the cascade; the new part is the entry point, not the tree/head logic.
+2. **Plasmid acquisition — DONE (2026-07-23).** `io/plasmid_release.py`: parse the curated
+   standalone RefSeq plasmid release (GenBank flat files), not a Bacteria crawl. Chosen over
+   inverting the P3 molecule detector on downloaded assemblies because plasmid records are
+   standalone nucleotide accessions (NZ_/NC_), which the assembly-oriented
+   `datasets download genome accession` path does not fetch — so the release is both the
+   host-taxid source (`/db_xref="taxon:NNN"` in the source feature) and the sequence source.
+   `parse_gbff_records` streams records into `PlasmidRecord(accession, host_taxid, organism,
+   length, sequence)`; `ingest_records_to_vault` writes each sequence into the LMDB vault with
+   the exact downloader contract (key `accession`, value `zlib.compress(seq)`) so plasmids read
+   back through `_read_single_sequence` like genomes; `record_to_report` adapts each to the
+   synthetic assembly-report shape the registration path consumes; `iter_release_records` streams
+   a whole release directory (`.gbff`/`.gbff.gz`, gzip transparent). 12 unit tests.
+3. **Accession-set-driven discovery entry point — DONE (2026-07-23).**
+   `DiscoveryOrchestrator.discover_from_reports` — the bottom-up counterpart to
+   `discover_from_root`: groups the pre-acquired reports by host TaxID (`_group_reports_by_host`),
+   reuses `_build_hierarchy` wholesale (lineage resolution + tree build + registration), then
+   `_mark_reports_downloaded` flags each registered accession as already present in the vault (the
+   sequence was ingested directly; nothing left to fetch), with a single header whose id is the
+   vault key. Unresolvable hosts are skipped, not raised (matches the top-down path). Wired into
+   the CLI: `discover --plasmid-release <DIR> --vault <DIR>` (parse+ingest → register by host
+   lineage); `_run_plasmid_discovery`/`_validate_plasmid_args` in `cli/discover.py`. 6 orchestrator
+   + 2 CLI tests. README Stage-1 "Plasmids: bottom-up discovery" subsection.
 
-**Effort.** Moderate. Multi-root is small; the plasmid path (RefSeq plasmid acquisition
-+ accession-driven discovery) is the bulk; host-lineage labeling reuses existing code.
+**Effort.** Moderate — **DONE (2026-07-23)**. Multi-root plumbing (piece 1) + plasmid acquisition
+(piece 2) + accession-driven discovery (piece 3) all shipped, CPU-only. **What remains is only an
+actual production run** (fetch the RefSeq plasmid release to `/mnt/f`, run `discover
+--plasmid-release`, then `generate --binary-only` on the host tree) — no more code. Suite 1122.
+Deferred/future (option 2 in the design): ingest a precomputed PTU/replicon table for intrinsic
+plasmid typing instead of host-taxonomy labeling.
 
-Files: `cli/generate.py` (`--root` list), `core/orchestrator.py` (accession-set-driven
-discovery entry), `taxonomy.py` (resolve multiple roots), `io/downloader.py` (RefSeq
-plasmid acquisition; reuse `_is_excluded_molecule`), `core/generation_orchestrator.py`
-(empty-root forest / multi-scope scheduling). Related: P3 (plasmid detection primitive),
-P4 (cross-domain negatives), the `--binary-only` machinery.
+Files: `io/plasmid_release.py` (new; release parser + vault ingester), `core/orchestrator.py`
+(`discover_from_reports`), `cli/discover.py` (`--plasmid-release`/`--vault`), `cli/generate.py`
+(`--root` list, piece 1), `core/generation_orchestrator.py` (empty-root forest, piece 1). Related:
+P3 (plasmid detection primitive), P4 (cross-domain negatives), the `--binary-only` machinery.
 
 ---
 

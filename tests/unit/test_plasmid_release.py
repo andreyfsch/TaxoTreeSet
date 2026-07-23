@@ -1,9 +1,12 @@
 """Tests for the RefSeq plasmid release GBFF parser (P9)."""
 
+import gzip
+
 from taxotreeset.dataset.utils import _read_single_sequence
 from taxotreeset.io.plasmid_release import (
     PlasmidRecord,
     ingest_records_to_vault,
+    iter_release_records,
     parse_gbff_records,
     record_to_report,
 )
@@ -113,3 +116,17 @@ class TestIngestToVault:
         assert len(reports) == 1
         seq = _read_single_sequence(lmdb_path, "NZ_CP012345.1")
         assert seq.startswith("ATGCATGC") and len(seq) == 40
+
+
+class TestIterReleaseDir:
+    def test_reads_plain_and_gzip_files(self, tmp_path):
+        (tmp_path / "plasmid.1.genomic.gbff").write_text(_GBFF, encoding="utf-8")
+        with gzip.open(tmp_path / "plasmid.2.genomic.gbff.gz", "wt") as f:
+            f.write(_GBFF)
+        # One placeable record per file (the host-less second is dropped).
+        recs = list(iter_release_records(str(tmp_path)))
+        assert len(recs) == 2
+        assert {r.accession for r in recs} == {"NZ_CP012345.1"}
+
+    def test_empty_dir_yields_nothing(self, tmp_path):
+        assert list(iter_release_records(str(tmp_path))) == []

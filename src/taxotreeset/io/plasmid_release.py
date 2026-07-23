@@ -19,6 +19,8 @@ branch reuses the existing lineage-resolution + tree-building cascade unchanged
 sequences into the vault live alongside it; see ``docs/BACKLOG.md`` P9.
 """
 
+import glob
+import gzip
 import logging
 import os
 import re
@@ -71,6 +73,33 @@ class PlasmidRecord:
     organism: str
     length: int
     sequence: str
+
+
+def iter_release_records(release_dir: str) -> Iterator[PlasmidRecord]:
+    """Stream records from every GBFF file in a RefSeq plasmid release directory.
+
+    Reads the release's GenBank flat files (``*.gbff`` / ``*.gbff.gz``, e.g.
+    ``plasmid.1.genomic.gbff.gz``) in sorted order, decompressing gzip
+    transparently. Files are opened and closed one at a time so the whole release
+    is never held open or in memory. The caller is expected to have fetched the
+    release directory already (a bulk FTP mirror of
+    ``refseq/release/plasmid/``).
+
+    Args:
+        release_dir: Directory containing the release's GBFF files.
+
+    Yields:
+        Every :class:`PlasmidRecord` across all files, in file-then-record order.
+    """
+    paths = sorted({
+        p
+        for pattern in ("*.gbff", "*.gbff.gz")
+        for p in glob.glob(os.path.join(release_dir, pattern))
+    })
+    for path in paths:
+        opener = gzip.open if path.endswith(".gz") else open
+        with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
+            yield from parse_gbff_records(handle)
 
 
 def parse_gbff_records(lines: Iterable[str]) -> Iterator[PlasmidRecord]:

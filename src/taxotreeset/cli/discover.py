@@ -12,7 +12,16 @@ import sys
 from taxotreeset import paths
 from taxotreeset.logging_utils import setup_logging
 from taxotreeset.core.orchestrator import DiscoveryOrchestrator
+from taxotreeset.io.plasmid_release import (
+    ingest_records_to_vault,
+    iter_release_records,
+)
 from taxotreeset.io.registry import NCBIRegistry
+
+# Scope key the plasmid host tree registers under. It has no NCBI TaxID (plasmid
+# is not a taxon); a user may add a "plasmids" scope with redirections to
+# mapping.json, otherwise host names pass through unmapped.
+_PLASMID_SCOPE_KEY = "plasmids"
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -55,6 +64,25 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "8 canonical ranks. Intermediate taxa become heads where they branch "
         "(single-child sub-ranks are still collapsed by passthroughs).",
     )
+    parser.add_argument(
+        "--plasmid-release",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help="Bottom-up plasmid discovery: instead of walking --taxon-id, parse "
+        "the RefSeq plasmid release GBFF files in DIR (refseq/release/plasmid/, "
+        "fetched separately), ingest each plasmid sequence into the vault, and "
+        "register it under its host organism's lineage. Requires --vault.",
+    )
+    parser.add_argument(
+        "--vault",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help="Vault directory to ingest plasmid sequences into (the LMDB is "
+        "<DIR>/sequences.lmdb, matching the downloader). Required with "
+        "--plasmid-release.",
+    )
 
 
 def run(args: argparse.Namespace) -> None:
@@ -96,6 +124,9 @@ def run(args: argparse.Namespace) -> None:
         logger.error("Error reading the mapping JSON file: %s", exc)
         sys.exit(1)
 
+    if args.plasmid_release is not None:
+        _validate_plasmid_args(args, logger)
+
     try:
         registry = NCBIRegistry(
             registry_path=args.registry,
@@ -106,13 +137,18 @@ def run(args: argparse.Namespace) -> None:
             mapping_config=mapping_config,
             all_ranks=args.all_ranks,
         )
-        logger.info("Starting taxonomic scan for TaxID: %s", args.taxon_id)
-        orchestrator.discover_from_root(args.taxon_id)
+
+        if args.plasmid_release is not None:
+            root_label = _run_plasmid_discovery(orchestrator, args, logger)
+        else:
+            logger.info("Starting taxonomic scan for TaxID: %s", args.taxon_id)
+            orchestrator.discover_from_root(args.taxon_id)
+            root_label = str(args.taxon_id)
         logger.info("Discovery process finished successfully.")
 
         print("\n" + "=" * 50)
         print("   Taxonomic Mapping Complete")
-        print(f"   Root Processed     : {args.taxon_id}")
+        print(f"   Root Processed     : {root_label}")
         print(f"   Registry Updated   : {args.registry}")
         print("=" * 50 + "\n")
     except Exception as exc:
@@ -120,3 +156,38 @@ def run(args: argparse.Namespace) -> None:
             "Critical failure during discovery: %s", exc, exc_info=True
         )
         sys.exit(1)
+
+
+def _validate_plasmid_args(args: argparse.Namespace, logger: logging.Logger) -> None:
+    """Fail fast on an invalid plasmid-discovery invocation."""
+    if not os.path.isdir(args.plasmid_release):
+        logger.error(
+            "Plasmid release directory missing at %s", args.plasmid_release)
+        sys.exit(1)
+    if not args.vault:
+        logger.error("--plasmid-release requires --vault (where to ingest sequences).")
+        sys.exit(1)
+
+
+def _run_plasmid_discovery(
+    orchestrator: DiscoveryOrchestrator,
+    args: argparse.Namespace,
+    logger: logging.Logger,
+) -> str:
+    """Parse + ingest the RefSeq plasmid release, then register by host lineage.
+
+    Returns a human-readable label for the run summary.
+    """
+    lmdb_path = os.path.join(args.vault, "sequences.lmdb")
+    logger.info(
+        "Ingesting RefSeq plasmid release from %s into %s",
+        args.plasmid_release, lmdb_path,
+    )
+    reports = ingest_records_to_vault(
+        iter_release_records(args.plasmid_release), lmdb_path)
+    orchestrator.discover_from_reports(
+        reports,
+        root_id_str=_PLASMID_SCOPE_KEY,
+        vault_lmdb_path=lmdb_path,
+    )
+    return f"RefSeq plasmid release ({len(reports)} record(s))"
