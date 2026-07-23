@@ -719,6 +719,28 @@ class TestCladeHoldout:
         assert mani["params"]["holdout_clades"] == ["11234"]
         assert mani["n_holdout_clades"] == 1
 
+    def test_eval_set_built_from_the_holdout_manifest(
+        self, binary_holdout_output, synthetic_env, tmp_path_factory
+    ):
+        # P1 -> P2: the manifest's held-out clade becomes labeled novel reads.
+        import pyarrow.parquet as pq
+        from taxotreeset.benchmark.eval_set import build_eval_set
+        from taxotreeset.io.registry import NCBIRegistry
+
+        reg = NCBIRegistry(registry_path=synthetic_env["registry_path"])
+        manifest = Path(binary_holdout_output["output_dir"]) \
+            / "benchmark_manifest_viruses.json"
+        eval_path = str(tmp_path_factory.mktemp("evalset") / "eval.parquet")
+        n_reads, n_clades = build_eval_set(
+            str(manifest), reg.registry["accessions"], reg.registry["lineages"],
+            eval_path, read_length=150, reads_per_genome=5, seed=0)
+        assert n_clades == 1 and n_reads > 0
+        rows = pq.read_table(eval_path).to_pylist()
+        assert all(r["held_out_taxid"] == "11234" for r in rows)
+        # a read from held-out MHV should back off to Coronaviridae (11118)
+        assert all(r["expected_commit_taxid"] == "11118" for r in rows)
+        assert all(len(r["seq"]) == 150 for r in rows)
+
 
 class TestMultiSingleLevelTarget:
     def test_only_the_interior_target_head_is_scheduled(

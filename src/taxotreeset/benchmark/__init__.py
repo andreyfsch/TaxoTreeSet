@@ -8,6 +8,7 @@ builder, scorer, baseline runners) are tracked as P11 in ``docs/BACKLOG.md`` and
 specified in ``docs/clade_holdout_benchmark.md``.
 """
 
+from taxotreeset.benchmark.eval_set import build_eval_reads, build_eval_set
 from taxotreeset.benchmark.holdout import (
     build_holdout_manifest,
     prune_holdout,
@@ -15,6 +16,8 @@ from taxotreeset.benchmark.holdout import (
 )
 
 __all__ = [
+    "build_eval_reads",
+    "build_eval_set",
     "build_holdout_manifest",
     "prune_holdout",
     "select_holdout_taxids",

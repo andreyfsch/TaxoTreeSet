@@ -537,8 +537,22 @@ pair with `--no-sync`). Tests: 13 unit (eligibility/selection/dedup/`ρ*`/prunin
 `ρ*`=parent). Suite 1050.
 
 Files: `benchmark/holdout.py` (new), `benchmark/__init__.py` (new), `core/generation_orchestrator.py`,
-`cli/generate.py`. **Next: P2 eval-set builder** (extract reads from the held-out clades with
-true-lineage + `ρ*` + distance-bin labels; short track first).
+`cli/generate.py`.
+
+**P2 — DONE (2026-07-23): open-set eval-set builder.** New `benchmark/eval_set.py`
+(`build_eval_set` / `build_eval_reads`): reads each held-out genome from the vault, samples
+fixed-length reads (short/Illumina-like track via `extract_subseqs` with `min_len==max_len`),
+and labels every read with its true lineage (from the registry), true leaf taxid, held-out clade,
+expected commit rank `ρ*`, and divergence bin — the ground truth a scorer needs to grade back-off
+vs over-commitment. New `taxotreeset benchmark build-eval` subcommand (`--manifest` / `--registry`
+/ `--output` / `--read-length` / `--reads-per-genome` / `--seed`). Deterministic; skips
+unreadable/too-short genomes. Tests: 6 unit (header index, labels, determinism, skips, parquet
+round-trip) + 3 CLI (parse/dispatch/run) + 1 integration (P1→P2: the synthetic holdout manifest
+→ labeled novel reads that back off to the parent). Suite 1060.
+
+Files: `benchmark/eval_set.py` (new), `cli/benchmark.py` (new), `__main__.py`.
+**Next: P3 long-noisy read track** (indel/homopolymer error model on longer windows), then
+P4 scorer, P5 retained-only k-mer baselines.
 
 ---
 

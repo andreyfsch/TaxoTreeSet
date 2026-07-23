@@ -6,7 +6,13 @@ Builds the top-level argument parser with the ``discover`` and
 import argparse
 import sys
 
-from taxotreeset.cli import composition, discover, generate, separability
+from taxotreeset.cli import (
+    benchmark,
+    composition,
+    discover,
+    generate,
+    separability,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(
         dest="command",
-        metavar="{discover,generate,separability,composition}",
+        metavar="{discover,generate,separability,composition,benchmark}",
         help="Subcommand to run.",
     )
 
@@ -73,6 +79,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     composition.add_arguments(composition_parser)
     composition_parser.set_defaults(_run=composition.run)
+
+    benchmark_parser = subparsers.add_parser(
+        "benchmark",
+        parents=[common],
+        help="Open-set benchmark tools (build-eval, ...).",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    benchmark.add_arguments(benchmark_parser)
+    benchmark_parser.set_defaults(_run=benchmark.run)
 
     return parser
 

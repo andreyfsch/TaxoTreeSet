@@ -70,6 +70,38 @@ class TestBuildParser:
                 ["generate", "--cluster-aware-split", "--no-cluster-aware-split"])
         assert exc_info.value.code == 2
 
+    def test_benchmark_build_eval_parses_and_dispatches(self):
+        from taxotreeset.cli import benchmark
+        parser = build_parser()
+        args = parser.parse_args([
+            "benchmark", "build-eval",
+            "--manifest", "m.json", "--registry", "r.json", "--output", "o.parquet",
+        ])
+        assert args.command == "benchmark"
+        assert args.benchmark_cmd == "build-eval"
+        assert args._run is benchmark.run
+
+    def test_benchmark_requires_a_subcommand(self):
+        parser = build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["benchmark"])
+
+    def test_benchmark_build_eval_run_invokes_builder(self, tmp_path):
+        from taxotreeset.cli import benchmark
+        args = argparse.Namespace(
+            benchmark_cmd="build-eval", manifest="m", registry="r",
+            output=str(tmp_path / "o.parquet"), read_length=150,
+            reads_per_genome=10, seed=0,
+        )
+        with (
+            patch("taxotreeset.io.registry.NCBIRegistry") as mreg,
+            patch("taxotreeset.cli.benchmark.build_eval_set",
+                  return_value=(100, 2)) as mbe,
+        ):
+            mreg.return_value.registry = {"accessions": {}, "lineages": {}}
+            benchmark.run(args)
+        mbe.assert_called_once()
+
     def test_single_level_and_stop_at_are_mutually_exclusive(self):
         # The help promises the two cannot be combined; argparse rejects the
         # combination up front (exit 2) instead of a deep run_pipeline ValueError.
