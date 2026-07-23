@@ -439,22 +439,51 @@ python3 -m taxotreeset separability data/datasets --csv separability.csv
 
 ### Optional: open-set benchmark
 
-After a holdout run (`generate --holdout-*`, above), `taxotreeset benchmark build-eval`
-turns the withheld clades into a labeled set of novel reads for open-set evaluation:
+After a holdout run (`generate --holdout-*`, above), the `benchmark` subcommand runs the
+open-set loop: label the novel reads, score a classifier, and compare against a retained-only
+k-mer baseline. See [clade-holdout benchmark](#clade-holdout-open-set-benchmark-optional) for
+the concept.
+
+**1. Label the novel reads** from the withheld clades — each read tagged with its true
+lineage, held-out clade, expected commit rank `ρ*`, and divergence bin:
 
 ```
 python3 -m taxotreeset benchmark build-eval \
   --manifest benchmark_manifest_viruses.json \
   --registry registry.json --output eval_reads.parquet \
-  --read-length 150 --reads-per-genome 200
+  --track short --read-length 150 --reads-per-genome 200
 ```
 
-Each read carries its true lineage, its held-out clade, the expected commit rank `ρ*`,
-and its divergence bin — see [clade-holdout benchmark](#clade-holdout-open-set-benchmark-optional).
-`--track long` instead emits longer, variable-length ONT/PacBio-like reads passed through an
-indel-dominated, homopolymer-aware error model (same labels, so the two regimes are directly
-comparable); `benchmark score` then grades any classifier's predictions, and `benchmark
-export-refs` / `parse-baseline` set up a retained-only Kraken2/Centrifuge head-to-head.
+`--track long` instead emits variable-length ONT/PacBio-like reads (`--min-read-length` /
+`--max-read-length`) through an indel-dominated, homopolymer-aware error model
+(`--sub-rate` / `--ins-rate` / `--del-rate` / `--homopolymer-factor`); the labels are
+identical, so the two regimes are directly comparable.
+
+**2. Score a classifier's predictions.** Predictions are a parquet or (t)sv of
+`read_id, predicted_taxid, predicted_rank` (empty taxid = abstain). Each read is graded as a
+correct back-off to `ρ*`, an over-commitment (deeper than `ρ*`), too-shallow, a misroute, or an
+abstention — reported overall and per rank × per divergence bin:
+
+```
+python3 -m taxotreeset benchmark score \
+  --eval-set eval_reads.parquet --predictions model_preds.parquet \
+  --output report.json --csv report.csv
+```
+
+**3. Retained-only k-mer baseline (head-to-head).** Export the reference with the held-out
+clades removed — so the baseline faces the same open-set condition — build/classify with the
+tool, then convert its output to predictions and score it with the same harness:
+
+```
+python3 -m taxotreeset benchmark export-refs \
+  --manifest benchmark_manifest_viruses.json --registry registry.json \
+  --out-fasta retained.fasta --out-map seqid2taxid.tsv
+#   → kraken2-build + kraken2 (external)
+python3 -m taxotreeset benchmark parse-baseline --tool kraken2 --input k2.out \
+  --registry registry.json --output baseline_preds.parquet
+python3 -m taxotreeset benchmark score --eval-set eval_reads.parquet \
+  --predictions baseline_preds.parquet --output baseline_report.json
+```
 
 ## Output
 
