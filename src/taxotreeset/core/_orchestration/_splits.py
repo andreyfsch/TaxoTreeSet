@@ -26,35 +26,6 @@ _WINDOW_SPLIT_PATTERN: tuple[str, ...] = (
 _MIN_BLOCKS_FOR_STRATIFY: int = 6
 
 
-def _stratified_cuts(leaf_count: int) -> tuple[int, int]:
-    """Return ``(train_cut, val_cut)`` index boundaries for a leaf-level split.
-
-    The naive ``max(1, int(L * ratio))`` boundaries leave **test empty at exactly
-    three leaves** (train=2, val=1, test=0), because the two ``max(1, ...)`` floors
-    consume all three leaves before test gets one. That produced degenerate
-    classes — present in the label set and trained, but with zero test support, so
-    their per-class metrics are undefined and they drag down macro-F1. This clamp
-    pulls ``val_cut`` back so test always receives at least one leaf (and then
-    protects train from being emptied), guaranteeing every split gets >= 1 leaf
-    whenever ``leaf_count >= 3``.
-
-    Args:
-        leaf_count: Number of sequence leaves in the class (assumed >= 3; the
-            scarcity path handles 1-2 leaves via disjoint within-sequence regions).
-
-    Returns:
-        ``(train_cut, val_cut)`` such that train = ``[0, train_cut)``,
-        val = ``[train_cut, val_cut)``, test = ``[val_cut, leaf_count)``.
-    """
-    train_cut = max(1, int(leaf_count * _STRATIFIED_TRAIN_RATIO))
-    val_cut = train_cut + max(1, int(leaf_count * _STRATIFIED_VAL_RATIO))
-    if val_cut >= leaf_count:
-        val_cut = leaf_count - 1
-        if train_cut >= val_cut:
-            train_cut = val_cut - 1
-    return train_cut, val_cut
-
-
 def _stratified_counts(n_total: int) -> tuple[int, int, int]:
     """Split one genome's ``n_total`` subseqs into ``(n_train, n_val, n_test)``.
 
@@ -123,16 +94,68 @@ def _assign_stratified(
     class_index: int,
     result: dict[str, list[dict]],
 ) -> None:
-    """Assign whole genomes to train/val/test by ``_stratified_cuts`` ranges."""
-    train_cut, val_cut = _stratified_cuts(len(tasks))
-    for index, task in enumerate(tasks):
-        enriched = _enrich_task(task, class_index, 0.0, 1.0)
-        if index < train_cut:
-            result["train"].append(enriched)
-        elif index < val_cut:
-            result["val"].append(enriched)
-        else:
-            result["test"].append(enriched)
+    """Assign whole genomes to train/val/test balancing WINDOW VOLUME.
+
+    Each task carries ``n`` = its window budget, and per-genome ``n`` is highly
+    unequal — ``_allocate_n_across_leaves`` weights it by genome size — so
+    splitting by genome COUNT 70/15/15 lets a few large genomes dominate one
+    split's volume. For a class whose windows come from a handful of big genomes
+    (most acutely a binary head's *negatives*, drawn from a few large external
+    genomes) the realized volume split then swings wildly with the shuffle (val
+    anywhere from ~0% to ~45%), which inverts the class priors between train and
+    val and makes the head untrainable. This instead places each whole genome —
+    leakage-safe, a genome never straddles splits — into the split currently
+    furthest below its target volume (``0.70 / 0.15 / 0.15`` of the class's total
+    windows), largest genome first. Every split is guaranteed >= 1 genome when
+    ``len(tasks) >= 3``.
+    """
+    total = sum(task["n"] for task in tasks) or 1
+    targets = {
+        "train": _STRATIFIED_TRAIN_RATIO * total,
+        "val": _STRATIFIED_VAL_RATIO * total,
+        "test": (1.0 - _STRATIFIED_TRAIN_RATIO - _STRATIFIED_VAL_RATIO) * total,
+    }
+    volume = {split: 0.0 for split in _SPLITS}
+    buckets: dict[str, list[dict]] = {split: [] for split in _SPLITS}
+    for task in sorted(tasks, key=lambda t: t["n"], reverse=True):
+        # Largest remaining deficit first; ties resolve to _SPLITS order (train).
+        split = max(_SPLITS, key=lambda s: targets[s] - volume[s])
+        buckets[split].append(task)
+        volume[split] += task["n"]
+
+    _ensure_each_split_nonempty(buckets, volume)
+    for split in _SPLITS:
+        for task in buckets[split]:
+            result[split].append(_enrich_task(task, class_index, 0.0, 1.0))
+
+
+def _ensure_each_split_nonempty(
+    buckets: dict[str, list[dict]],
+    volume: dict[str, float],
+) -> None:
+    """Guarantee every split holds >= 1 genome (when >= 3 exist in total).
+
+    Volume-greedy packing can leave a split empty — e.g. three equal genomes all
+    pulled toward train/val, or one genome dwarfing the rest. For each empty
+    split, move the smallest genome out of the split that has the most volume
+    among those holding >= 2, restoring the >= 1-per-split invariant the old
+    count-based cut guaranteed. With >= 3 genomes a donor always exists (pigeonhole),
+    and moving only from a >= 2 split can never empty the donor.
+    """
+    for split in _SPLITS:
+        if buckets[split]:
+            continue
+        donor = max(
+            (s for s in _SPLITS if len(buckets[s]) >= 2),
+            key=lambda s: volume[s], default=None,
+        )
+        if donor is None:
+            continue  # fewer than 3 genomes total; cannot fill every split
+        task = min(buckets[donor], key=lambda t: t["n"])
+        buckets[donor].remove(task)
+        volume[donor] -= task["n"]
+        buckets[split].append(task)
+        volume[split] += task["n"]
 
 
 def _cluster_stratified_split(

@@ -11,36 +11,7 @@ from bigtree import Node
 from taxotreeset.core.generation_orchestrator import (
     GenerationOrchestrator,
     _stratified_counts,
-    _stratified_cuts,
 )
-
-
-# ---------------------------------------------------------------------------
-# _stratified_cuts — leaf-level split boundaries (>=1 leaf per split)
-# ---------------------------------------------------------------------------
-
-
-class TestStratifiedCuts:
-    @pytest.mark.parametrize("leaf_count", list(range(3, 25)))
-    def test_every_split_gets_at_least_one_leaf(self, leaf_count):
-        train_cut, val_cut = _stratified_cuts(leaf_count)
-        train = train_cut
-        val = val_cut - train_cut
-        test = leaf_count - val_cut
-        assert train >= 1
-        assert val >= 1
-        assert test >= 1
-        assert train + val + test == leaf_count
-
-    def test_three_leaves_split_one_each(self):
-        # The exact case that previously yielded test=0.
-        assert _stratified_cuts(3) == (1, 2)
-
-    def test_large_count_keeps_70_15_15_shape(self):
-        train_cut, val_cut = _stratified_cuts(100)
-        assert train_cut == 70
-        assert val_cut - train_cut == 15
-        assert 100 - val_cut == 15
 
 
 # ---------------------------------------------------------------------------
@@ -668,6 +639,49 @@ class TestMaterializeLeafSplitScarcity:
         assert split["train"][0]["end_pct"] == 0.70
         assert split["test"][0]["end_pct"] == 1.0
         assert split["train"][0]["class_idx"] == 2
+
+
+class TestMaterializeLeafSplitVolumeBalance:
+    """Genome-level split balances WINDOW VOLUME, not just genome count."""
+
+    # A few large genomes dominate the window volume (like a binary head's
+    # negatives). Count-based splitting sent val's volume anywhere from 0% to 45%.
+    _UNEQUAL = [5000, 3000, 2000, 500, 300, 200, 100, 80, 60, 40, 20, 10]
+
+    def _volumes(self, orchestrator, seed):
+        tasks = [_leaf_task(n, f"g{i}") for i, n in enumerate(self._UNEQUAL)]
+        split = orchestrator._materialize_leaf_split(
+            tasks, class_index=0, rng=random.Random(seed),
+            min_genomes_for_genome_split=4)
+        total = sum(self._UNEQUAL)
+        return {s: sum(t["n"] for t in split[s]) / total for s in
+                ("train", "val", "test")}
+
+    def test_volume_split_is_stable_across_seeds(self, orchestrator):
+        for seed in range(12):
+            v = self._volumes(orchestrator, seed)
+            assert 0.08 <= v["val"] <= 0.25, f"seed {seed}: val vol {v['val']:.2f}"
+            assert 0.08 <= v["test"] <= 0.25, f"seed {seed}: test vol {v['test']:.2f}"
+            assert 0.55 <= v["train"] <= 0.80, f"seed {seed}: train vol {v['train']:.2f}"
+
+    def test_three_equal_genomes_fill_every_split(self, orchestrator):
+        # Volume-greedy packing can starve a split; the non-empty guarantee holds.
+        tasks = [_leaf_task(10, f"g{i}") for i in range(3)]
+        split = orchestrator._materialize_leaf_split(
+            tasks, class_index=0, rng=random.Random(0),
+            min_genomes_for_genome_split=3)
+        assert len(split["train"]) >= 1
+        assert len(split["val"]) >= 1
+        assert len(split["test"]) >= 1
+
+    def test_whole_genomes_never_straddle_splits(self, orchestrator):
+        # Leakage safety: each genome appears in exactly one split.
+        tasks = [_leaf_task(n, f"g{i}") for i, n in enumerate(self._UNEQUAL)]
+        split = orchestrator._materialize_leaf_split(
+            tasks, class_index=0, rng=random.Random(3),
+            min_genomes_for_genome_split=4)
+        seen = [t["header_id"] for s in ("train", "val", "test") for t in split[s]]
+        assert len(seen) == len(set(seen)) == len(self._UNEQUAL)
 
 
 # ---------------------------------------------------------------------------

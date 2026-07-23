@@ -87,7 +87,6 @@ from taxotreeset.benchmark.holdout import (
 from taxotreeset.core._orchestration._splits import (
     _materialize_leaf_split as _materialize_leaf_split_fn,
     _stratified_counts as _stratified_counts,
-    _stratified_cuts as _stratified_cuts,
 )
 from taxotreeset.core._orchestration._manifest import (
     _capture_tool_versions as _capture_tool_versions,
