@@ -542,6 +542,38 @@ true-lineage + `ρ*` + distance-bin labels; short track first).
 
 ---
 
+## 🟠 P12 — Per-head reliability annotation (data + training signals)
+
+**Motivation.** A per-node reliability signal lets a downstream classifier weight or gate its
+decisions (e.g. treat a low-reliability node permissively rather than trusting its call). A scan
+of the 60 binary pilot heads found **39/60 (65%) have < 14 belongs genomes**, which forces
+`_stratified_cuts` to put **exactly 1 genome in val** (`int(N*0.15) < 2`) — so their val/test
+metrics are noisy *by construction*, and reliability tracks genome-richness (trustworthy at the
+genome-rich trunk, collapsing at the genome-poor tips). Lavidaviridae (1914302; 6 divergent
+genomes, one a GC outlier) is the canonical low-reliability node: val f1 peaked at epoch 0.33 then
+oscillated while eval_loss rose — overfitting on too-few belongs genomes, not a training bug and
+not fixable by the split tooling.
+
+**Reliability is two-source (order matters):**
+- **Training behavior DETERMINES it (a-posteriori):** val f1 stability/variance, val↔test f1 gap,
+  eval_loss trajectory (overfitting), the learning-audit verdict (learned / degraded / collapsed),
+  best-epoch position. These are the ground truth for whether a head can be trusted.
+- **Data properties PREDICT/explain it (a-priori, generation-time):** belongs / val / test genome
+  counts, GC spread across splits, k-mer separability. Cheap, available *before* training.
+
+**Plan.** (1) TaxoTreeSet-side (CPU, generation-time): emit the a-priori data properties into each
+head's `label_map.json` (a `reliability` block: belongs/val/test genome counts, per-split GC
+spread). (2) A reliability annotator that merges those with the training metrics (already in the
+fine-tune `metrics.json` / audit / `progress.json`) into a per-head reliability score/flag,
+primarily driven by the training behavior. (3) Expose it where the downstream classifier reads it;
+the *policy* (how reliability gates a decision) stays with the classifier, not TaxoTreeSet.
+
+Files: `benchmark/reliability.py` (new; annotator) + a `reliability` block in
+`core/_orchestration/_manifest.py` (`_write_label_maps`). Related: the split machinery
+(`_splits.py`), the composition audit (`dataset/composition.py`).
+
+---
+
 ## Cross-repo — PhyloCascadeGLM
 
 Inference/evaluation items live in the PhyloCascadeGLM repo's own `docs/BACKLOG.md`.
