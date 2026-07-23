@@ -668,6 +668,59 @@ Files: `benchmark/reliability.py` (new; annotator) + a `reliability` block in
 
 ---
 
+## 🟡 P13 — Block-stratify large negative genomes (finish the volume-split fix)
+
+**Context.** P-fix `b5ea511` made the genome-level split volume-aware
+(`_assign_stratified` bin-packs whole genomes by window volume, not genome count) —
+which resolved the inverted-prior catastrophe found on head `3044732` Homochaacvirus
+(val was 82% not_belongs → the head was untrainable). But whole-genome assignment is
+**leakage-safe by keeping each genome in one split**, so when a class's window volume is
+dominated by **one** giant genome, that genome is indivisible and lands wholly in a
+single split. **Residual (measured on the regenerated pilot):** heads whose *negatives*
+are dominated by a single large external genome still show a prior *shift* (not the old
+inversion) — `694009` SARS-CoV-2 and `864596` Bat coronavirus at val ~68% belongs,
+`2499674` similar. They are trainable (both classes present in every split, val properly
+sized) but not 50/50.
+
+**Fix.** Block-stratify large negative genomes the same way the *positives* already are
+(`_block_stratified_windows`): when a single genome exceeds a split's target volume, cut
+it into interleaved positional blocks and spread its windows across train/val/test
+(leakage-safe — windows confined to disjoint blocks), instead of assigning the whole
+genome to one split. Detect the dominant-genome case inside `_assign_stratified` (or route
+oversized genomes through the block path) while keeping the small-genome whole-assignment.
+Preserves the ≥1-per-split guarantee. Regenerate the 3 residual heads + re-verify.
+
+Files: `core/_orchestration/_splits.py` (`_assign_stratified` / `_block_stratified_windows`).
+Related: P10 (cluster-aware split), the [[datagen-confounds]] Bug-3 note.
+
+---
+
+## 🟢 P14 — Plasmid discovery performance (host-lineage resolution + GBFF parse)
+
+**Context.** The P9 plasmid run (`discover --plasmids` / `generate --plasmids`) works
+end-to-end — validated 2026-07-23: fetched the 9-file RefSeq plasmid release (~2.7 GB),
+ingested **135,994 plasmids** into the vault, registering by host lineage. But two stages
+are slow at that scale:
+1. **Host-lineage registration** — hosts newer than the taxoniq snapshot hit the NCBI-CLI
+   fallback (`_fetch_lineage_via_ncbi`), one network subprocess **per host**; across 136k
+   plasmids / many distinct hosts this is the long tail (checkpointed, but hours).
+2. **GBFF parsing** — pure-Python line iteration over multi-GB flat files
+   (`parse_gbff_records`), single-threaded.
+
+**Fix (additive, no behavior change).** (1) Batch/cache host-lineage resolution: dedup host
+TaxIDs up front and resolve each once (the registration already groups by host, but the
+NCBI fallback is per-taxon and un-cached across runs) — optionally a single bulk
+`datasets summary taxonomy taxon <ids>` call instead of one-per-host. (2) Parallelize the
+GBFF parse across the release's files (they are independent) — a pool over
+`iter_release_records`'s per-file streams, merging the vault writes. Neither changes the
+resulting registry/vault, only throughput.
+
+Files: `io/plasmid_release.py` (parse), `core/orchestrator.py`
+(`_resolve_lineage` / `_fetch_lineage_via_ncbi` caching), `core/_orchestration/_sync.py`.
+Related: P9, [[datasets-taxonomy-output]] (the NCBI-fallback all-ranks gap).
+
+---
+
 ## Cross-repo — PhyloCascadeGLM
 
 Inference/evaluation items live in the PhyloCascadeGLM repo's own `docs/BACKLOG.md`.
