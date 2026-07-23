@@ -112,15 +112,33 @@ downstream **dominant-reject termination** lives in PhyloCascadeGLM's `_traverse
 
 **Remaining.**
 - **Validate end-to-end** on the reject-trained pilot (held-out-taxa protocol:
-  exclude whole taxa from `discover`, confirm the cascade rejects them).
-- **Phase 2 — non-virus domain gate:** the intra-virus reject covers "not in this
-  clade", not "not a virus at all". The root/shallow heads need **non-virus
-  negatives** (Bacteria/Archaea/Eukaryota RefSeq) — a new cross-domain sampling
-  capability in generation (discover/download outside Viruses).
+  exclude whole taxa from `discover`, confirm the cascade rejects them). Mostly
+  PhyloCascadeGLM-side (inference/GPU).
 
-**Effort.** Reject class: done. Non-virus gate: moderate (new data acquisition).
+**Phase 2 — non-virus domain gate — DONE (2026-07-23).** The intra-clade reject
+covers "not in this clade"; the gate adds "not a virus at all" for the root/shallow
+heads (which have no intra-tree "outside", so the root binary head previously had no
+reject signal — it was excluded from the pilot). `--reject-cross-domain
+bacteria,archaea,eukaryotes` (+ `--reject-cross-domain-sample N`,
+`--reject-cross-domain-depth D`): during the sync a **bounded** set of RefSeq
+*reference* genomes per domain is fetched (`DiscoveryOrchestrator.stream_reference_reports`
+— `--reference`, stops after N, terminates the subprocess early) and registered as
+**pending accessions tagged `cross_domain` with no lineage**, so Stage-1 downloads them
+but tree building never places them / schedules heads for them. After download they are
+materialised into lightweight sequence leaves (`_build_cross_domain_pool`) and
+`sample_reject_leaves` appends them to the `far` pool for heads at
+`depth <= reject_cross_domain_depth` (for the whole-tree head they are its *only*
+negatives). Deeper heads keep intra-clade negatives only (a non-virus is a trivial
+negative there). Off by default. Tests: `TestCrossDomainGate` (reject_bucket),
+`TestCrossDomainNegatives` (acquire tags+no-lineage / pool skips undownloaded), CLI
+threading. Suite 1121.
 
-Files: `core/generation/reject_bucket.py`, `core/generation_orchestrator.py`.
+**Effort.** Reject class: done. Non-virus gate: DONE.
+
+Files: `core/generation/reject_bucket.py` (`sample_reject_leaves` gate),
+`core/orchestrator.py` (`stream_reference_reports`), `core/_orchestration/_sync.py`
+(`_acquire_cross_domain_negatives` / `_build_cross_domain_pool`),
+`core/generation_orchestrator.py` (wiring), `cli/generate.py` (flags).
 
 ---
 

@@ -130,6 +130,52 @@ class TestSampleRejectLeaves:
 
 
 # ---------------------------------------------------------------------------
+# sample_reject_leaves — cross-domain (non-virus) gate (P4 Phase 2)
+# ---------------------------------------------------------------------------
+
+
+def _cross_pool(n: int = 3) -> list:
+    pool = []
+    for i in range(n):
+        leaf = Node(f"c{i}")
+        leaf.rank = "sequence"
+        leaf.header_id = f"c{i}"
+        leaf.fasta_path = "/fake/cross_domain_vault"
+        pool.append(leaf)
+    return pool
+
+
+class TestCrossDomainGate:
+    # _build_tree depths (bigtree, root=1): root=1, k1/k2=2, p1/p2=3.
+
+    def test_root_head_gets_cross_domain_as_only_negatives(self):
+        # The whole-tree head has no intra-tree "outside" -> cross-domain is its
+        # only reject source (the P4 gap the gate closes).
+        t = _build_tree()
+        near, far = sample_reject_leaves(
+            t["root"], cross_domain_leaves=_cross_pool(), cross_domain_max_depth=2)
+        assert near == []
+        assert {leaf.header_id for leaf in far} == {"c0", "c1", "c2"}
+
+    def test_shallow_head_appends_cross_domain_to_far(self):
+        t = _build_tree()  # k1 depth 2 <= gate 2
+        _, far = sample_reject_leaves(
+            t["k1"], cross_domain_leaves=_cross_pool(), cross_domain_max_depth=2)
+        assert len([leaf for leaf in far if leaf.header_id.startswith("c")]) == 3
+
+    def test_deep_head_excluded_from_cross_domain(self):
+        t = _build_tree()  # p1 depth 3 > gate 2
+        near, far = sample_reject_leaves(
+            t["p1"], cross_domain_leaves=_cross_pool(), cross_domain_max_depth=2)
+        assert all(not leaf.header_id.startswith("c") for leaf in near + far)
+
+    def test_no_pool_leaves_root_empty(self):
+        # Without the gate the root still has no negatives (unchanged behaviour).
+        t = _build_tree()
+        assert sample_reject_leaves(t["root"]) == ([], [])
+
+
+# ---------------------------------------------------------------------------
 # build_reject_tasks (budget split; allocation itself is covered elsewhere)
 # ---------------------------------------------------------------------------
 

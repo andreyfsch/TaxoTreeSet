@@ -15,9 +15,13 @@ the orchestrator. Its ``virtual_reject`` rank makes the existing helpers
 (``is_recursion_terminator`` / ``is_protected_rank``, which match any
 ``virtual_*`` rank) treat it as a terminal fallback automatically.
 
-Scope: **intra-virus** — negatives are sampled from the same vault. A non-virus
-"domain gate" for shallow heads (negatives drawn from other domains of life) is a
-separate, future capability.
+Scope: negatives are sampled from the same vault (intra-clade), and — for shallow
+heads via the **cross-domain gate** — from a pool of non-virus genomes (other
+domains of life). The intra-clade negatives teach "not in this clade"; the
+cross-domain pool teaches "not a virus at all", which the root/shallow heads need
+(they have no intra-tree "outside") so the cascade can reject a foreign,
+non-virus input at the top instead of forcing it down the tree. See P4 in
+``docs/BACKLOG.md``.
 """
 
 import logging
@@ -109,6 +113,8 @@ def sample_reject_leaves(
     current_node,
     max_per_pool: int = _DEFAULT_MAX_REJECT_LEAVES_PER_POOL,
     rng: random.Random | None = None,
+    cross_domain_leaves: list | None = None,
+    cross_domain_max_depth: int = 0,
 ) -> tuple[list, list]:
     """Partition the tree's sequence leaves into ``near`` and ``far`` negatives.
 
@@ -119,15 +125,28 @@ def sample_reject_leaves(
     randomly capped to ``max_per_pool`` leaves to bound the per-head cost (see
     :data:`_DEFAULT_MAX_REJECT_LEAVES_PER_POOL`).
 
+    **Cross-domain gate.** When ``cross_domain_leaves`` is given and the head is
+    shallow (``current_node.depth <= cross_domain_max_depth``), those non-virus
+    leaves are appended to ``far`` — so the head also learns "not a virus at all".
+    For the whole-tree head (e.g. the root) there is no intra-tree "outside", so
+    the cross-domain pool becomes its *only* negative source; without it the root
+    head has no reject signal at all.
+
     Args:
         current_node: bigtree node of the head whose reject negatives are sampled.
         max_per_pool: Maximum leaves kept per pool; 0 disables the cap.
         rng: Random source for the cap (deterministic ``Random(0)`` when None).
+        cross_domain_leaves: Non-virus sequence leaves (the P4 domain gate); each
+            needs ``fasta_path`` / ``header_id`` / ``rank == "sequence"``. ``None``
+            or empty keeps the intra-clade-only behaviour.
+        cross_domain_max_depth: Max ``node.depth`` (bigtree, root = 1) that
+            receives the cross-domain pool; deeper heads keep intra-clade
+            negatives only (a non-virus is a trivial negative there).
 
     Returns:
-        Two-tuple ``(near_leaves, far_leaves)``. Both are empty when the head is
-        the whole tree (e.g. the root), since there is then no intra-tree
-        "outside" — that case needs a cross-domain (non-virus) source instead.
+        Two-tuple ``(near_leaves, far_leaves)``, each capped. ``near`` is empty
+        for the whole-tree head; ``far`` is empty too unless the cross-domain gate
+        supplies it.
     """
     rng = rng if rng is not None else random.Random(0)
     own_leaves = set(current_node.leaves)
@@ -145,29 +164,37 @@ def sample_reject_leaves(
         ]
         root._reject_seq_leaves_cache = all_seq_leaves
     external = [leaf for leaf in all_seq_leaves if leaf not in own_leaves]
-    if not external:
-        return [], []
 
     near: list = []
-    ancestor = current_node.parent
-    while ancestor is not None:
-        if ancestor is root:
-            # The root's external seq leaves are exactly `external` (already
-            # computed) — reuse it rather than re-scanning the whole tree.
-            candidate = external
-        else:
-            candidate = [
-                leaf for leaf in ancestor.leaves
-                if getattr(leaf, "rank", "") == _SEQUENCE_RANK
-                and leaf not in own_leaves
-            ]
-        if candidate:
-            near = candidate
-            break
-        ancestor = ancestor.parent
+    far: list = []
+    if external:
+        ancestor = current_node.parent
+        while ancestor is not None:
+            if ancestor is root:
+                # The root's external seq leaves are exactly `external` (already
+                # computed) — reuse it rather than re-scanning the whole tree.
+                candidate = external
+            else:
+                candidate = [
+                    leaf for leaf in ancestor.leaves
+                    if getattr(leaf, "rank", "") == _SEQUENCE_RANK
+                    and leaf not in own_leaves
+                ]
+            if candidate:
+                near = candidate
+                break
+            ancestor = ancestor.parent
 
-    near_set = set(near)
-    far = [leaf for leaf in external if leaf not in near_set]
+        near_set = set(near)
+        far = [leaf for leaf in external if leaf not in near_set]
+
+    # Cross-domain (non-virus) gate: shallow heads also reject "not a virus at
+    # all". For the whole-tree head (no intra-tree external) this is the head's
+    # only negative source. Appended to `far` so the near/far budget split treats
+    # it as a distant clade (and gives the root head its entire reject budget).
+    if cross_domain_leaves and current_node.depth <= cross_domain_max_depth:
+        far = far + list(cross_domain_leaves)
+
     return _cap_pool(near, max_per_pool, rng), _cap_pool(far, max_per_pool, rng)
 
 

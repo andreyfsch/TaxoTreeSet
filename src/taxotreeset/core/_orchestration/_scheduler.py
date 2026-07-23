@@ -426,7 +426,11 @@ class _CascadeScheduler:
                 parent_name=name, leaf_cache=leaf_cache,
                 min_subseq_len=self.ctx.min_subseq_len,
             ).get(taxid, [])
-            near, far = sample_reject_leaves(node, rng=random.Random(self.ctx.seed))
+            near, far = sample_reject_leaves(
+                node, rng=random.Random(self.ctx.seed),
+                cross_domain_leaves=self.ctx._cross_domain_pool,
+                cross_domain_max_depth=self.ctx.reject_cross_domain_depth,
+            )
             neg_tasks = build_reject_tasks(
                 near_leaves=near, far_leaves=far, n_reject=budget,
                 near_far_ratio=self._reject_near_ratio(node),
@@ -915,7 +919,9 @@ class _CascadeScheduler:
             return retained_children
 
         near_leaves, far_leaves = sample_reject_leaves(
-            current_node, rng=random.Random(self.ctx.seed)
+            current_node, rng=random.Random(self.ctx.seed),
+            cross_domain_leaves=self.ctx._cross_domain_pool,
+            cross_domain_max_depth=self.ctx.reject_cross_domain_depth,
         )
         n_reject = round(plan["n_per_class"] * self.ctx.reject_fraction)
         reject_tasks = build_reject_tasks(

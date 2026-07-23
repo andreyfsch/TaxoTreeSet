@@ -367,6 +367,33 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "Only used with --reject-class.",
     )
     parser.add_argument(
+        "--reject-cross-domain",
+        type=str,
+        default=None,
+        metavar="DOMAINS",
+        help="Cross-domain reject gate (P4): comma-separated non-virus domains "
+        "(e.g. 'bacteria,archaea,eukaryotes') to sample as NON-VIRUS negatives for "
+        "shallow heads, so the root/shallow heads learn 'not a virus at all' "
+        "(they have no intra-tree outside). A bounded set of RefSeq reference "
+        "genomes is fetched during the sync. Works with --reject-class or "
+        "--binary-only.",
+    )
+    parser.add_argument(
+        "--reject-cross-domain-sample",
+        type=int,
+        default=200,
+        help="Reference genomes to fetch per cross-domain (bounded). "
+        "Only used with --reject-cross-domain.",
+    )
+    parser.add_argument(
+        "--reject-cross-domain-depth",
+        type=int,
+        default=2,
+        help="Max head depth (bigtree, root=1) that receives cross-domain "
+        "negatives; deeper heads keep intra-clade negatives only. "
+        "Only used with --reject-cross-domain.",
+    )
+    parser.add_argument(
         "--binary-only",
         action="store_true",
         help="Generate one BINARY belongs/not-belongs head per taxonomic node "
@@ -484,6 +511,11 @@ def run(args: argparse.Namespace) -> None:
         if args.holdout_clades
         else None
     )
+    reject_cross_domain = (
+        [d.strip() for d in args.reject_cross_domain.split(",") if d.strip()]
+        if args.reject_cross_domain
+        else None
+    )
 
     try:
         logger.info("Initializing active metadata registry...")
@@ -533,6 +565,9 @@ def run(args: argparse.Namespace) -> None:
             reject_fraction=args.reject_fraction,
             reject_near_far_start=args.reject_near_far_start,
             reject_near_far_end=args.reject_near_far_end,
+            reject_cross_domain=reject_cross_domain,
+            reject_cross_domain_sample=args.reject_cross_domain_sample,
+            reject_cross_domain_depth=args.reject_cross_domain_depth,
             binary_only=args.binary_only,
             binary_budget=args.binary_budget,
             binary_extract_batch_size=args.extract_batch_size,

@@ -489,6 +489,9 @@ class TestGenerateRun:
             reject_fraction=1.0,
             reject_near_far_start=0.5,
             reject_near_far_end=0.9,
+            reject_cross_domain=None,
+            reject_cross_domain_sample=200,
+            reject_cross_domain_depth=2,
             binary_only=False,
             binary_budget=30000,
             extract_batch_size=300,
@@ -554,6 +557,23 @@ class TestGenerateRun:
         assert kwargs["reject_fraction"] == 0.5
         assert kwargs["reject_near_far_start"] == 0.25
         assert kwargs["reject_near_far_end"] == 0.8
+
+    def test_cross_domain_flags_thread_to_orchestrator(self, tmp_path):
+        args = self._make_args(tmp_path)
+        args.reject_cross_domain = "bacteria, archaea"
+        args.reject_cross_domain_sample = 50
+        args.reject_cross_domain_depth = 3
+        with (
+            patch("taxotreeset.cli.generate.setup_logging"),
+            patch("taxotreeset.cli.generate.NCBIRegistry"),
+            patch("taxotreeset.cli.generate.GenerationOrchestrator") as mock_orch,
+        ):
+            mock_orch.return_value.run_pipeline.return_value = None
+            generate.run(args)
+        kwargs = mock_orch.call_args.kwargs
+        assert kwargs["reject_cross_domain"] == ["bacteria", "archaea"]  # parsed
+        assert kwargs["reject_cross_domain_sample"] == 50
+        assert kwargs["reject_cross_domain_depth"] == 3
 
     def test_binary_flags_thread_to_orchestrator(self, tmp_path):
         args = self._make_args(tmp_path)

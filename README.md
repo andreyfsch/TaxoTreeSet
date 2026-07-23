@@ -221,6 +221,20 @@ equal for a flat, depth-independent ratio. Depth here counts only **decidable**
 taxon under a long single-child chain (common with `--all-ranks`) is not treated as
 artificially deep.
 
+**Cross-domain gate (non-virus negatives).** The `near`/`far` negatives above are
+all *other viruses* — they teach "not in this clade", not "not a virus at all". The
+root and shallow heads need the latter: a foreign, non-virus input enters the
+cascade at the top, and the root head (which has no in-tree "outside") otherwise has
+no reject signal to stop it. `--reject-cross-domain bacteria,archaea,eukaryotes`
+fetches a **bounded** sample of RefSeq reference genomes from those domains during
+the sync (`--reject-cross-domain-sample`, default 200 per domain) and adds them as
+non-virus negatives to heads at `depth <= --reject-cross-domain-depth` (default 2) —
+for the root head, they become its entire reject class. Deeper heads keep
+intra-clade negatives only (a bacterium is a trivial negative for a coronavirus
+genus). The sampled genomes are used **only** as negatives — they are never placed
+in the tree or given heads of their own. Off by default; works with `--reject-class`
+or `--binary-only`.
+
 ### Binary heads (optional)
 
 ![Binary heads: instead of one multi-class head per branching parent, every taxonomic node gets its own belongs / not-belongs detector](docs/figures/binary_heads.png)

@@ -12,6 +12,7 @@ calls stay ``self._...``; anything on the orchestrator is ``self.ctx.``.
 import json
 import logging
 import os
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from bigtree import Node
@@ -142,6 +143,69 @@ class _SyncManager:
         )
         discovery.discover_from_reports(
             reports, root_id_str=PLASMID_SCOPE_KEY, vault_lmdb_path=lmdb_path)
+
+    def _acquire_cross_domain_negatives(self) -> None:
+        """Register a bounded non-virus sample as reject negatives (P4 gate).
+
+        For each requested domain (``reject_cross_domain``), streams up to
+        ``reject_cross_domain_sample`` RefSeq reference genomes and records their
+        accessions **as pending downloads tagged ``cross_domain``** — but does NOT
+        store their lineage, so tree building (which places accessions via
+        ``lineages``/``taxons``) never puts them in the viral tree or schedules
+        heads for them. Stage-1 download then fetches them like any accession; the
+        pool is materialised later by :meth:`_build_cross_domain_pool`. Idempotent
+        across runs (skips accessions already present).
+        """
+        registry = self.ctx.registry.registry
+        cross_ids: list[str] = registry.setdefault("cross_domain_negatives", [])
+        cross_set = set(cross_ids)
+        with open(self.ctx.config_path, encoding="utf-8") as handle:
+            mapping_config = json.load(handle)
+        discovery = DiscoveryOrchestrator(
+            registry=self.ctx.registry, mapping_config=mapping_config)
+
+        for domain in self.ctx.reject_cross_domain:
+            taxid = _DOMAIN_GROUP_TO_TAXID.get(domain, domain)
+            reports = discovery.stream_reference_reports(
+                taxid, self.ctx.reject_cross_domain_sample)
+            added = 0
+            for report in reports:
+                accession = report.get("accession")
+                if not accession or accession in registry["accessions"]:
+                    continue
+                host = str(report.get("organism", {}).get("tax_id", ""))
+                entry = self.ctx.registry._build_accession_entry(host, report)
+                entry["cross_domain"] = True
+                registry["accessions"][accession] = entry
+                cross_ids.append(accession)
+                cross_set.add(accession)
+                added += 1
+            ui_logger.info(
+                "Cross-domain gate: %d reference genome(s) from %s queued as "
+                "non-virus negatives.", added, domain,
+            )
+
+    def _build_cross_domain_pool(self) -> list:
+        """Materialise the downloaded cross-domain accessions into leaf objects.
+
+        Each downloaded non-virus accession's vault headers become lightweight
+        sequence leaves (``rank`` / ``header_id`` / ``fasta_path`` — all that
+        ``sample_reject_leaves`` and the allocator read), so the reject sampler can
+        draw non-virus negatives for shallow heads. Skips not-yet-downloaded
+        accessions. Returns an empty list when the gate is off.
+        """
+        registry = self.ctx.registry.registry
+        accessions = registry.get("accessions", {})
+        pool: list = []
+        for accession in registry.get("cross_domain_negatives", []):
+            entry = accessions.get(accession)
+            if not entry or not entry.get("downloaded"):
+                continue
+            vault = entry.get("local_path")
+            for header in entry.get("headers", []):
+                pool.append(SimpleNamespace(
+                    rank="sequence", header_id=header["id"], fasta_path=vault))
+        return pool
 
     def _domains_to_sync(self) -> list[str]:
         """Return the superkingdom TaxIDs to re-discover for an ``all`` sync.

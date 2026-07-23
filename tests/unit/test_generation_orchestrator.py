@@ -216,6 +216,60 @@ class TestSyncPlasmids:
 
 
 # ---------------------------------------------------------------------------
+# cross-domain reject gate (P4 Phase 2): bounded acquisition + pool build
+# ---------------------------------------------------------------------------
+
+
+class TestCrossDomainNegatives:
+    def _orch(self, tmp_path):
+        mapping = tmp_path / "mapping.json"
+        mapping.write_text('{"scopes": {}}', encoding="utf-8")
+        reg = {"taxons": {}, "accessions": {}, "lineages": {}, "capacities": {}}
+        orch = _make_orchestrator(tmp_path, reg)
+        orch.config_path = str(mapping)
+        orch.reject_cross_domain = ["bacteria", "archaea"]
+        orch.reject_cross_domain_sample = 5
+        # the mock registry needs the real classmethod for entry building
+        from taxotreeset.io.registry import NCBIRegistry
+        orch.registry._build_accession_entry = NCBIRegistry._build_accession_entry
+        return orch
+
+    def test_acquire_registers_tagged_pending_accessions_no_lineage(self, tmp_path):
+        orch = self._orch(tmp_path)
+        report = {
+            "accession": "GCF_1.1",
+            "assembly_info": {"assembly_level": "Complete Genome"},
+            "organism": {"organism_name": "E. coli", "tax_id": 562},
+            "assembly_stats": {"total_sequence_length": 5000},
+        }
+        with patch(
+            "taxotreeset.core._orchestration._sync.DiscoveryOrchestrator"
+        ) as m_disc:
+            # bacteria -> one report, archaea -> none
+            m_disc.return_value.stream_reference_reports.side_effect = [[report], []]
+            orch._acquire_cross_domain_negatives()
+        reg = orch.registry.registry
+        assert reg["cross_domain_negatives"] == ["GCF_1.1"]
+        entry = reg["accessions"]["GCF_1.1"]
+        assert entry["cross_domain"] is True
+        assert entry["downloaded"] is False          # queued as pending
+        assert reg["lineages"] == {} and reg["taxons"] == {}  # kept out of the tree
+
+    def test_build_pool_from_downloaded_headers_only(self, tmp_path):
+        orch = self._orch(tmp_path)
+        orch.registry.registry["cross_domain_negatives"] = ["GCF_1.1", "GCF_2.1"]
+        orch.registry.registry["accessions"] = {
+            "GCF_1.1": {"downloaded": True, "local_path": "/vault.lmdb",
+                        "headers": [{"id": "c1"}, {"id": "c2"}]},
+            "GCF_2.1": {"downloaded": False, "local_path": None, "headers": []},
+        }
+        pool = orch._build_cross_domain_pool()
+        assert [leaf.header_id for leaf in pool] == ["c1", "c2"]  # skips undownloaded
+        assert all(leaf.rank == "sequence" for leaf in pool)
+        assert all(leaf.fasta_path == "/vault.lmdb" for leaf in pool)
+
+
+# ---------------------------------------------------------------------------
 # _find_domain_node
 # ---------------------------------------------------------------------------
 

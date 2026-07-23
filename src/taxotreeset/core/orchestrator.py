@@ -281,6 +281,60 @@ class DiscoveryOrchestrator:
                 marked += 1
         logger.info("Marked %d pre-acquired accession(s) as downloaded.", marked)
 
+    def stream_reference_reports(
+        self, taxid: str, limit: int,
+    ) -> list[dict[str, Any]]:
+        """Stream up to ``limit`` RefSeq *reference*-genome reports for a taxon.
+
+        A bounded, reference-only variant of :meth:`_stream_ncbi_summaries` used to
+        acquire a small cross-domain negative sample (the P4 non-virus gate)
+        without crawling a whole domain: it requests ``--reference`` genomes and
+        stops after ``limit`` reports, terminating the subprocess early. Returns an
+        empty list on spawn/parse failure (tolerant, like discovery).
+
+        Args:
+            taxid: Domain/clade TaxID to sample reference genomes from.
+            limit: Maximum reports to return (<= 0 returns nothing).
+
+        Returns:
+            Up to ``limit`` assembly report dicts, in stream order.
+        """
+        if limit <= 0:
+            return []
+        command = [
+            "datasets", "summary", "genome", "taxon", str(taxid),
+            "--assembly-source", "RefSeq", "--reference", "--as-json-lines",
+        ]
+        logger.info(
+            "Sampling up to %d reference genome(s) under TaxID %s (cross-domain "
+            "negatives).", limit, taxid,
+        )
+        reports: list[dict[str, Any]] = []
+        stderr_file = tempfile.TemporaryFile(mode="w+b")
+        try:
+            try:
+                process = subprocess.Popen(
+                    command, stdout=subprocess.PIPE, stderr=stderr_file,
+                    text=True, env=os.environ.copy(), bufsize=1,
+                )
+            except OSError as exc:
+                logger.error("Failed to spawn NCBI CLI for cross-domain sample: %s", exc)
+                return []
+            with process:
+                for line in process.stdout or []:
+                    if not line.strip():
+                        continue
+                    try:
+                        reports.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+                    if len(reports) >= limit:
+                        process.terminate()  # bounded: stop the stream early
+                        break
+        finally:
+            stderr_file.close()
+        return reports
+
     @staticmethod
     def _log_api_key_status() -> None:
         """Emit an informational log line if an NCBI API key is set.

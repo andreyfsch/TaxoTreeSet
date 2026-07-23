@@ -201,6 +201,9 @@ class GenerationOrchestrator:
         reject_fraction: float = 1.0,
         reject_near_far_start: float = 0.5,
         reject_near_far_end: float = 0.9,
+        reject_cross_domain: list[str] | None = None,
+        reject_cross_domain_sample: int = 200,
+        reject_cross_domain_depth: int = 2,
         binary_only: bool = False,
         binary_budget: int = 30000,
         binary_extract_batch_size: int = 300,
@@ -310,6 +313,11 @@ class GenerationOrchestrator:
         self.reject_fraction: float = reject_fraction
         self.reject_near_far_start: float = reject_near_far_start
         self.reject_near_far_end: float = reject_near_far_end
+        self.reject_cross_domain: list[str] = reject_cross_domain or []
+        self.reject_cross_domain_sample: int = reject_cross_domain_sample
+        self.reject_cross_domain_depth: int = reject_cross_domain_depth
+        # Non-virus negative leaves, materialised after Stage-1 download (P4 gate).
+        self._cross_domain_pool: list = []
         self.binary_only: bool = binary_only
         self.binary_budget: int = binary_budget
         self.binary_extract_batch_size: int = binary_extract_batch_size
@@ -366,6 +374,44 @@ class GenerationOrchestrator:
         else:
             ui_logger.info("Syncing registry and vault with NCBI.")
             self._sync_with_ncbi(target_group)
+            if self.reject_cross_domain:
+                self._acquire_cross_domain_negatives()
+
+    def _acquire_cross_domain_negatives(self) -> None:
+        """Queue a bounded non-virus sample as reject negatives (P4 gate).
+
+        Thin delegator to :class:`_SyncManager`.
+        """
+        _SyncManager(self)._acquire_cross_domain_negatives()
+
+    def _build_cross_domain_pool(self) -> list:
+        """Build the non-virus negative leaves from downloaded cross-domain
+        accessions. Thin delegator to :class:`_SyncManager`.
+        """
+        return _SyncManager(self)._build_cross_domain_pool()
+
+    def _run_download_stage(self, suffix: str) -> None:
+        """Stage 1: download pending accessions; then materialise the P4 gate pool."""
+        def n_pending() -> int:
+            return sum(
+                1 for v in self.registry.registry.get("accessions", {}).values()
+                if not v.get("downloaded", False)
+            )
+
+        before = n_pending()
+        ui_logger.info(f"Stage 1/4: Downloading pending accessions{suffix}.")
+        t1 = time.monotonic()
+        self.downloader.download_all_pending()
+        n_downloaded = before - n_pending()
+        ui_logger.info(
+            "✓ Stage 1/4  %s   (%s)",
+            _fmt_elapsed(time.monotonic() - t1),
+            f"{n_downloaded:,} downloaded" if n_downloaded else "nothing to download",
+        )
+        # The cross-domain accessions are now downloaded, so the non-virus reject
+        # pool can be materialised (rebuilt each round; cheap and idempotent).
+        if self.reject_cross_domain:
+            self._cross_domain_pool = self._build_cross_domain_pool()
 
     def _domains_to_sync(self) -> list[str]:
         """Return the superkingdom TaxIDs to re-discover for an ``all`` sync.
@@ -496,23 +542,7 @@ class GenerationOrchestrator:
             suffix = f" (refinement round {round_num})" if round_num > 0 else ""
 
             # Stage 1 — download
-            n_pending_before = sum(
-                1 for v in self.registry.registry.get("accessions", {}).values()
-                if not v.get("downloaded", False)
-            )
-            ui_logger.info(f"Stage 1/4: Downloading pending accessions{suffix}.")
-            t1 = time.monotonic()
-            self.downloader.download_all_pending()
-            n_pending_after = sum(
-                1 for v in self.registry.registry.get("accessions", {}).values()
-                if not v.get("downloaded", False)
-            )
-            n_downloaded = n_pending_before - n_pending_after
-            ui_logger.info(
-                "✓ Stage 1/4  %s   (%s)",
-                _fmt_elapsed(time.monotonic() - t1),
-                f"{n_downloaded:,} downloaded" if n_downloaded else "nothing to download",
-            )
+            self._run_download_stage(suffix)
 
             # Stage 2 — tree build
             ui_logger.info(f"Stage 2/4: Building taxonomic tree{suffix}.")
