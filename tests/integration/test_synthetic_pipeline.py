@@ -733,7 +733,7 @@ class TestCladeHoldout:
         eval_path = str(tmp_path_factory.mktemp("evalset") / "eval.parquet")
         n_reads, n_clades = build_eval_set(
             str(manifest), reg.registry["accessions"], reg.registry["lineages"],
-            eval_path, read_length=150, reads_per_genome=5, seed=0)
+            eval_path, min_len=150, max_len=150, reads_per_genome=5, seed=0)
         assert n_clades == 1 and n_reads > 0
         rows = pq.read_table(eval_path).to_pylist()
         assert all(r["held_out_taxid"] == "11234" for r in rows)
@@ -756,7 +756,7 @@ class TestCladeHoldout:
         eval_path = str(tmp_path_factory.mktemp("evalscore") / "eval.parquet")
         build_eval_set(
             str(manifest), reg.registry["accessions"], reg.registry["lineages"],
-            eval_path, read_length=150, reads_per_genome=5, seed=0)
+            eval_path, min_len=150, max_len=150, reads_per_genome=5, seed=0)
         rows = pq.read_table(eval_path).to_pylist()
         assert rows
 

@@ -451,6 +451,10 @@ python3 -m taxotreeset benchmark build-eval \
 
 Each read carries its true lineage, its held-out clade, the expected commit rank `ρ*`,
 and its divergence bin — see [clade-holdout benchmark](#clade-holdout-open-set-benchmark-optional).
+`--track long` instead emits longer, variable-length ONT/PacBio-like reads passed through an
+indel-dominated, homopolymer-aware error model (same labels, so the two regimes are directly
+comparable); `benchmark score` then grades any classifier's predictions, and `benchmark
+export-refs` / `parse-baseline` set up a retained-only Kraken2/Centrifuge head-to-head.
 
 ## Output
 

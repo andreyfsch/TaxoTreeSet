@@ -80,6 +80,19 @@ class TestBuildParser:
         assert args.command == "benchmark"
         assert args.benchmark_cmd == "build-eval"
         assert args._run is benchmark.run
+        assert args.track == "short"  # default track
+
+    def test_benchmark_build_eval_long_track_parses(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "benchmark", "build-eval", "--manifest", "m", "--registry", "r",
+            "--output", "o", "--track", "long",
+            "--min-read-length", "2000", "--max-read-length", "20000",
+            "--del-rate", "0.03",
+        ])
+        assert args.track == "long"
+        assert args.min_read_length == 2000 and args.max_read_length == 20000
+        assert args.del_rate == 0.03
 
     def test_benchmark_requires_a_subcommand(self):
         parser = build_parser()
@@ -90,7 +103,9 @@ class TestBuildParser:
         from taxotreeset.cli import benchmark
         args = argparse.Namespace(
             benchmark_cmd="build-eval", manifest="m", registry="r",
-            output=str(tmp_path / "o.parquet"), read_length=150,
+            output=str(tmp_path / "o.parquet"), track="short", read_length=150,
+            min_read_length=3000, max_read_length=30000, sub_rate=0.01,
+            ins_rate=0.02, del_rate=0.02, homopolymer_factor=2.0,
             reads_per_genome=10, seed=0,
         )
         with (

@@ -13,7 +13,12 @@ from taxotreeset.benchmark.baselines import (
     parse_kraken2_output,
     taxid_rank_map,
 )
-from taxotreeset.benchmark.eval_set import build_eval_reads, build_eval_set
+from taxotreeset.benchmark.eval_set import (
+    ErrorModel,
+    apply_errors,
+    build_eval_reads,
+    build_eval_set,
+)
 from taxotreeset.benchmark.holdout import (
     build_holdout_manifest,
     prune_holdout,
@@ -22,6 +27,8 @@ from taxotreeset.benchmark.holdout import (
 from taxotreeset.benchmark.scorer import classify_outcome, score_reads
 
 __all__ = [
+    "ErrorModel",
+    "apply_errors",
     "build_eval_reads",
     "build_eval_set",
     "build_holdout_manifest",

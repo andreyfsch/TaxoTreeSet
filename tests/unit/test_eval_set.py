@@ -7,7 +7,9 @@ from unittest.mock import patch
 import pyarrow.parquet as pq
 
 from taxotreeset.benchmark.eval_set import (
+    ErrorModel,
     _header_index,
+    apply_errors,
     build_eval_reads,
     build_eval_set,
 )
@@ -49,7 +51,7 @@ class TestBuildEvalReads:
         with patch(_READ, return_value=_SEQ):
             rows = build_eval_reads(
                 _ENTRIES, _ACC, _LIN,
-                read_length=150, reads_per_genome=5, seed=0)
+                min_len=150, max_len=150, reads_per_genome=5, seed=0)
         assert len(rows) == 10  # 2 genomes x 5 reads
         assert {r["source_header"] for r in rows} == {"H1", "H2"}
         r = rows[0]
@@ -77,7 +79,55 @@ class TestBuildEvalReads:
         with patch(_READ, return_value=""):
             assert build_eval_reads(_ENTRIES, _ACC, _LIN) == []
         with patch(_READ, return_value="ACGT"):  # shorter than read_length
-            assert build_eval_reads(_ENTRIES, _ACC, _LIN, read_length=150) == []
+            assert build_eval_reads(_ENTRIES, _ACC, _LIN, min_len=150, max_len=150) == []
+
+
+class TestErrorModel:
+    def test_zero_rates_is_identity(self):
+        seq = "ACGTACGTAA"
+        assert apply_errors(seq, ErrorModel(0, 0, 0, 1.0), random.Random(0)) == seq
+
+    def test_full_substitution_changes_every_base_same_length(self):
+        seq = "ACGTACGT"
+        out = apply_errors(
+            seq, ErrorModel(sub_rate=1.0, ins_rate=0, del_rate=0), random.Random(0))
+        assert len(out) == len(seq)
+        assert all(a != b for a, b in zip(seq, out))
+
+    def test_full_deletion_empties(self):
+        out = apply_errors(
+            "ACGTACGT", ErrorModel(0, 0, 1.0, 1.0), random.Random(0))
+        assert out == ""
+
+    def test_full_insertion_doubles_length(self):
+        seq = "ACGT" * 20  # no homopolymer runs
+        out = apply_errors(
+            seq, ErrorModel(sub_rate=0, ins_rate=1.0, del_rate=0), random.Random(0))
+        assert len(out) == 2 * len(seq)
+
+    def test_deterministic(self):
+        seq = "ACGT" * 50
+        m = ErrorModel()
+        assert (apply_errors(seq, m, random.Random(7))
+                == apply_errors(seq, m, random.Random(7)))
+
+
+class TestLongTrack:
+    def test_long_reads_are_longer_and_labeled(self):
+        with patch(_READ, return_value=_SEQ):  # 3000 bp
+            rows = build_eval_reads(
+                _ENTRIES, _ACC, _LIN, min_len=1000, max_len=3000,
+                error_model=ErrorModel(), track="long", reads_per_genome=3, seed=0)
+        assert rows
+        assert all(r["track"] == "long" for r in rows)
+        assert all(r["read_length"] >= 500 for r in rows)  # >> short track's 150
+
+    def test_short_track_reads_carry_track_and_length(self):
+        with patch(_READ, return_value=_SEQ):
+            rows = build_eval_reads(
+                _ENTRIES, _ACC, _LIN, min_len=150, max_len=150,
+                reads_per_genome=2, seed=0)
+        assert all(r["track"] == "short" and r["read_length"] == 150 for r in rows)
 
 
 class TestBuildEvalSet:
@@ -88,7 +138,7 @@ class TestBuildEvalSet:
         with patch(_READ, return_value=_SEQ):
             n_reads, n_clades = build_eval_set(
                 str(manifest), _ACC, _LIN, str(out),
-                read_length=150, reads_per_genome=4, seed=0)
+                min_len=150, max_len=150, reads_per_genome=4, seed=0)
         assert n_clades == 1
         assert n_reads == 8  # 2 genomes x 4 reads
         table = pq.read_table(str(out))

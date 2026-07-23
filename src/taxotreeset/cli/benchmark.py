@@ -15,7 +15,7 @@ from taxotreeset.benchmark.baselines import (
     parse_kraken2_output,
     taxid_rank_map,
 )
-from taxotreeset.benchmark.eval_set import build_eval_set
+from taxotreeset.benchmark.eval_set import ErrorModel, build_eval_set
 from taxotreeset.benchmark.scorer import report_csv_rows, score_reads
 
 logger = logging.getLogger("TaxoTreeSet.Benchmark.CLI")
@@ -42,8 +42,31 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Destination parquet for the labeled eval reads.",
     )
     be.add_argument(
+        "--track", choices=["short", "long"], default="short",
+        help="short = fixed-length Illumina-like reads; long = variable-length "
+        "ONT/PacBio-like reads with an indel/homopolymer error model.",
+    )
+    be.add_argument(
         "--read-length", type=int, default=150,
-        help="Fixed read length in bp (short/Illumina-like track; default 150).",
+        help="Fixed read length in bp for the short track (default 150).",
+    )
+    be.add_argument(
+        "--min-read-length", type=int, default=3000,
+        help="Min read length for the long track (default 3000).",
+    )
+    be.add_argument(
+        "--max-read-length", type=int, default=30000,
+        help="Max read length for the long track (default 30000).",
+    )
+    be.add_argument("--sub-rate", type=float, default=0.01,
+                    help="Long track: substitution rate per base (default 0.01).")
+    be.add_argument("--ins-rate", type=float, default=0.02,
+                    help="Long track: insertion rate per base (default 0.02).")
+    be.add_argument("--del-rate", type=float, default=0.02,
+                    help="Long track: deletion rate per base (default 0.02).")
+    be.add_argument(
+        "--homopolymer-factor", type=float, default=2.0,
+        help="Long track: indel-rate multiplier inside homopolymer runs (2.0).",
     )
     be.add_argument(
         "--reads-per-genome", type=int, default=200,
@@ -119,24 +142,38 @@ def run(args: argparse.Namespace) -> None:
 def _run_build_eval(args: argparse.Namespace) -> None:
     from taxotreeset.io.registry import NCBIRegistry
 
-    if args.read_length <= 0 or args.reads_per_genome <= 0:
-        logger.error("--read-length and --reads-per-genome must be positive.")
+    if args.reads_per_genome <= 0:
+        logger.error("--reads-per-genome must be positive.")
+        raise SystemExit(1)
+    if args.track == "long":
+        min_len, max_len = args.min_read_length, args.max_read_length
+        error_model = ErrorModel(
+            sub_rate=args.sub_rate, ins_rate=args.ins_rate,
+            del_rate=args.del_rate, homopolymer_factor=args.homopolymer_factor,
+        )
+    else:
+        min_len = max_len = args.read_length
+        error_model = None
+    if min_len <= 0 or max_len < min_len:
+        logger.error("read length range must be positive with max >= min.")
         raise SystemExit(1)
 
     registry = NCBIRegistry(registry_path=args.registry)
     accessions = registry.registry.get("accessions", {})
     lineages = registry.registry.get("lineages", {})
 
-    logger.info("Building open-set eval reads from %s ...", args.manifest)
+    logger.info(
+        "Building open-set eval reads (%s track) from %s ...",
+        args.track, args.manifest,
+    )
     n_reads, n_clades = build_eval_set(
         args.manifest, accessions, lineages, args.output,
-        read_length=args.read_length,
-        reads_per_genome=args.reads_per_genome,
-        seed=args.seed,
+        min_len=min_len, max_len=max_len, error_model=error_model,
+        track=args.track, reads_per_genome=args.reads_per_genome, seed=args.seed,
     )
     logger.info(
-        "Wrote %s eval reads from %s held-out clade(s) -> %s",
-        f"{n_reads:,}", f"{n_clades:,}", args.output,
+        "Wrote %s %s-track eval reads from %s held-out clade(s) -> %s",
+        f"{n_reads:,}", args.track, f"{n_clades:,}", args.output,
     )
 
 

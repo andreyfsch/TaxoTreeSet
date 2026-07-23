@@ -501,7 +501,7 @@ Files: `core/_orchestration/_cluster.py`, `core/_orchestration/_splits.py`,
 
 ---
 
-## 🔴 P11 — Clade-holdout open-set benchmark
+## 🟢 P11 — Clade-holdout open-set benchmark — DONE
 
 **Goal.** Turn TaxoTreeSet from a dataset generator into the *evaluation instrument* for
 open-set taxonomic classification: generate training data with whole clades (genera/families)
@@ -579,9 +579,23 @@ excludes held-out / FASTA format / skips, parser classified-vs-abstain/malformed
 1082.
 
 Files: `benchmark/baselines.py` (new), `cli/benchmark.py`, `benchmark/__init__.py`.
-**Remaining: P3 long-noisy read track** (indel/homopolymer error model on longer windows) +
-Centrifuge parser + a FASTA/FASTQ dump of the eval reads for the tools. The benchmark's core loop
-(generate → label → score, with a k-mer baseline) is complete.
+
+**P3 — DONE (2026-07-23): long-noisy read track.** New `ErrorModel` + `apply_errors` in
+`eval_set.py`: indel-dominated, homopolymer-aware (per-base sub/ins/del rates, indel rates boosted
+inside homopolymer runs; all-zero = identity). `build_eval_reads` / `build_eval_set` refactored to
+`min_len`/`max_len` + an optional `error_model` + a `track` column, so the same builder emits the
+short (fixed-length, no error) and long (variable-length, noised) tracks with the *same* labels for
+direct cross-regime comparison. `benchmark build-eval --track long` (+ `--min/max-read-length`,
+`--sub/ins/del-rate`, `--homopolymer-factor`). Tests: error-model cases (identity / full sub / full
+del / full ins / determinism) + long-track (longer + labeled) + short-track columns. Suite 1090.
+
+Files: `benchmark/eval_set.py`, `cli/benchmark.py`, `benchmark/__init__.py`.
+
+**★ P11 COMPLETE (2026-07-23):** the clade-holdout open-set benchmark runs end-to-end —
+generate the holdout (P1) → label novel reads, short & long tracks (P2/P3) → score correct-back-off
+vs over-commitment per rank × ANI-bin (P4) → head-to-head vs a retained-only k-mer baseline (P5).
+Follow-ups (small, optional): Centrifuge parser + a FASTA/FASTQ dump of the eval reads for the
+external tools; stratified-by-bin holdout selection; exact ANI (fastANI) vs the MinHash proxy.
 
 ---
 
