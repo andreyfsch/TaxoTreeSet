@@ -741,6 +741,32 @@ class TestCladeHoldout:
         assert all(r["expected_commit_taxid"] == "11118" for r in rows)
         assert all(len(r["seq"]) == 150 for r in rows)
 
+    def test_full_loop_holdout_to_eval_to_score(
+        self, binary_holdout_output, synthetic_env, tmp_path_factory
+    ):
+        # P1 -> P2 -> P4: build the eval set, then score two synthetic classifiers.
+        import pyarrow.parquet as pq
+        from taxotreeset.benchmark.eval_set import build_eval_set
+        from taxotreeset.benchmark.scorer import score_reads
+        from taxotreeset.io.registry import NCBIRegistry
+
+        reg = NCBIRegistry(registry_path=synthetic_env["registry_path"])
+        manifest = Path(binary_holdout_output["output_dir"]) \
+            / "benchmark_manifest_viruses.json"
+        eval_path = str(tmp_path_factory.mktemp("evalscore") / "eval.parquet")
+        build_eval_set(
+            str(manifest), reg.registry["accessions"], reg.registry["lineages"],
+            eval_path, read_length=150, reads_per_genome=5, seed=0)
+        rows = pq.read_table(eval_path).to_pylist()
+        assert rows
+
+        # a classifier that always backs off to rho* (11118) is perfect
+        perfect = {r["read_id"]: ("11118", "family") for r in rows}
+        assert score_reads(rows, perfect)["overall"]["correct_rate"] == 1.0
+        # one that commits to a deeper wrong taxon over-commits every read
+        bad = {r["read_id"]: ("99999", "genus") for r in rows}
+        assert score_reads(rows, bad)["overall"]["over_commit_rate"] == 1.0
+
 
 class TestMultiSingleLevelTarget:
     def test_only_the_interior_target_head_is_scheduled(

@@ -102,6 +102,51 @@ class TestBuildParser:
             benchmark.run(args)
         mbe.assert_called_once()
 
+    def test_benchmark_score_parses_and_dispatches(self):
+        from taxotreeset.cli import benchmark
+        parser = build_parser()
+        args = parser.parse_args([
+            "benchmark", "score",
+            "--eval-set", "e.parquet", "--predictions", "p.tsv",
+            "--output", "o.json",
+        ])
+        assert args.command == "benchmark"
+        assert args.benchmark_cmd == "score"
+        assert args._run is benchmark.run
+
+    def test_benchmark_score_run_writes_report(self, tmp_path):
+        import json as _json
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from taxotreeset.cli import benchmark
+
+        lineage = _json.dumps(
+            [["S1", "species"], ["G1", "genus"], ["F1", "family"]])
+        eval_p = tmp_path / "eval.parquet"
+        pq.write_table(pa.Table.from_pylist([
+            {"read_id": "r1", "true_lineage": lineage,
+             "expected_commit_taxid": "F1", "expected_commit_rank": "family",
+             "distance_bin": "ANI<85%"},
+            {"read_id": "r2", "true_lineage": lineage,
+             "expected_commit_taxid": "F1", "expected_commit_rank": "family",
+             "distance_bin": "ANI<85%"},
+        ]), str(eval_p))
+        preds = tmp_path / "preds.tsv"
+        preds.write_text(
+            "read_id\tpredicted_taxid\tpredicted_rank\n"
+            "r1\tF1\tfamily\nr2\tGX\tgenus\n", encoding="utf-8")
+        out = tmp_path / "report.json"
+        args = argparse.Namespace(
+            benchmark_cmd="score", eval_set=str(eval_p),
+            predictions=str(preds), output=str(out), csv=None)
+        benchmark.run(args)
+        rep = _json.loads(out.read_text())
+        assert rep["overall"]["n"] == 2
+        assert rep["overall"]["correct"] == 1       # r1 backs off to F1
+        assert rep["overall"]["over_commit"] == 1   # r2 -> a deeper wrong genus
+
     def test_single_level_and_stop_at_are_mutually_exclusive(self):
         # The help promises the two cannot be combined; argparse rejects the
         # combination up front (exit 2) instead of a deep run_pipeline ValueError.

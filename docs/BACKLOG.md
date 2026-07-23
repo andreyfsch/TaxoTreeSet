@@ -551,8 +551,22 @@ round-trip) + 3 CLI (parse/dispatch/run) + 1 integration (P1→P2: the synthetic
 → labeled novel reads that back off to the parent). Suite 1060.
 
 Files: `benchmark/eval_set.py` (new), `cli/benchmark.py` (new), `__main__.py`.
+
+**P4 — DONE (2026-07-23): open-set scorer.** New `benchmark/scorer.py` (`classify_outcome` +
+`score_reads`): grades a classifier's per-read predictions against `ρ*` into five outcomes —
+**correct** (commits at `ρ*`), **over_commit** (deeper than `ρ*` = the dangerous confident-wrong
+call), **too_shallow** (a proper ancestor of `ρ*`), **misroute** (off-path at `ρ*`'s level or
+shallower), **abstain**. On-path depth uses the read's true lineage; off-path over-commit-vs-
+misroute uses `ranks.rank_depth`. Aggregates overall + per `ρ*`-rank + per divergence bin (counts
++ rates). New `taxotreeset benchmark score --eval-set … --predictions … --output report.json`
+(`--csv` optional); predictions are a parquet/(t)sv of `read_id, predicted_taxid, predicted_rank`
+(empty taxid = abstain) — how a classifier produces them is out of scope. Tests: 11 unit (all five
+outcome cases + aggregation + CSV) + 2 CLI + 1 integration (full P1→P2→P4 loop: a back-off-to-`ρ*`
+classifier scores 1.0 correct, a deeper-wrong one scores 1.0 over-commit). Suite 1074.
+
+Files: `benchmark/scorer.py` (new), `cli/benchmark.py`, `benchmark/__init__.py`.
 **Next: P3 long-noisy read track** (indel/homopolymer error model on longer windows), then
-P4 scorer, P5 retained-only k-mer baselines.
+P5 retained-only Kraken2/Centrifuge baselines scored by the same harness.
 
 ---
 

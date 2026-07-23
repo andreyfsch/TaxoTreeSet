@@ -14,11 +14,14 @@ from taxotreeset.benchmark.holdout import (
     prune_holdout,
     select_holdout_taxids,
 )
+from taxotreeset.benchmark.scorer import classify_outcome, score_reads
 
 __all__ = [
     "build_eval_reads",
     "build_eval_set",
     "build_holdout_manifest",
+    "classify_outcome",
     "prune_holdout",
+    "score_reads",
     "select_holdout_taxids",
 ]
