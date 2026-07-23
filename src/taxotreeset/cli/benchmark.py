@@ -16,6 +16,7 @@ from taxotreeset.benchmark.baselines import (
     taxid_rank_map,
 )
 from taxotreeset.benchmark.eval_set import ErrorModel, build_eval_set
+from taxotreeset.benchmark.reliability import annotate_reliability
 from taxotreeset.benchmark.scorer import report_csv_rows, score_reads
 
 logger = logging.getLogger("TaxoTreeSet.Benchmark.CLI")
@@ -125,6 +126,28 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Destination predictions parquet for `benchmark score`.",
     )
 
+    rl = subs.add_parser(
+        "reliability",
+        help="Annotate each head's reliability from its a-priori data properties "
+        "and (optionally) its training behaviour.",
+    )
+    rl.add_argument(
+        "--heads", required=True,
+        help="Dataset directory whose head label_map.json files to annotate.",
+    )
+    rl.add_argument(
+        "--training-metrics", default=None,
+        help="Optional JSON {taxid: {test_f1, val_f1s: [...], learned}} — the "
+        "a-posteriori signal that determines the verdict.",
+    )
+    rl.add_argument(
+        "--write", action="store_true",
+        help="Write the merged reliability block back into each label_map.json.",
+    )
+    rl.add_argument(
+        "--summary", default=None, help="Write a per-head summary CSV here.",
+    )
+
 
 def run(args: argparse.Namespace) -> None:
     if args.benchmark_cmd == "build-eval":
@@ -135,6 +158,8 @@ def run(args: argparse.Namespace) -> None:
         _run_export_refs(args)
     elif args.benchmark_cmd == "parse-baseline":
         _run_parse_baseline(args)
+    elif args.benchmark_cmd == "reliability":
+        _run_reliability(args)
     else:  # pragma: no cover - argparse enforces a valid subcommand
         raise SystemExit(f"unknown benchmark command: {args.benchmark_cmd!r}")
 
@@ -267,3 +292,52 @@ def _run_parse_baseline(args: argparse.Namespace) -> None:
         f"{len(rows):,}", f"{n_classified:,}",
         f"{len(rows) - n_classified:,}", args.output,
     )
+
+
+def _run_reliability(args: argparse.Namespace) -> None:
+    import glob
+    import os
+
+    training: dict = {}
+    if args.training_metrics:
+        with open(args.training_metrics, encoding="utf-8") as f:
+            training = json.load(f)
+
+    summary: list[dict] = []
+    verdict_counts: dict[str, int] = {}
+    for path in sorted(glob.glob(
+        os.path.join(args.heads, "**", "label_map.json"), recursive=True
+    )):
+        with open(path, encoding="utf-8") as f:
+            label_map = json.load(f)
+        taxid = str(label_map.get("head_taxid", ""))
+        merged = annotate_reliability(
+            label_map.get("reliability"), training.get(taxid))
+        verdict_counts[merged["verdict"]] = verdict_counts.get(merged["verdict"], 0) + 1
+        if args.write:
+            label_map["reliability"] = merged
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(label_map, f, indent=2)
+            os.replace(tmp, path)
+        summary.append({
+            "taxid": taxid,
+            "belongs_genomes": (merged.get("belongs_genomes")),
+            "a_priori_flag": merged.get("a_priori_flag"),
+            "verdict": merged["verdict"],
+            "verdict_source": merged["verdict_source"],
+            "val_f1_std": (merged.get("posterior") or {}).get("val_f1_std"),
+            "val_test_gap": (merged.get("posterior") or {}).get("val_test_gap"),
+        })
+
+    logger.info(
+        "Annotated %s heads%s. Verdicts: %s",
+        f"{len(summary):,}", " (written back)" if args.write else "",
+        ", ".join(f"{k}={v}" for k, v in sorted(verdict_counts.items())),
+    )
+    if args.summary and summary:
+        with open(args.summary, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(summary[0].keys()))
+            writer.writeheader()
+            writer.writerows(summary)
+        logger.info("Wrote reliability summary -> %s", args.summary)

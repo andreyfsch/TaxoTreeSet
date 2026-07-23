@@ -113,6 +113,11 @@ def _write_label_maps(scheduling_artifacts: dict[str, Any]) -> None:
             "label2id": label2id,
             "classes": classes,
         }
+        # A-priori reliability (P12): belongs-genome counts that predict how noisy
+        # the head's val/test metrics are; a downstream reliability annotator merges
+        # this with the training behaviour that determines the final verdict.
+        if v.get("reliability"):
+            label_map["reliability"] = v["reliability"]
         if balance_mode == "keep":
             # "balanced" class weights (total / (n_classes * n_c)) so a trainer
             # can offset the on-disk imbalance in its loss (or drive oversampling).

@@ -96,6 +96,35 @@ def _accumulated_path_to(domain_node: Node, target: Node) -> str:
     names.reverse()
     return "/".join(names)
 
+# Below this belongs-genome count the leaf-split gives val exactly 1 genome
+# (int(N * 0.15) < 2), so the head's val/test metrics are noisy by construction.
+_RELIABLE_MIN_GENOMES: int = 14
+
+
+def _head_reliability(pos_split: dict, min_genomes_split: int = 4) -> dict:
+    """A-priori reliability of a binary head from its belongs (positive) split.
+
+    Records the belongs-genome counts that drive val-set size — the *predictor*
+    of reliability (few genomes -> a 1-genome, high-variance val). The a-posteriori
+    training behaviour that ultimately *determines* reliability is merged later by
+    the reliability annotator (P12-B). ``a_priori_flag`` is ``low`` when there are
+    too few belongs genomes for a representative val/test.
+    """
+    def n_genomes(tasks: list) -> int:
+        return len({t.get("header_id") for t in tasks if t.get("header_id")})
+
+    total = n_genomes(
+        pos_split.get("train", []) + pos_split.get("val", [])
+        + pos_split.get("test", [])
+    )
+    return {
+        "belongs_genomes": total,
+        "val_belongs_genomes": n_genomes(pos_split.get("val", [])),
+        "test_belongs_genomes": n_genomes(pos_split.get("test", [])),
+        "split_mode": "genome-level" if total >= min_genomes_split else "window-slice",
+        "a_priori_flag": "low" if total < _RELIABLE_MIN_GENOMES else "ok",
+    }
+
 def _collect_real_children(node: Node) -> list:
     """Return direct children that are taxonomic nodes (not sequences).
 
@@ -444,6 +473,7 @@ class _CascadeScheduler:
                         "fallback": False, "capacity": cap,
                     },
                 },
+                "reliability": _head_reliability(pos_split),
             }
             batch.append((
                 taxid, target_dir, parent_tasks,

@@ -555,6 +555,28 @@ Running `taxotreeset separability` afterward adds a `kmer_separability` block to
 each `label_map.json` (a quick estimate of how learnable the head is); plain
 `generate` does not write it.
 
+Binary heads also carry a `reliability` block written at generation time — the
+**a-priori** data properties that predict how trustworthy the head will be:
+`belongs_genomes` / `val_belongs_genomes` / `test_belongs_genomes`, the
+`split_mode`, and an `a_priori_flag` (`"low"` when there are too few belongs
+genomes for a well-populated val split, so its metrics are noisy by
+construction). `taxotreeset benchmark reliability` merges that with the head's
+**a-posteriori** training behaviour — which *determines* the verdict — into a
+final `reliable` / `noisy-metrics` / `unreliable` call:
+
+```
+python3 -m taxotreeset benchmark reliability \
+  --heads data/datasets/viruses \
+  --training-metrics head_metrics.json \
+  --write --summary reliability.csv
+```
+
+`--training-metrics` is an optional `{taxid: {test_f1, val_f1s: [...], learned}}`
+JSON; without it the verdict falls back to the a-priori flag. `--write` merges the
+verdict back into each `label_map.json`. The *policy* — how a downstream
+classifier acts on the verdict (e.g. staying permissive at an unreliable node) —
+stays with the classifier, not TaxoTreeSet.
+
 ## Example: fine-tuning a head
 
 `examples/finetune_head.py` is a reference consumer of the generated shards: it

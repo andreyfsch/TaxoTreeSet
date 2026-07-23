@@ -24,10 +24,12 @@ from taxotreeset.benchmark.holdout import (
     prune_holdout,
     select_holdout_taxids,
 )
+from taxotreeset.benchmark.reliability import annotate_reliability
 from taxotreeset.benchmark.scorer import classify_outcome, score_reads
 
 __all__ = [
     "ErrorModel",
+    "annotate_reliability",
     "apply_errors",
     "build_eval_reads",
     "build_eval_set",

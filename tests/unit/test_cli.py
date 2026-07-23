@@ -195,6 +195,42 @@ class TestBuildParser:
         assert rows["r1"]["predicted_rank"] == "species"
         assert rows["r2"]["predicted_taxid"] == ""   # unclassified -> abstain
 
+    def test_benchmark_reliability_parses_and_dispatches(self):
+        parser = build_parser()
+        a = parser.parse_args([
+            "benchmark", "reliability", "--heads", "d/", "--write",
+        ])
+        assert a.benchmark_cmd == "reliability" and a.write is True
+
+    def test_benchmark_reliability_run_annotates_and_writes_back(self, tmp_path):
+        import json as _json
+
+        from taxotreeset.cli import benchmark
+
+        head_dir = tmp_path / "1335638"
+        head_dir.mkdir()
+        lm = head_dir / "label_map.json"
+        lm.write_text(_json.dumps({
+            "head_taxid": "1335638",
+            "reliability": {"belongs_genomes": 6, "a_priori_flag": "low",
+                            "split_mode": "genome-level"},
+        }), encoding="utf-8")
+        metrics = tmp_path / "metrics.json"
+        metrics.write_text(_json.dumps({
+            "1335638": {"learned": True, "test_f1": 0.93,
+                        "val_f1s": [0.92, 0.93, 0.93]},
+        }), encoding="utf-8")
+        summary = tmp_path / "summary.csv"
+        args = argparse.Namespace(
+            benchmark_cmd="reliability", heads=str(tmp_path),
+            training_metrics=str(metrics), write=True, summary=str(summary))
+        benchmark.run(args)
+
+        merged = _json.loads(lm.read_text())["reliability"]
+        assert merged["verdict"] == "reliable"          # training overrides "low"
+        assert merged["verdict_source"] == "training"
+        assert "1335638" in summary.read_text()
+
     def test_single_level_and_stop_at_are_mutually_exclusive(self):
         # The help promises the two cannot be combined; argparse rejects the
         # combination up front (exit 2) instead of a deep run_pipeline ValueError.

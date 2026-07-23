@@ -599,7 +599,7 @@ external tools; stratified-by-bin holdout selection; exact ANI (fastANI) vs the 
 
 ---
 
-## 🟠 P12 — Per-head reliability annotation (data + training signals)
+## ✅ P12 — Per-head reliability annotation (data + training signals) — DONE
 
 **Motivation.** A per-node reliability signal lets a downstream classifier weight or gate its
 decisions (e.g. treat a low-reliability node permissively rather than trusting its call). A scan
@@ -628,6 +628,22 @@ the *policy* (how reliability gates a decision) stays with the classifier, not T
 Files: `benchmark/reliability.py` (new; annotator) + a `reliability` block in
 `core/_orchestration/_manifest.py` (`_write_label_maps`). Related: the split machinery
 (`_splits.py`), the composition audit (`dataset/composition.py`).
+
+**Done (2026-07-23).** Two parts shipped:
+- **A-priori (generation-time).** `_scheduler._head_reliability(pos_split)` records
+  `belongs_genomes` / `val_belongs_genomes` / `test_belongs_genomes` / `split_mode` and an
+  `a_priori_flag` (`"low"` when belongs < `_RELIABLE_MIN_GENOMES=14`, i.e. val gets 1 genome by
+  construction). Wired into the binary `master_manifest` and emitted as a `reliability` block in
+  `_manifest._write_label_maps`.
+- **Merge with training (a-posteriori).** `benchmark/reliability.py::annotate_reliability(apriori,
+  training)` — training behavior *determines* the verdict when present (`verdict_source="training"`):
+  `unreliable` if it never learned; `noisy-metrics` if val-f1 pstdev > 0.08 or |test−final-val| >
+  0.10; else `reliable`. Without training metrics it falls back to the a-priori flag
+  (`verdict_source="a_priori"`). Exposed via `taxotreeset benchmark reliability --heads <dir>
+  [--training-metrics m.json] [--write] [--summary out.csv]`. The *policy* (how the classifier acts
+  on a verdict) stays downstream. Tests: `test_reliability.py`, `TestHeadReliability` in
+  `test_scheduler_single_level.py`, `test_label_maps_carry_apriori_reliability` in
+  `test_synthetic_pipeline.py`, CLI tests in `test_cli.py`.
 
 ---
 

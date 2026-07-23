@@ -372,6 +372,17 @@ class TestBinaryOnlyGeneration:
             assert test_p.exists(), f"{train_p.parent} has train but no test split"
             assert len(pd.read_parquet(test_p)) > 0, f"{test_p} is empty"
 
+    def test_label_maps_carry_apriori_reliability(self, binary_pipeline_output):
+        out = Path(binary_pipeline_output["output_dir"])
+        maps = list(out.rglob("label_map.json"))
+        assert maps, "no label_map.json produced"
+        for lm_path in maps:
+            r = json.loads(lm_path.read_text()).get("reliability")
+            assert r is not None, f"{lm_path} missing reliability block"
+            assert "belongs_genomes" in r and "a_priori_flag" in r
+            assert r["split_mode"] in ("genome-level", "window-slice")
+            assert r["a_priori_flag"] in ("low", "ok")
+
     def test_single_child_nodes_collapse_to_passthrough(self, binary_pipeline_output):
         # A binary head for a single-child node is redundant with its only child
         # (identical subtree), so it must NOT be emitted — it collapses to a

@@ -14,6 +14,7 @@ from bigtree import Node
 from taxotreeset.core._orchestration._scheduler import (
     _CascadeScheduler,
     _accumulated_path_to,
+    _head_reliability,
 )
 
 
@@ -59,3 +60,35 @@ class TestFindSingleLevelTarget:
         domain = Node("10239", parent=Node("root"))
         Node("11118", parent=domain)
         assert self._scheduler("99999")._find_single_level_target(domain) is None
+
+
+class TestHeadReliability:
+    @staticmethod
+    def _tasks(hids):
+        return [{"header_id": h} for h in hids]
+
+    def test_single_genome_window_slice_is_low(self):
+        # one genome positionally sliced into every split
+        ps = {"train": self._tasks(["G1", "G1"]),
+              "val": self._tasks(["G1"]), "test": self._tasks(["G1"])}
+        r = _head_reliability(ps)
+        assert r["belongs_genomes"] == 1
+        assert r["split_mode"] == "window-slice"
+        assert r["a_priori_flag"] == "low"
+
+    def test_few_genome_level_with_one_genome_val_is_low(self):
+        ps = {"train": self._tasks(["G1", "G2", "G3", "G4"]),
+              "val": self._tasks(["G5"]), "test": self._tasks(["G6"])}
+        r = _head_reliability(ps)
+        assert r["belongs_genomes"] == 6
+        assert r["val_belongs_genomes"] == 1
+        assert r["split_mode"] == "genome-level"
+        assert r["a_priori_flag"] == "low"
+
+    def test_many_genomes_two_in_val_is_ok(self):
+        r = _head_reliability({
+            "train": self._tasks([f"G{i}" for i in range(10)]),
+            "val": self._tasks(["Ga", "Gb"]),
+            "test": self._tasks(["Gc", "Gd"])})
+        assert r["belongs_genomes"] == 14
+        assert r["a_priori_flag"] == "ok"
