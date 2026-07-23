@@ -127,8 +127,26 @@ these.
 - **P3 — Read-length tracks.** Add the long-noisy track + configurable error model.
 - **P4 — Scorer.** A `benchmark score` subcommand computing §6 from a predictions file +
   manifest; emits per-rank / per-bin tables + calibration outputs + compute fields.
-- **P5 — Baseline runners.** Retained-only Kraken2/Centrifuge index build + run + score wrappers
-  for the head-to-head table.
+- **P5 — Baseline runners (DONE, kraken2).** TaxoTreeSet owns the two ends; the tool run is the
+  user's. The flow:
+
+  ```
+  # 1. export the retained-only reference (held-out clades excluded)
+  taxotreeset benchmark export-refs --manifest benchmark_manifest_<scope>.json \
+      --registry registry.json --out-fasta retained.fasta --out-map seqid2taxid.tsv
+  # 2. build + classify with the tool (user-side)
+  kraken2-build --add-to-library retained.fasta --db DB && kraken2-build --build --db DB
+  kraken2 --db DB --output k2.out eval_reads.parquet  # (reads exported to FASTA)
+  # 3. convert the tool output to scorer predictions, then score with the same harness
+  taxotreeset benchmark parse-baseline --tool kraken2 --input k2.out \
+      --registry registry.json --output baseline_preds.parquet
+  taxotreeset benchmark score --eval-set eval_reads.parquet \
+      --predictions baseline_preds.parquet --output baseline_report.json
+  ```
+
+  The retained-only index gives the baseline the *same* open-set condition as the model, and its
+  native LCA back-off is graded on exactly the same `ρ*` footing. Centrifuge + a FASTA/FASTQ dump
+  of the eval reads are the natural follow-ups.
 
 Reuse: scope resolution, MinHash sketches (distance bins), the binary/multi head + reject-bucket
 machinery, the cluster-aware split (for the in-index control), and the extraction pipeline.

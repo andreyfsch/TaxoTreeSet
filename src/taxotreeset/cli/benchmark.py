@@ -10,6 +10,11 @@ import csv
 import json
 import logging
 
+from taxotreeset.benchmark.baselines import (
+    export_retained_reference,
+    parse_kraken2_output,
+    taxid_rank_map,
+)
 from taxotreeset.benchmark.eval_set import build_eval_set
 from taxotreeset.benchmark.scorer import report_csv_rows, score_reads
 
@@ -67,12 +72,46 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Also write a flattened per-group CSV to this path.",
     )
 
+    ex = subs.add_parser(
+        "export-refs",
+        help="Export the retained-only reference FASTA for a k-mer baseline "
+        "index (held-out clades excluded).",
+    )
+    ex.add_argument("--manifest", "-m", required=True, help="Holdout manifest.")
+    ex.add_argument("--registry", "-r", required=True, help="Registry snapshot.")
+    ex.add_argument(
+        "--out-fasta", required=True,
+        help="Destination FASTA (taxid-labeled: >seq|kraken:taxid|<taxid>).",
+    )
+    ex.add_argument(
+        "--out-map", required=True, help="Destination seqid->taxid TSV map.",
+    )
+
+    pb = subs.add_parser(
+        "parse-baseline",
+        help="Convert a k-mer tool's per-read output into scorer predictions.",
+    )
+    pb.add_argument(
+        "--tool", choices=["kraken2"], default="kraken2",
+        help="Baseline tool whose output format to parse (default kraken2).",
+    )
+    pb.add_argument("--input", "-i", required=True, help="Tool per-read output.")
+    pb.add_argument("--registry", "-r", required=True, help="Registry snapshot.")
+    pb.add_argument(
+        "--output", "-o", required=True,
+        help="Destination predictions parquet for `benchmark score`.",
+    )
+
 
 def run(args: argparse.Namespace) -> None:
     if args.benchmark_cmd == "build-eval":
         _run_build_eval(args)
     elif args.benchmark_cmd == "score":
         _run_score(args)
+    elif args.benchmark_cmd == "export-refs":
+        _run_export_refs(args)
+    elif args.benchmark_cmd == "parse-baseline":
+        _run_parse_baseline(args)
     else:  # pragma: no cover - argparse enforces a valid subcommand
         raise SystemExit(f"unknown benchmark command: {args.benchmark_cmd!r}")
 
@@ -148,3 +187,46 @@ def _run_score(args: argparse.Namespace) -> None:
             writer.writeheader()
             writer.writerows(rows)
         logger.info("Wrote per-group CSV -> %s", args.csv)
+
+
+def _run_export_refs(args: argparse.Namespace) -> None:
+    from taxotreeset.io.registry import NCBIRegistry
+
+    with open(args.manifest, encoding="utf-8") as f:
+        manifest = json.load(f)
+    held_out = {str(e["taxid"]) for e in manifest.get("holdout", [])}
+    registry = NCBIRegistry(registry_path=args.registry)
+    n = export_retained_reference(
+        held_out,
+        registry.registry.get("accessions", {}),
+        registry.registry.get("lineages", {}),
+        args.out_fasta,
+        args.out_map,
+    )
+    logger.info(
+        "Exported %s retained genomes (%s held-out clade(s) excluded) -> %s",
+        f"{n:,}", f"{len(held_out):,}", args.out_fasta,
+    )
+
+
+def _run_parse_baseline(args: argparse.Namespace) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from taxotreeset.io.registry import NCBIRegistry
+
+    registry = NCBIRegistry(registry_path=args.registry)
+    taxid_rank = taxid_rank_map(registry.registry.get("lineages", {}))
+    with open(args.input, encoding="utf-8") as f:
+        predictions = parse_kraken2_output(f, taxid_rank)
+    rows = [
+        {"read_id": rid, "predicted_taxid": taxid or "", "predicted_rank": rank or ""}
+        for rid, (taxid, rank) in predictions.items()
+    ]
+    pq.write_table(pa.Table.from_pylist(rows), args.output)
+    n_classified = sum(1 for t, _ in predictions.values() if t)
+    logger.info(
+        "Parsed %s reads (%s classified, %s abstained) -> %s",
+        f"{len(rows):,}", f"{n_classified:,}",
+        f"{len(rows) - n_classified:,}", args.output,
+    )

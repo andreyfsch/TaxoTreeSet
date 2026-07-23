@@ -147,6 +147,39 @@ class TestBuildParser:
         assert rep["overall"]["correct"] == 1       # r1 backs off to F1
         assert rep["overall"]["over_commit"] == 1   # r2 -> a deeper wrong genus
 
+    def test_benchmark_export_refs_and_parse_baseline_parse(self):
+        parser = build_parser()
+        a = parser.parse_args([
+            "benchmark", "export-refs", "--manifest", "m.json",
+            "--registry", "r.json", "--out-fasta", "ref.fa", "--out-map", "m.tsv",
+        ])
+        assert a.benchmark_cmd == "export-refs"
+        b = parser.parse_args([
+            "benchmark", "parse-baseline", "--tool", "kraken2",
+            "--input", "k2.out", "--registry", "r.json", "--output", "p.parquet",
+        ])
+        assert b.benchmark_cmd == "parse-baseline" and b.tool == "kraken2"
+
+    def test_benchmark_parse_baseline_run_writes_predictions(self, tmp_path):
+        import pyarrow.parquet as pq
+
+        from taxotreeset.cli import benchmark
+
+        k2 = tmp_path / "k2.out"
+        k2.write_text("C\tr1\tT2\t150\tmap\nU\tr2\t0\t150\t\n", encoding="utf-8")
+        out = tmp_path / "preds.parquet"
+        args = argparse.Namespace(
+            benchmark_cmd="parse-baseline", tool="kraken2", input=str(k2),
+            registry="r.json", output=str(out))
+        with patch("taxotreeset.io.registry.NCBIRegistry") as mreg:
+            mreg.return_value.registry = {
+                "lineages": {"T2": [{"taxid": "T2", "rank": "species"}]}}
+            benchmark.run(args)
+        rows = {r["read_id"]: r for r in pq.read_table(str(out)).to_pylist()}
+        assert rows["r1"]["predicted_taxid"] == "T2"
+        assert rows["r1"]["predicted_rank"] == "species"
+        assert rows["r2"]["predicted_taxid"] == ""   # unclassified -> abstain
+
     def test_single_level_and_stop_at_are_mutually_exclusive(self):
         # The help promises the two cannot be combined; argparse rejects the
         # combination up front (exit 2) instead of a deep run_pipeline ValueError.

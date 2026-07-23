@@ -565,8 +565,23 @@ outcome cases + aggregation + CSV) + 2 CLI + 1 integration (full P1→P2→P4 lo
 classifier scores 1.0 correct, a deeper-wrong one scores 1.0 over-commit). Suite 1074.
 
 Files: `benchmark/scorer.py` (new), `cli/benchmark.py`, `benchmark/__init__.py`.
-**Next: P3 long-noisy read track** (indel/homopolymer error model on longer windows), then
-P5 retained-only Kraken2/Centrifuge baselines scored by the same harness.
+
+**P5 — DONE (2026-07-23, kraken2): retained-only baseline glue.** New `benchmark/baselines.py`:
+`export_retained_reference` writes the reference genomes with **held-out clades excluded** (a
+taxid-labeled FASTA `>seq|kraken:taxid|<taxid>` + seqid->taxid map) so the baseline's index faces
+the same open-set condition as the model; `parse_kraken2_output` converts the tool's per-read
+`C|U <read_id> <taxid> …` output into the same `read_id -> (taxid, rank)` predictions the scorer
+grades (unclassified / taxid 0 -> abstain). New `taxotreeset benchmark export-refs` and
+`benchmark parse-baseline` subcommands; the tool's index build + classify run in between (user-side,
+documented in the spec). So the k-mer baseline's native LCA back-off is scored on exactly the same
+`ρ*` footing as the model — the head-to-head the literature skips. Tests: 6 unit (rank map, export
+excludes held-out / FASTA format / skips, parser classified-vs-abstain/malformed) + 3 CLI. Suite
+1082.
+
+Files: `benchmark/baselines.py` (new), `cli/benchmark.py`, `benchmark/__init__.py`.
+**Remaining: P3 long-noisy read track** (indel/homopolymer error model on longer windows) +
+Centrifuge parser + a FASTA/FASTQ dump of the eval reads for the tools. The benchmark's core loop
+(generate → label → score, with a k-mer baseline) is complete.
 
 ---
 
