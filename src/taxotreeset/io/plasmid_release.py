@@ -11,19 +11,25 @@ pipeline needs: the accession (``VERSION``), the host TaxID (the ``source``
 feature's ``/db_xref="taxon:NNN"``), the organism name, and the sequence
 (``ORIGIN``).
 
-This module is the tool-free acquisition primitive (P9): it parses a GBFF stream
-into :class:`PlasmidRecord`\\ s and adapts each into the synthetic *assembly
-report* shape the discovery registration path already consumes, so the plasmid
-branch reuses the existing lineage-resolution + tree-building cascade unchanged
-(``core/orchestrator.py``). Fetching the release files and ingesting the
-sequences into the vault live alongside it; see ``docs/BACKLOG.md`` P9.
+This module is the tool-free acquisition primitive (P9). It covers the whole
+release path: :func:`fetch_release` downloads the release's GBFF files (md5-
+verified, resumable), :func:`iter_release_records` / :func:`parse_gbff_records`
+stream them into :class:`PlasmidRecord`\\ s, :func:`ingest_records_to_vault`
+writes the sequences into the LMDB vault, and :func:`record_to_report` adapts
+each record into the synthetic *assembly report* shape the discovery
+registration path already consumes — so the plasmid branch reuses the existing
+lineage-resolution + tree-building cascade unchanged (``core/orchestrator.py``).
+See ``docs/BACKLOG.md`` P9.
 """
 
 import glob
 import gzip
+import hashlib
 import logging
 import os
 import re
+import urllib.error
+import urllib.request
 import zlib
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -39,6 +45,16 @@ logger = logging.getLogger("TaxoTreeSet.IO.PlasmidRelease")
 # buffered as one giant uncommitted transaction (mirrors the downloader, which
 # commits per accession batch rather than per run).
 _INGEST_COMMIT_EVERY = 1000
+
+# RefSeq plasmid release location + layout. The release ships a *.files.installed
+# manifest (``<md5>  <path>`` pairs) alongside the data files; the directory HTML
+# listing is the fallback when the manifest cannot be read.
+_RELEASE_BASE_URL = "https://ftp.ncbi.nlm.nih.gov/refseq/release/plasmid/"
+_MANIFEST_NAME = "plasmid.files.installed"
+_GBFF_SUFFIX = ".genomic.gbff.gz"
+_MD5_RE = re.compile(r"^[0-9a-f]{32}$")
+_HREF_RE = re.compile(r'href="(plasmid[^"?/]*\.genomic\.gbff\.gz)"')
+_DOWNLOAD_CHUNK = 1 << 20  # 1 MiB streaming chunk
 
 # The host TaxID lives in the source feature's /db_xref="taxon:NNN"; it is the
 # first taxon db_xref in a record (source is the first feature), so a plain
@@ -73,6 +89,159 @@ class PlasmidRecord:
     organism: str
     length: int
     sequence: str
+
+
+def fetch_release(
+    dest_dir: str,
+    base_url: str = _RELEASE_BASE_URL,
+    retries: int = 3,
+    timeout: int = 60,
+) -> str:
+    """Download the RefSeq plasmid release GBFF files into ``dest_dir``.
+
+    Idempotent and resumable: each file is checksummed against the release
+    manifest and skipped when already present and valid, so an interrupted sync
+    resumes on the next run without re-downloading complete files. Downloads
+    stream to a ``.part`` sibling and are renamed only after a full read (and md5
+    match when known), so an interrupted transfer never leaves a truncated file
+    the parser would trust.
+
+    Args:
+        dest_dir: Directory to sync the release into (created if absent).
+        base_url: Release directory URL (default the NCBI RefSeq plasmid release).
+        retries: Per-file download attempts before giving up.
+        timeout: Per-request socket timeout in seconds.
+
+    Returns:
+        ``dest_dir`` (for chaining into :func:`iter_release_records`).
+
+    Raises:
+        RuntimeError: If a file fails to download after ``retries`` attempts.
+    """
+    if not base_url.endswith("/"):
+        base_url += "/"
+    os.makedirs(dest_dir, exist_ok=True)
+
+    entries = _list_release_gbff(base_url, timeout)
+    if not entries:
+        logger.warning(
+            "No %s files found at %s — nothing to fetch.", _GBFF_SUFFIX, base_url)
+        return dest_dir
+
+    logger.info(
+        "RefSeq plasmid release: syncing %d GBFF file(s) into %s",
+        len(entries), dest_dir,
+    )
+    for filename, md5 in entries:
+        target = os.path.join(dest_dir, filename)
+        if _is_up_to_date(target, md5):
+            logger.info("Up to date, skipping %s", filename)
+            continue
+        _download_file(base_url + filename, target, md5, retries, timeout)
+    return dest_dir
+
+
+def _list_release_gbff(base_url: str, timeout: int) -> list[tuple[str, str | None]]:
+    """Enumerate the release's GBFF files as ``(filename, md5-or-None)`` pairs.
+
+    Prefers the ``*.files.installed`` manifest (gives checksums for verified,
+    resumable downloads); falls back to scraping the directory HTML listing when
+    the manifest is unreadable or lists no GBFF files.
+    """
+    manifest = _fetch_text(base_url + _MANIFEST_NAME, timeout)
+    if manifest is not None:
+        entries = _parse_manifest(manifest)
+        if entries:
+            return entries
+    listing = _fetch_text(base_url, timeout)
+    if listing is not None:
+        return [(name, None) for name in _parse_html_listing(listing)]
+    return []
+
+
+def _parse_manifest(text: str) -> list[tuple[str, str | None]]:
+    """Parse a RefSeq ``*.files.installed`` manifest into GBFF (name, md5) pairs.
+
+    The two columns are a 32-hex-char md5 and a path; their order varies across
+    releases, so the md5 is identified by shape rather than position. Only
+    ``*.genomic.gbff.gz`` entries are kept.
+    """
+    entries: list[tuple[str, str | None]] = []
+    for line in text.splitlines():
+        tokens = line.split()
+        md5 = next((t for t in tokens if _MD5_RE.match(t)), None)
+        name = next(
+            (os.path.basename(t) for t in tokens if not _MD5_RE.match(t)), None)
+        if name and name.endswith(_GBFF_SUFFIX):
+            entries.append((name, md5))
+    return entries
+
+
+def _parse_html_listing(html: str) -> list[str]:
+    """GBFF filenames linked in an FTP directory's autoindex HTML listing."""
+    return sorted(set(_HREF_RE.findall(html)))
+
+
+def _fetch_text(url: str, timeout: int) -> str | None:
+    """Fetch a URL as text, or None when it cannot be retrieved."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return response.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, OSError) as exc:
+        logger.debug("Could not fetch %s: %s", url, exc)
+        return None
+
+
+def _is_up_to_date(target: str, md5: str | None) -> bool:
+    """True when ``target`` exists and matches ``md5`` (or has no checksum)."""
+    if not os.path.exists(target):
+        return False
+    if md5 is None:
+        return True  # present but no checksum to verify against — trust it
+    return _file_md5(target) == md5
+
+
+def _file_md5(path: str) -> str:
+    # md5 here is an integrity check against the release manifest, not security.
+    digest = hashlib.md5()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(_DOWNLOAD_CHUNK), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _download_file(
+    url: str, target: str, md5: str | None, retries: int, timeout: int,
+) -> None:
+    """Stream ``url`` to ``target`` with retries and md5 verification."""
+    part = target + ".part"
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            _stream_to_file(url, part, timeout)
+            if md5 is not None and _file_md5(part) != md5:
+                raise OSError(f"md5 mismatch for {os.path.basename(target)}")
+            os.replace(part, target)
+            logger.info("Downloaded %s", os.path.basename(target))
+            return
+        except (urllib.error.URLError, OSError) as exc:
+            last_exc = exc
+            logger.warning(
+                "Download attempt %d/%d for %s failed: %s",
+                attempt, retries, os.path.basename(target), exc,
+            )
+    if os.path.exists(part):
+        os.remove(part)
+    raise RuntimeError(f"Failed to download {url} after {retries} attempts: {last_exc}")
+
+
+def _stream_to_file(url: str, part: str, timeout: int) -> None:
+    """Stream a URL to a file in chunks (never holds the whole file in memory)."""
+    with urllib.request.urlopen(url, timeout=timeout) as response, open(
+        part, "wb"
+    ) as out:
+        for chunk in iter(lambda: response.read(_DOWNLOAD_CHUNK), b""):
+            out.write(chunk)
 
 
 def iter_release_records(release_dir: str) -> Iterator[PlasmidRecord]:

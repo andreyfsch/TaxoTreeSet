@@ -13,10 +13,14 @@ from taxotreeset import paths
 from taxotreeset.logging_utils import setup_logging
 from taxotreeset.core.orchestrator import DiscoveryOrchestrator
 from taxotreeset.io.plasmid_release import (
+    fetch_release,
     ingest_records_to_vault,
     iter_release_records,
 )
 from taxotreeset.io.registry import NCBIRegistry
+
+# Sub-directory of the vault where the RefSeq plasmid release is synced by default.
+_PLASMID_RELEASE_SUBDIR = "refseq_plasmid"
 
 # Scope key the plasmid host tree registers under. It has no NCBI TaxID (plasmid
 # is not a taxon); a user may add a "plasmids" scope with redirections to
@@ -65,14 +69,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "(single-child sub-ranks are still collapsed by passthroughs).",
     )
     parser.add_argument(
-        "--plasmid-release",
-        type=str,
-        default=None,
-        metavar="DIR",
-        help="Bottom-up plasmid discovery: instead of walking --taxon-id, parse "
-        "the RefSeq plasmid release GBFF files in DIR (refseq/release/plasmid/, "
-        "fetched separately), ingest each plasmid sequence into the vault, and "
-        "register it under its host organism's lineage. Requires --vault.",
+        "--plasmids",
+        action="store_true",
+        help="Bottom-up plasmid discovery instead of walking --taxon-id: fetch "
+        "the RefSeq plasmid release, ingest each plasmid sequence into the vault, "
+        "and register it under its host organism's lineage. Requires --vault.",
     )
     parser.add_argument(
         "--vault",
@@ -80,8 +81,22 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         metavar="DIR",
         help="Vault directory to ingest plasmid sequences into (the LMDB is "
-        "<DIR>/sequences.lmdb, matching the downloader). Required with "
-        "--plasmid-release.",
+        "<DIR>/sequences.lmdb, matching the downloader). Required with --plasmids.",
+    )
+    parser.add_argument(
+        "--plasmid-release",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help="Where to store/read the RefSeq plasmid release files (default: "
+        "<vault>/" + _PLASMID_RELEASE_SUBDIR + "). Reused across runs (the fetch "
+        "is resumable and md5-verified).",
+    )
+    parser.add_argument(
+        "--no-fetch",
+        action="store_true",
+        help="With --plasmids, skip the download and use the release files "
+        "already present in the release directory (offline / pre-fetched).",
     )
 
 
@@ -124,7 +139,7 @@ def run(args: argparse.Namespace) -> None:
         logger.error("Error reading the mapping JSON file: %s", exc)
         sys.exit(1)
 
-    if args.plasmid_release is not None:
+    if args.plasmids:
         _validate_plasmid_args(args, logger)
 
     try:
@@ -138,7 +153,7 @@ def run(args: argparse.Namespace) -> None:
             all_ranks=args.all_ranks,
         )
 
-        if args.plasmid_release is not None:
+        if args.plasmids:
             root_label = _run_plasmid_discovery(orchestrator, args, logger)
         else:
             logger.info("Starting taxonomic scan for TaxID: %s", args.taxon_id)
@@ -160,13 +175,20 @@ def run(args: argparse.Namespace) -> None:
 
 def _validate_plasmid_args(args: argparse.Namespace, logger: logging.Logger) -> None:
     """Fail fast on an invalid plasmid-discovery invocation."""
-    if not os.path.isdir(args.plasmid_release):
-        logger.error(
-            "Plasmid release directory missing at %s", args.plasmid_release)
-        sys.exit(1)
     if not args.vault:
-        logger.error("--plasmid-release requires --vault (where to ingest sequences).")
+        logger.error("--plasmids requires --vault (where to ingest sequences).")
         sys.exit(1)
+    if args.no_fetch and not os.path.isdir(_plasmid_release_dir(args)):
+        logger.error(
+            "--no-fetch set but the release directory is missing at %s",
+            _plasmid_release_dir(args))
+        sys.exit(1)
+
+
+def _plasmid_release_dir(args: argparse.Namespace) -> str:
+    """The release directory: the override, else a default under the vault."""
+    return args.plasmid_release or os.path.join(
+        args.vault, _PLASMID_RELEASE_SUBDIR)
 
 
 def _run_plasmid_discovery(
@@ -174,17 +196,19 @@ def _run_plasmid_discovery(
     args: argparse.Namespace,
     logger: logging.Logger,
 ) -> str:
-    """Parse + ingest the RefSeq plasmid release, then register by host lineage.
+    """Fetch + ingest the RefSeq plasmid release, then register by host lineage.
 
     Returns a human-readable label for the run summary.
     """
+    release_dir = _plasmid_release_dir(args)
+    if not args.no_fetch:
+        logger.info("Fetching the RefSeq plasmid release into %s", release_dir)
+        fetch_release(release_dir)
+
     lmdb_path = os.path.join(args.vault, "sequences.lmdb")
-    logger.info(
-        "Ingesting RefSeq plasmid release from %s into %s",
-        args.plasmid_release, lmdb_path,
-    )
+    logger.info("Ingesting plasmid sequences from %s into %s", release_dir, lmdb_path)
     reports = ingest_records_to_vault(
-        iter_release_records(args.plasmid_release), lmdb_path)
+        iter_release_records(release_dir), lmdb_path)
     orchestrator.discover_from_reports(
         reports,
         root_id_str=_PLASMID_SCOPE_KEY,

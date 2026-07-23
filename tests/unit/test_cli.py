@@ -274,8 +274,10 @@ class TestDiscoverRun:
             registry=str(tmp_path / "registry.json"),
             reset=reset,
             all_ranks=False,
+            plasmids=False,
             plasmid_release=None,
             vault=None,
+            no_fetch=False,
             log_level="INFO",
         )
 
@@ -324,34 +326,52 @@ class TestDiscoverRun:
             discover.run(args)
         assert not registry_path.exists()
 
-    def test_plasmid_release_path_ingests_and_registers(self, tmp_path):
-        release_dir = tmp_path / "release"
-        release_dir.mkdir()
+    def test_plasmids_path_fetches_ingests_and_registers(self, tmp_path):
         args = self._make_args(tmp_path)
-        args.plasmid_release = str(release_dir)
+        args.plasmids = True
         args.vault = str(tmp_path / "vault")
         with (
             patch("taxotreeset.cli.discover.setup_logging"),
             patch("taxotreeset.cli.discover.NCBIRegistry"),
             patch("taxotreeset.cli.discover.DiscoveryOrchestrator") as mock_orch,
+            patch("taxotreeset.cli.discover.fetch_release") as mock_fetch,
+            patch("taxotreeset.cli.discover.iter_release_records", return_value=iter([])),
             patch(
                 "taxotreeset.cli.discover.ingest_records_to_vault",
                 return_value=[{"accession": "NZ_P1.1"}],
             ) as mock_ingest,
         ):
             discover.run(args)
+        # Auto-fetches into <vault>/refseq_plasmid, then ingests + registers.
+        mock_fetch.assert_called_once()
+        assert mock_fetch.call_args.args[0].endswith("refseq_plasmid")
         mock_ingest.assert_called_once()
-        # Takes the bottom-up path, not the taxon walk.
         mock_orch.return_value.discover_from_root.assert_not_called()
         call = mock_orch.return_value.discover_from_reports.call_args
         assert call.args[0] == [{"accession": "NZ_P1.1"}]
         assert call.kwargs["vault_lmdb_path"].endswith("sequences.lmdb")
 
-    def test_plasmid_release_requires_vault(self, tmp_path):
-        release_dir = tmp_path / "release"
-        release_dir.mkdir()
+    def test_plasmids_no_fetch_skips_download(self, tmp_path):
+        release_dir = tmp_path / "vault" / "refseq_plasmid"
+        release_dir.mkdir(parents=True)
         args = self._make_args(tmp_path)
-        args.plasmid_release = str(release_dir)
+        args.plasmids = True
+        args.no_fetch = True
+        args.vault = str(tmp_path / "vault")
+        with (
+            patch("taxotreeset.cli.discover.setup_logging"),
+            patch("taxotreeset.cli.discover.NCBIRegistry"),
+            patch("taxotreeset.cli.discover.DiscoveryOrchestrator"),
+            patch("taxotreeset.cli.discover.fetch_release") as mock_fetch,
+            patch("taxotreeset.cli.discover.iter_release_records", return_value=iter([])),
+            patch("taxotreeset.cli.discover.ingest_records_to_vault", return_value=[]),
+        ):
+            discover.run(args)
+        mock_fetch.assert_not_called()
+
+    def test_plasmids_requires_vault(self, tmp_path):
+        args = self._make_args(tmp_path)
+        args.plasmids = True
         args.vault = None
         with (
             patch("taxotreeset.cli.discover.setup_logging"),

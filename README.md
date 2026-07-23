@@ -371,26 +371,32 @@ Key options:
 
 A plasmid is **not a taxon** — there is no NCBI TaxID that roots all plasmids;
 every RefSeq plasmid record is taxonomically assigned to its **host** organism.
-So plasmids cannot be discovered by walking `--taxon-id` top-down. Instead,
-point `discover` at a local copy of the curated
+So plasmids cannot be discovered by walking `--taxon-id` top-down. With
+`--plasmids`, `discover` instead **fetches the curated
 [RefSeq plasmid release](https://ftp.ncbi.nlm.nih.gov/refseq/release/plasmid/)
-(its GenBank flat files, `plasmid.N.genomic.gbff.gz`, fetched separately — no
-full-Bacteria crawl). Each record's sequence is ingested into the vault and the
-record is registered under its host organism's lineage, so only hosts that
-actually carry plasmids are materialized (a sparse subtree). This is
-*host prediction* for plasmids, not intrinsic plasmid typing.
+for you** (its GenBank flat files, `plasmid.N.genomic.gbff.gz` — no full-Bacteria
+crawl), ingests each plasmid sequence into the vault, and registers it under its
+host organism's lineage, so only hosts that actually carry plasmids are
+materialized (a sparse subtree). This is *host prediction* for plasmids, not
+intrinsic plasmid typing.
 
 ```
-python3 -m taxotreeset discover \
-  --plasmid-release /data/refseq_plasmid/ \
+python3 -m taxotreeset discover --plasmids \
   --vault /data/vault \
   --registry registry_plasmids.json
 ```
 
+The release is a multi-GB download of the whole curated plasmid collection; it is
+synced into `<vault>/refseq_plasmid` by default (override with
+`--plasmid-release`), md5-verified and resumable, so an interrupted run continues
+where it left off and a rerun re-downloads nothing.
+
 | Option              | Purpose                                                              |
 |---------------------|----------------------------------------------------------------------|
-| `--plasmid-release` | Directory of RefSeq plasmid release GBFF files (`.gbff` / `.gbff.gz`) |
-| `--vault`           | Vault to ingest plasmid sequences into (LMDB at `<DIR>/sequences.lmdb`); required with `--plasmid-release` |
+| `--plasmids`        | Bottom-up plasmid discovery: fetch + ingest + register by host. Requires `--vault` |
+| `--vault`           | Vault to ingest plasmid sequences into (LMDB at `<DIR>/sequences.lmdb`) |
+| `--plasmid-release` | Where to store/read the release files (default `<vault>/refseq_plasmid`) |
+| `--no-fetch`        | Skip the download; use release files already present (offline / pre-fetched) |
 
 Generation then runs on the resulting registry like any other scope. Combined
 with `--binary-only`, the plasmid host tree's root becomes a "plasmid

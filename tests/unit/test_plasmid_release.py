@@ -1,10 +1,20 @@
 """Tests for the RefSeq plasmid release GBFF parser (P9)."""
 
 import gzip
+import hashlib
+import io
+import os
+from unittest.mock import patch
+
+import pytest
 
 from taxotreeset.dataset.utils import _read_single_sequence
+from taxotreeset.io import plasmid_release
 from taxotreeset.io.plasmid_release import (
     PlasmidRecord,
+    _parse_html_listing,
+    _parse_manifest,
+    fetch_release,
     ingest_records_to_vault,
     iter_release_records,
     parse_gbff_records,
@@ -130,3 +140,71 @@ class TestIterReleaseDir:
 
     def test_empty_dir_yields_nothing(self, tmp_path):
         assert list(iter_release_records(str(tmp_path))) == []
+
+
+class TestManifestParsing:
+    def test_parses_md5_first_column_order(self):
+        text = (
+            "d41d8cd98f00b204e9800998ecf8427e  plasmid.1.genomic.gbff.gz\n"
+            "d41d8cd98f00b204e9800998ecf8427e  plasmid.1.protein.faa.gz\n"  # dropped
+        )
+        assert _parse_manifest(text) == [
+            ("plasmid.1.genomic.gbff.gz", "d41d8cd98f00b204e9800998ecf8427e")]
+
+    def test_parses_filename_first_column_order(self):
+        text = "plasmid.2.genomic.gbff.gz\td41d8cd98f00b204e9800998ecf8427e\n"
+        assert _parse_manifest(text) == [
+            ("plasmid.2.genomic.gbff.gz", "d41d8cd98f00b204e9800998ecf8427e")]
+
+    def test_manifest_without_checksum_yields_none_md5(self):
+        assert _parse_manifest("plasmid.3.genomic.gbff.gz\n") == [
+            ("plasmid.3.genomic.gbff.gz", None)]
+
+    def test_html_listing_extracts_gbff_links(self):
+        html = (
+            '<a href="plasmid.1.genomic.gbff.gz">x</a>'
+            '<a href="plasmid.1.protein.faa.gz">y</a>'
+            '<a href="plasmid.2.genomic.gbff.gz">z</a>'
+        )
+        assert _parse_html_listing(html) == [
+            "plasmid.1.genomic.gbff.gz", "plasmid.2.genomic.gbff.gz"]
+
+
+class TestFetchRelease:
+    def _fake_urlopen(self, manifest, gbff_name, gbff_bytes):
+        def opener(url, timeout=None):
+            if url.endswith("plasmid.files.installed"):
+                return io.BytesIO(manifest.encode("utf-8"))
+            if url.endswith(gbff_name):
+                return io.BytesIO(gbff_bytes)
+            raise plasmid_release.urllib.error.URLError("404")
+        return opener
+
+    def test_downloads_verifies_and_is_resumable(self, tmp_path):
+        gbff_name = "plasmid.1.genomic.gbff.gz"
+        gbff_bytes = gzip.compress(_GBFF.encode("utf-8"))
+        md5 = hashlib.md5(gbff_bytes).hexdigest()
+        manifest = f"{md5}  {gbff_name}\n"
+        dest = str(tmp_path / "release")
+
+        opener = self._fake_urlopen(manifest, gbff_name, gbff_bytes)
+        with patch.object(plasmid_release.urllib.request, "urlopen", opener):
+            fetch_release(dest, base_url="http://x/")
+            # md5 verified + renamed into place; parses end-to-end.
+            recs = list(iter_release_records(dest))
+            assert len(recs) == 1 and recs[0].host_taxid == "562"
+
+            # Rerun is a no-op: the file is up to date (md5 matches), no .part left.
+            fetch_release(dest, base_url="http://x/")
+        assert not os.path.exists(os.path.join(dest, gbff_name + ".part"))
+
+    def test_md5_mismatch_is_retried_then_raises(self, tmp_path):
+        gbff_name = "plasmid.1.genomic.gbff.gz"
+        gbff_bytes = b"corrupt"
+        manifest = f"{'0' * 32}  {gbff_name}\n"  # wrong md5 -> never verifies
+        dest = str(tmp_path / "release")
+
+        opener = self._fake_urlopen(manifest, gbff_name, gbff_bytes)
+        with patch.object(plasmid_release.urllib.request, "urlopen", opener):
+            with pytest.raises(RuntimeError):
+                fetch_release(dest, base_url="http://x/", retries=2)

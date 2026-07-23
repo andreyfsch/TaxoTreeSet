@@ -369,11 +369,14 @@ Rejected/deferred alternatives (the field's plasmid schemes all need a reference
    + 2 CLI tests. README Stage-1 "Plasmids: bottom-up discovery" subsection.
 
 **Effort.** Moderate — **DONE (2026-07-23)**. Multi-root plumbing (piece 1) + plasmid acquisition
-(piece 2) + accession-driven discovery (piece 3) all shipped, CPU-only. **What remains is only an
-actual production run** (fetch the RefSeq plasmid release to `/mnt/f`, run `discover
---plasmid-release`, then `generate --binary-only` on the host tree) — no more code. Suite 1122.
-Deferred/future (option 2 in the design): ingest a precomputed PTU/replicon table for intrinsic
-plasmid typing instead of host-taxonomy labeling.
+(piece 2) + accession-driven discovery (piece 3) all shipped, CPU-only. **The release download is
+automatic** (`fetch_release`: md5-verified + resumable, synced into `<vault>/refseq_plasmid` by
+default) — `discover --plasmids --vault <DIR>` fetches + ingests + registers in one command, like
+`--taxon-id` does for viruses (no manual pre-download; `--no-fetch` uses a pre-fetched copy). **What
+remains is only an actual production run** (`discover --plasmids` → `generate --binary-only` on the
+host tree; downloads to `/mnt/f`) — no more code. Suite 1131. Deferred/future (option 2 in the
+design): ingest a precomputed PTU/replicon table for intrinsic plasmid typing instead of
+host-taxonomy labeling.
 
 Files: `io/plasmid_release.py` (new; release parser + vault ingester), `core/orchestrator.py`
 (`discover_from_reports`), `cli/discover.py` (`--plasmid-release`/`--vault`), `cli/generate.py`
