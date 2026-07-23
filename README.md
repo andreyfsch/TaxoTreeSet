@@ -313,6 +313,34 @@ It is applied by the auto-sync (with `--no-sync`, the existing lineages are used
 as-is); note the sync **overwrites** the registry's cached lineages, so a later run
 without `--all-ranks` reverts to canonical.
 
+### Clade-holdout open-set benchmark (optional)
+
+![Clade-holdout benchmark: a whole clade B is withheld from training and its genomes become labeled novel reads; a classifier is scored on whether it backs off to the deepest retained ancestor rho-star instead of over-committing to a retained sibling](docs/figures/clade_holdout.png)
+
+The splits above measure *in-distribution* generalization — the classifier has seen
+the target clade in training. The regime that actually justifies learned models over
+exact matching is **open-set novelty**: a read from a clade with no representative in
+the reference. TaxoTreeSet can generate that condition directly, so a downstream
+classifier can be evaluated on it.
+
+Passing `--holdout-clades <taxids>` (explicit) or `--holdout-rank genus
+--holdout-fraction f` (a seeded sample) to `generate` **withholds whole clades from
+training** and writes `benchmark_manifest_<scope>.json`. For each held-out clade the
+manifest records its members, its **expected commit rank `ρ*`** — the deepest ancestor
+that survives pruning, i.e. the rank a correct classifier should *back off to* for a
+novel read — and its divergence to the nearest retained relative (a MinHash/Mash ANI
+proxy, binned). The training set that comes out excludes those clades entirely; pair it
+with `--no-sync` so the reference snapshot is frozen.
+
+`taxotreeset benchmark build-eval --manifest … --registry … --output eval.parquet`
+then turns the held-out genomes into a labeled set of **novel reads** (fixed-length,
+short-read track), each row carrying its true lineage, its held-out clade, `ρ*`, and the
+distance bin. That is the ground truth for grading open-set behavior: a novel read is
+**correct** only if the classifier commits at `ρ*` (backs off), and **over-commits** if
+it lands on a retained sibling. Reporting is per rank × per ANI-distance bin, against a
+retained-only exact-match baseline. The generation flags are opt-in and off by default,
+so the production tool still trains every head.
+
 The figures above are generated, reproducibly and from no external data, by
 `python docs/make_figures.py`.
 
@@ -368,6 +396,7 @@ Key options:
 | `--no-cluster-aware-split` | (on)        | Cluster-aware splitting is **on by default** (MinHash cluster-stratified + block-stratified windows keep train/val/test representative for non-i.i.d. genomes; self-verifying). This flag opts out; tune the default with `--cluster-jaccard-threshold` / `--cluster-min-genomes` / `--cluster-min-frac` |
 | `--all-ranks`            | off           | Resolve lineages at full NCBI granularity (sub-ranks/clades), not just the 8 canonical ranks |
 | `--binary-only`          | off           | One belongs/not-belongs head per node instead of multi-class heads (with `--binary-budget`, `--extract-batch-size`) |
+| `--holdout-clades` / `--holdout-rank` | off | Open-set benchmark: withhold whole clades from training and write `benchmark_manifest_<scope>.json` (explicit TaxIDs, or a `--holdout-fraction` sample at a rank; `--holdout-seed`). Pair with `--no-sync`. See [clade-holdout benchmark](#clade-holdout-open-set-benchmark-optional) |
 
 Behind these options, the per-head mechanics are illustrated in
 [How it works](#how-it-works): `--root` / `--stop-at` / `--single-level` /
@@ -407,6 +436,21 @@ python3 -m taxotreeset separability data/datasets --csv separability.csv
 | `--max-test`  | 3000    | Cap on test rows per head                             |
 | `--csv`       | —       | Also write an aggregate CSV across all heads          |
 | `--no-write`  | off     | Report only; do not modify the `label_map.json` files |
+
+### Optional: open-set benchmark
+
+After a holdout run (`generate --holdout-*`, above), `taxotreeset benchmark build-eval`
+turns the withheld clades into a labeled set of novel reads for open-set evaluation:
+
+```
+python3 -m taxotreeset benchmark build-eval \
+  --manifest benchmark_manifest_viruses.json \
+  --registry registry.json --output eval_reads.parquet \
+  --read-length 150 --reads-per-genome 200
+```
+
+Each read carries its true lineage, its held-out clade, the expected commit rank `ρ*`,
+and its divergence bin — see [clade-holdout benchmark](#clade-holdout-open-set-benchmark-optional).
 
 ## Output
 

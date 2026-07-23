@@ -1018,6 +1018,88 @@ def fig_cluster_aware_split() -> None:
     plt.close(fig)
 
 
+def fig_clade_holdout() -> None:
+    """Clade-holdout open-set benchmark: withhold a clade, score back-off to rho*.
+
+    Left: a whole clade (B) is pruned from training; its genomes become a labeled
+    eval set of novel reads, each tagged with rho* (the deepest RETAINED ancestor,
+    F). Right: the ground truth those labels encode -- a novel read is correct only
+    if it backs off to rho*, and over-commits if it lands on a retained sibling.
+    """
+    fig, ax = _canvas(13, 7.0)
+    ax.text(50, 96, "Clade-holdout open-set benchmark: withhold a clade, score "
+            "back-off to ρ*", ha="center", fontsize=12, weight="bold")
+    ax.plot([50, 50], [4, 90], color="#dddddd", lw=1.0, ls=":")
+
+    def edge(p1, p2):
+        ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color="#cccccc", lw=1.3, zorder=0)
+
+    def dot(cx, cy, color):
+        ax.add_patch(Circle((cx, cy), 1.2, fc=LIGHT.get(color, "#eee"),
+                            ec=color, lw=1.1, zorder=3))
+
+    # ---- LEFT: hold out clade B ----
+    ax.text(25, 89, "1.  Withhold a clade from training",
+            ha="center", fontsize=9, weight="bold", color=BLUE)
+    root, F = (25, 81), (25, 65)
+    A, B, C = (12, 48), (25, 48), (38, 48)
+    for child in (A, B, C):
+        edge(F, child)
+    edge(root, F)
+    _node(ax, *root, "root", GREY, r=2.6)
+    _node(ax, *F, "F", BLUE, r=3.6)
+    _node(ax, *A, "A", GREEN, r=3.0)
+    _node(ax, *C, "C", GREEN, r=3.0)
+    _node(ax, *B, "B", GREY, r=3.0, dashed=True)
+    ax.text(25, 42.5, "withheld", ha="center", fontsize=6.6, color=RED,
+            style="italic")
+    for gx in (10, 14):
+        dot(gx, 40, GREEN)
+    for gx in (36, 40):
+        dot(gx, 40, GREEN)
+    for gx in (21.5, 25, 28.5):
+        dot(gx, 40, PINK)
+    # rho* callout on F
+    ax.annotate("ρ* = deepest\nretained ancestor", xy=(28.5, 65),
+                xytext=(40, 70), fontsize=6.6, color="#333333", va="center",
+                arrowprops=dict(arrowstyle="->", color="#888888", lw=1.1))
+    # outputs
+    _box(ax, 3, 15, 20, 9, "Training set\n(F, A, C — B pruned)", ec=GREEN,
+         fontsize=7.2)
+    _box(ax, 27, 15, 20, 9, "Eval set: novel reads\nfrom B  (label ρ* = F)",
+         ec=PINK, fontsize=7.2)
+    _arrow(ax, (13, 38.5), (13, 24.3), color="#bcd0e6", lw=1.2)
+    _arrow(ax, (37, 38.5), (37, 24.3), color="#bcd0e6", lw=1.2)
+    _curve(ax, (25, 38.5), (37, 24.3), "#e0b0c4", rad=0.25)
+
+    # ---- RIGHT: score a novel read ----
+    ax.text(75, 89, "2.  Score a novel read from B",
+            ha="center", fontsize=9, weight="bold", color=PINK)
+    _box(ax, 63, 76, 24, 8, "novel read (from B)", ec=PINK, fontsize=7.4)
+    _arrow(ax, (75, 76), (75, 68), color="#bbbbbb", lw=1.4)
+    # correct: back off to rho*
+    _box(ax, 55, 55, 40, 9,
+         "✓  commit at ρ* = F   (correct back-off)", ec=GREEN,
+         fontsize=7.8)
+    # wrong: over-commit to a retained sibling
+    _box(ax, 55, 40, 40, 9,
+         "✗  commit at A or C   (over-commitment)", ec=RED, fontsize=7.8)
+    # too shallow
+    _box(ax, 55, 25, 40, 9,
+         "✗  abstain above F   (too shallow)", ec=GREY, fontsize=7.8)
+    _arrow(ax, (75, 68), (75, 64.3), color="#2e7d32", lw=1.4)
+    ax.text(75, 17, "reported per rank × per ANI-distance bin, vs a "
+            "retained-only\nk-mer baseline (Kraken2 / Centrifuge)",
+            ha="center", fontsize=6.6, style="italic", color="#555555")
+
+    ax.text(50, 8, "generate --holdout-rank genus --holdout-fraction f   →   "
+            "benchmark build-eval", ha="center", fontsize=7.0, color="#444444",
+            family="monospace")
+
+    fig.savefig(FIG / "clade_holdout.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     fig_taxotreeset()
     fig_generate_detail()
@@ -1030,6 +1112,7 @@ if __name__ == "__main__":
     fig_selective_download()
     fig_tree_of_heads()
     fig_cluster_aware_split()
+    fig_clade_holdout()
     print(f"Figures written to {FIG}/")
     for p in sorted(FIG.glob("*.png")):
         print(f"  {p.name}")
