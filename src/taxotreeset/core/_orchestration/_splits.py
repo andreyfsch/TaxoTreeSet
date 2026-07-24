@@ -279,6 +279,43 @@ def _block_stratified_windows(
     return emitted
 
 
+def _assign_stratified_hybrid(
+    tasks: list[dict],
+    class_index: int,
+    result: dict[str, list[dict]],
+    max_subseq_len: int,
+) -> None:
+    """Block-stratify dominant genomes across splits; whole-assign the rest.
+
+    Volume-aware whole-genome assignment (:func:`_assign_stratified`) can still
+    skew a split when a **single** genome's window volume exceeds a val-sized
+    share (``> _STRATIFIED_VAL_RATIO`` of the class total): it cannot sit whole in
+    val/test without overflowing, so it lands lopsided (the P13 residual, seen on
+    binary-head *negatives* dominated by one large external genome — e.g. SARS-CoV
+    at neg 86/7/7). Such genomes are instead **block-stratified** — their windows
+    spread across interleaved positional blocks, leakage-safe — so each contributes
+    ~70/15/15 on its own; the remaining (small) genomes are volume-bin-packed by
+    :func:`_assign_stratified`. Both subsets are independently balanced, so their
+    sum tracks 70/15/15. A dominant genome too short to block (``< _MIN_BLOCKS``)
+    falls back to whole assignment.
+
+    Only used for negatives (a negative genome may appear in several splits — it is
+    a non-member everywhere), never positives (whole-genome splitting is their
+    stricter leakage guarantee).
+    """
+    total = sum(task["n"] for task in tasks) or 1
+    threshold = _STRATIFIED_VAL_RATIO * total
+    regular: list[dict] = []
+    for task in tasks:
+        if task["n"] > threshold and _block_stratified_windows(
+            task, class_index, max_subseq_len, result
+        ):
+            continue  # dominant genome spread across splits
+        regular.append(task)
+    if regular:
+        _assign_stratified(regular, class_index, result)
+
+
 def _materialize_leaf_split(
     leaf_tasks: list[dict],
     class_index: int,
@@ -287,6 +324,7 @@ def _materialize_leaf_split(
     cluster_aware: bool = False,
     max_subseq_len: int = 2000,
     cluster_params: ClusterParams | None = None,
+    block_stratify_large: bool = False,
 ) -> dict[str, list[dict]]:
     """Split a single child's per-leaf tasks into train/val/test.
 
@@ -316,6 +354,10 @@ def _materialize_leaf_split(
             cluster-aware window-slicing path (so blocked windows keep full length).
         cluster_params: MinHash tuning knobs for the genome-level cluster-aware
             path; ``None`` uses the defaults.
+        block_stratify_large: When True (cluster-aware only), a genome whose window
+            volume would dominate a split is block-stratified across splits instead
+            of assigned whole — see :func:`_assign_stratified_hybrid`. Set for
+            *negatives*, whose pool can be dominated by one large external genome.
 
     Returns:
         Dictionary with 'train', 'val', 'test' keys; each value
@@ -331,18 +373,17 @@ def _materialize_leaf_split(
     rng.shuffle(shuffled)
 
     if len(shuffled) >= min_genomes_for_genome_split:
-        assigned = (
-            _cluster_stratified_split(
-                shuffled, class_index, min_genomes_for_genome_split,
-                cluster_params,
+        if cluster_aware and block_stratify_large:
+            _assign_stratified_hybrid(shuffled, class_index, result, max_subseq_len)
+        elif cluster_aware and (
+            assigned := _cluster_stratified_split(
+                shuffled, class_index, min_genomes_for_genome_split, cluster_params,
             )
-            if cluster_aware else None
-        )
-        if assigned is None:
-            _assign_stratified(shuffled, class_index, result)
-        else:
+        ) is not None:
             for split in _SPLITS:
                 result[split] = assigned[split]
+        else:
+            _assign_stratified(shuffled, class_index, result)
     else:
         for task in shuffled:
             if cluster_aware and _block_stratified_windows(

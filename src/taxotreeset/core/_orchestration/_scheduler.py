@@ -47,6 +47,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger("TaxoTreeSet.Core.GenerationOrchestrator")
 ui_logger = get_ui_logger()
 
+# The rank ``make_reject_bucket_node`` gives the reject child; it is the only
+# multi-class child that is a negative pool, so it (not the real classes) gets
+# the P13 block-stratify-large treatment.
+_REJECT_RANK: str = "virtual_reject"
+
 
 def _find_domain_node(
     tree_root: Node, domain_taxid: str | None
@@ -444,7 +449,8 @@ class _CascadeScheduler:
             pos_split = self.ctx._materialize_leaf_split(
                 pos_tasks, 1, rng, min_genomes_for_genome_split=4)
             neg_split = self.ctx._materialize_leaf_split(
-                neg_tasks, 0, rng, min_genomes_for_genome_split=4)
+                neg_tasks, 0, rng, min_genomes_for_genome_split=4,
+                block_stratify_large=True)
             parent_tasks = {s: pos_split[s] + neg_split[s] for s in _SPLITS}
             if not any(parent_tasks[s] for s in _SPLITS):
                 skipped += 1
@@ -995,10 +1001,13 @@ class _CascadeScheduler:
             if not leaf_tasks:
                 continue
 
+            # The reject child is the multi-class negative pool; block-stratify a
+            # genome that would dominate a split (P13), as for binary negatives.
             leaf_split = self.ctx._materialize_leaf_split(
                 leaf_tasks=leaf_tasks,
                 class_index=class_index,
                 rng=rng,
+                block_stratify_large=getattr(child, "rank", "") == _REJECT_RANK,
             )
 
             for split_name in _SPLITS:

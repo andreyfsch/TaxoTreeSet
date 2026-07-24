@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from bigtree import Node
 
+from taxotreeset.core._orchestration._splits import _materialize_leaf_split
 from taxotreeset.core.generation_orchestrator import (
     GenerationOrchestrator,
     _stratified_counts,
@@ -786,6 +787,49 @@ class TestMaterializeLeafSplitVolumeBalance:
             min_genomes_for_genome_split=4)
         seen = [t["header_id"] for s in ("train", "val", "test") for t in split[s]]
         assert len(seen) == len(set(seen)) == len(self._UNEQUAL)
+
+
+class TestBlockStratifyLargeNegatives:
+    """P13: a single dominant genome is block-stratified, not assigned whole."""
+
+    # One giant genome (5000 windows) dwarfs the rest — the SARS-like residual.
+    _NS = [5000, 300, 200, 100, 80, 60]
+
+    def _tasks(self):
+        tasks = []
+        for i, n in enumerate(self._NS):
+            task = {"fasta_path": "x", "header_id": f"g{i}", "n": n}
+            if n >= 1000:  # a length so the block path needs no vault read
+                task["length"] = 60000  # >> 6 * max_subseq_len
+            tasks.append(task)
+        return tasks
+
+    def _volumes(self, split):
+        total = sum(t["n"] for s in ("train", "val", "test") for t in split[s])
+        return {s: sum(t["n"] for t in split[s]) / total
+                for s in ("train", "val", "test")}
+
+    def _split(self, block_stratify_large, cluster_aware=True, seed=0):
+        return _materialize_leaf_split(
+            self._tasks(), class_index=0, rng=random.Random(seed),
+            min_genomes_for_genome_split=4, cluster_aware=cluster_aware,
+            max_subseq_len=100, block_stratify_large=block_stratify_large)
+
+    def test_dominant_genome_no_longer_skews_the_split(self):
+        for seed in range(6):
+            v = self._volumes(self._split(True, seed=seed))
+            assert 0.10 <= v["val"] <= 0.20, f"seed {seed}: val {v['val']:.2f}"
+            assert 0.10 <= v["test"] <= 0.20, f"seed {seed}: test {v['test']:.2f}"
+
+    def test_without_the_flag_the_giant_genome_still_dominates(self):
+        # b5ea511 volume-aware still can't divide one indivisible giant genome.
+        v = self._volumes(self._split(False))
+        assert v["train"] > 0.80
+
+    def test_flag_is_a_noop_without_cluster_aware(self):
+        # --no-cluster-aware-split keeps the plain whole-genome split.
+        v = self._volumes(self._split(True, cluster_aware=False))
+        assert v["train"] > 0.80
 
 
 # ---------------------------------------------------------------------------

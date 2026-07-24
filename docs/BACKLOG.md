@@ -686,7 +686,7 @@ Files: `benchmark/reliability.py` (new; annotator) + a `reliability` block in
 
 ---
 
-## 🟡 P13 — Block-stratify large negative genomes (finish the volume-split fix)
+## ✅ P13 — Block-stratify large negative genomes (finish the volume-split fix) — DONE
 
 **Context.** P-fix `b5ea511` made the genome-level split volume-aware
 (`_assign_stratified` bin-packs whole genomes by window volume, not genome count) —
@@ -710,6 +710,21 @@ Preserves the ≥1-per-split guarantee. Regenerate the 3 residual heads + re-ver
 
 Files: `core/_orchestration/_splits.py` (`_assign_stratified` / `_block_stratified_windows`).
 Related: P10 (cluster-aware split), the [[datagen-confounds]] Bug-3 note.
+
+**Done (2026-07-23, commit <pending>).** `_assign_stratified_hybrid` in `_splits.py`:
+a genome whose window volume exceeds a val-sized share (`> _STRATIFIED_VAL_RATIO` of
+the class total) is block-stratified across interleaved positional blocks (leakage-safe,
+each contributes ~70/15/15), the rest volume-bin-packed by `_assign_stratified`; both
+subsets independently balanced, so the sum tracks 70/15/15. Gated by a new
+`block_stratify_large` flag on `_materialize_leaf_split`, set **only for negatives**
+(binary `neg_split`, and the multi-class reject child detected by `rank ==
+virtual_reject`) — never positives, whose whole-genome split is the stricter leakage
+guarantee — and only under `--cluster-aware-split` (default on). **Validated on the
+SARS-like reproducer:** one genome = 87% of the reject volume → the split went 87/6/7
+(whole-genome) and is now **70/16/15**. Off for `--no-cluster-aware-split`. Tests:
+`TestBlockStratifyLargeNegatives` (balanced with the flag / still skewed without it /
+no-op without cluster-aware). Suite 1124. Regenerating the 3 residual heads (694009,
+864596, 2499674) picks it up on the next `--single-level` pass.
 
 ---
 

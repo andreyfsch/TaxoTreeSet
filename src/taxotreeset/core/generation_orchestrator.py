@@ -1044,6 +1044,7 @@ class GenerationOrchestrator:
         class_index: int,
         rng: random.Random,
         min_genomes_for_genome_split: int = 3,
+        block_stratify_large: bool = False,
     ) -> dict[str, list[dict]]:
         """Split a single child's per-leaf tasks into train/val/test.
 
@@ -1056,5 +1057,6 @@ class GenerationOrchestrator:
             cluster_aware=self.cluster_aware_split,
             max_subseq_len=self.max_subseq_len,
             cluster_params=self.cluster_params,
+            block_stratify_large=block_stratify_large,
         )
 
