@@ -728,7 +728,7 @@ no-op without cluster-aware). Suite 1124. Regenerating the 3 residual heads (694
 
 ---
 
-## 🟢 P14 — Plasmid discovery performance (host-lineage resolution + GBFF parse)
+## 🟢 P14 — Plasmid discovery performance (host-lineage resolution + GBFF parse) — lineage DONE
 
 **Context.** The P9 plasmid run (`discover --plasmids` / `generate --plasmids`) works
 end-to-end — validated 2026-07-23: fetched the 9-file RefSeq plasmid release (~2.7 GB),
@@ -751,6 +751,23 @@ resulting registry/vault, only throughput.
 Files: `io/plasmid_release.py` (parse), `core/orchestrator.py`
 (`_resolve_lineage` / `_fetch_lineage_via_ncbi` caching), `core/_orchestration/_sync.py`.
 Related: P9, [[datasets-taxonomy-output]] (the NCBI-fallback all-ranks gap).
+
+**Fix 1 — host-lineage NCBI batching + caching — DONE (2026-07-23).** The registration
+tail (the bottleneck actually observed churning) is fixed. `_build_hierarchy` now warms a
+shared `_ncbi_taxonomy_cache` up front via `prefetch_ncbi_taxonomy`: it collects the leaf
+taxids taxoniq can't resolve (`_needs_ncbi_fallback`) and resolves them in
+`_TAXONOMY_BATCH_SIZE` (300)-taxid bulk `datasets summary taxonomy taxon <ids>` calls
+(`_run_taxonomy_query`, keyed by each reply's `tax_id`). `_fetch_lineage_via_ncbi` and
+`_fetch_self_node_via_ncbi` now read that cache via `_ncbi_taxonomy_line` (single call on a
+miss, negatives cached). So the per-host fallback (previously **two** subprocesses each —
+lineage + self-node) becomes cache hits: for the plasmid host tree (~8.6k hosts, hundreds
+newer than the taxoniq snapshot) that's ~1000s of subprocess spawns → a handful of bulk
+calls. Tests: `TestNcbiTaxonomyPrefetchCache` (prefetch serves later fallbacks / lineage+
+self-node share one call / negatives cached / build_hierarchy prefetches only taxoniq
+misses). Suite 1128. **Remaining (optional): Fix 2 — parallelize the GBFF parse** across
+the release's 9 independent files (a process pool writing to the shared LMDB, workers
+return the small reports). More complex (multiprocessing + shared-writer LMDB); the parse
+is now the larger of the two costs but not blocking.
 
 ---
 

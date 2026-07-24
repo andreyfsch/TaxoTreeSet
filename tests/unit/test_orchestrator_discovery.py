@@ -525,6 +525,7 @@ class TestFetchLineageViaNcbi:
         orch = self._orchestrator()
         payload = {
             "taxonomy": {
+                "tax_id": 2697049,  # real replies echo the queried id (cache key)
                 "classification": {
                     "species": {"id": "2697049", "name": "SARS-CoV-2"},
                     "superkingdom": {"id": "10239", "name": "Viruses"},
@@ -570,6 +571,7 @@ class TestFetchLineageViaNcbiAllRanks:
     def test_all_ranks_resolves_non_canonical_via_parents(self):
         orch = self._orch(all_ranks=True)
         payload = {"taxonomy": {
+            "tax_id": 299386,
             "parents": self._PARENTS,
             "classification": {"species": {"id": "11047", "name": "S"}},
         }}
@@ -584,6 +586,7 @@ class TestFetchLineageViaNcbiAllRanks:
     def test_canonical_mode_ignores_parents(self):
         orch = self._orch(all_ranks=False)
         payload = {"taxonomy": {
+            "tax_id": 299386,
             "parents": self._PARENTS,
             "classification": {
                 "species": {"id": "11047", "name": "S"},
@@ -601,7 +604,7 @@ class TestFetchLineageViaNcbiAllRanks:
 
     def test_all_ranks_falls_back_to_classification_when_parents_missing(self):
         orch = self._orch(all_ranks=True)
-        payload = {"taxonomy": {"classification": {
+        payload = {"taxonomy": {"tax_id": 2697049, "classification": {
             "species": {"id": "2697049", "name": "SARS-CoV-2"},
             "superkingdom": {"id": "10239", "name": "Viruses"},
         }}}
@@ -615,6 +618,63 @@ class TestFetchLineageViaNcbiAllRanks:
         ranks = {a.rank for a in result}
         assert "species" in ranks
         mock_logger.warning.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# NCBI taxonomy prefetch + cache (P14: batch the per-host lineage fallback)
+# ---------------------------------------------------------------------------
+
+
+class TestNcbiTaxonomyPrefetchCache:
+    def _orchestrator(self):
+        mock_registry = MagicMock()
+        mock_registry.registry = {"accessions": {}, "taxons": {}, "lineages": {}}
+        return DiscoveryOrchestrator(registry=mock_registry, mapping_config={})
+
+    def _reply(self, tax_id):
+        payload = {"taxonomy": {
+            "tax_id": tax_id, "rank": "species",
+            "current_scientific_name": {"name": "X"},
+            "classification": {"species": {"id": str(tax_id), "name": "X"}},
+        }}
+        m = MagicMock()
+        m.stdout = json.dumps(payload) + "\n"
+        return m
+
+    def test_prefetch_serves_later_fallbacks_from_cache(self):
+        orch = self._orchestrator()
+        with patch("subprocess.run", return_value=self._reply(999)) as m_run:
+            orch.prefetch_ncbi_taxonomy(["999"])
+            assert m_run.call_count == 1
+            orch._fetch_lineage_via_ncbi(999)   # cache hit -> no new subprocess
+        assert m_run.call_count == 1
+
+    def test_lineage_and_self_node_share_one_subprocess(self):
+        orch = self._orchestrator()
+        with patch("subprocess.run", return_value=self._reply(999)) as m_run:
+            orch._fetch_lineage_via_ncbi(999)
+            orch._fetch_self_node_via_ncbi(999)  # same taxid -> cached
+        assert m_run.call_count == 1
+
+    def test_missing_taxid_is_cached_negative_not_reretried(self):
+        orch = self._orchestrator()
+        empty = MagicMock()
+        empty.stdout = ""  # nothing found
+        with patch("subprocess.run", return_value=empty) as m_run:
+            assert orch._fetch_lineage_via_ncbi(999) == []
+            assert orch._fetch_lineage_via_ncbi(999) == []  # not re-queried
+        assert m_run.call_count == 1
+
+    def test_build_hierarchy_prefetches_only_taxoniq_misses(self):
+        orch = self._orchestrator()
+        reports = {"999": [{"accession": "GCF_1"}], "10239": [{"accession": "GCF_2"}]}
+        with (
+            patch.object(orch, "_register_taxon"),
+            patch.object(orch, "_needs_ncbi_fallback", side_effect=lambda t: t == "999"),
+            patch.object(orch, "prefetch_ncbi_taxonomy") as m_pre,
+        ):
+            orch._build_hierarchy(reports, "10239", checkpoint_interval=100)
+        m_pre.assert_called_once_with(["999"])
 
 
 # ---------------------------------------------------------------------------

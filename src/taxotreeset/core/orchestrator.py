@@ -79,6 +79,9 @@ class _Ancestor(NamedTuple):
     rank: str
     scientific_name: str
 _NCBI_API_KEY_ENV_VAR = "NCBI_API_KEY"
+# TaxIDs per bulk `datasets summary taxonomy taxon` call when prefetching the
+# NCBI lineage fallback (keeps each command line well under OS arg limits).
+_TAXONOMY_BATCH_SIZE = 300
 
 
 class DiscoveryOrchestrator:
@@ -128,6 +131,9 @@ class DiscoveryOrchestrator:
         self.mapping: dict[str, Any] = mapping_config
         self.all_ranks: bool = all_ranks
         self.tree_root: Node = Node("root")
+        # taxid -> its NCBI taxonomy json-line ("" = looked up, none found), shared
+        # by the lineage + self-node fallbacks and warmed by prefetch_ncbi_taxonomy.
+        self._ncbi_taxonomy_cache: dict[str, str] = {}
 
     def discover_from_root(
         self,
@@ -503,6 +509,13 @@ class DiscoveryOrchestrator:
             checkpoint_interval: Save the registry every N processed
                 taxa.
         """
+        # Warm the NCBI taxonomy cache in bulk for the leaves taxoniq cannot
+        # resolve, so the per-taxon fallbacks below become cache hits instead of a
+        # subprocess each (the registration bottleneck for host-heavy sets).
+        self.prefetch_ncbi_taxonomy(
+            [t for t in reports_by_taxid if self._needs_ncbi_fallback(t)]
+        )
+
         processed_count = 0
         skipped_count = 0
         for taxid_str, reports in tqdm(
@@ -664,21 +677,87 @@ class DiscoveryOrchestrator:
             The taxon as an _Ancestor, or None if the lookup yields
             nothing usable.
         """
+        line = self._ncbi_taxonomy_line(taxid)
+        if not line:
+            return None
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        taxonomy = payload.get("taxonomy", {})
+        current = taxonomy.get("current_scientific_name", {})
+        name = current.get("name")
+        rank = taxonomy.get("rank") or "no_rank"
+        resolved_id = taxonomy.get("tax_id")
+        if name and resolved_id is not None:
+            return _Ancestor(int(resolved_id), str(rank).lower(), str(name))
+        return None
+
+    @staticmethod
+    def _needs_ncbi_fallback(taxid_str: str) -> bool:
+        """True if ``taxid_str`` is absent from taxoniq's snapshot (needs the CLI).
+
+        A non-integer key returns False — it is not a taxon the bulk prefetch can
+        resolve, and the registration loop handles/skips it.
+        """
+        try:
+            taxoniq.Taxon(int(taxid_str))
+            return False
+        except KeyError:
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    def prefetch_ncbi_taxonomy(self, taxids: list[str]) -> None:
+        """Warm the NCBI taxonomy cache for many taxa in a few bulk calls.
+
+        The per-taxon lineage fallback (``_fetch_lineage_via_ncbi`` /
+        ``_fetch_self_node_via_ncbi``) otherwise spawns **one subprocess per
+        taxon** — the dominant cost when registering an accession set with many
+        hosts newer than taxoniq's snapshot (e.g. the RefSeq-plasmid host tree,
+        thousands of recent bacteria). This batches them into
+        ``_TAXONOMY_BATCH_SIZE``-sized ``datasets summary taxonomy taxon <ids>``
+        calls and caches each reply line by its tax_id, so the registration loop's
+        fallbacks become cache hits. Best-effort: a taxon the bulk reply omits
+        (e.g. a merged id) simply falls back to its own single call later.
+        """
+        pending = [
+            t for t in dict.fromkeys(taxids) if t not in self._ncbi_taxonomy_cache
+        ]
+        if not pending:
+            return
+        logger.info(
+            "Prefetching NCBI taxonomy for %s taxa in batches of %d.",
+            f"{len(pending):,}", _TAXONOMY_BATCH_SIZE,
+        )
+        for start in range(0, len(pending), _TAXONOMY_BATCH_SIZE):
+            batch = pending[start:start + _TAXONOMY_BATCH_SIZE]
+            resolved = self._run_taxonomy_query(batch)
+            for key in batch:
+                # Cache "" for misses so a repeat query is not re-attempted in bulk.
+                self._ncbi_taxonomy_cache[key] = resolved.get(key, "")
+
+    def _ncbi_taxonomy_line(self, taxid: int) -> str | None:
+        """The NCBI taxonomy json-line for ``taxid``, cached; single call on miss."""
+        key = str(taxid)
+        if key not in self._ncbi_taxonomy_cache:
+            self._ncbi_taxonomy_cache[key] = self._run_taxonomy_query([key]).get(key, "")
+        return self._ncbi_taxonomy_cache[key] or None
+
+    @staticmethod
+    def _run_taxonomy_query(taxids: list[str]) -> dict[str, str]:
+        """One ``datasets summary taxonomy taxon <ids>`` call -> {tax_id: json-line}."""
         command = [
-            "datasets",
-            "summary",
-            "taxonomy",
-            "taxon",
-            str(taxid),
-            "--as-json-lines",
+            "datasets", "summary", "taxonomy", "taxon", *taxids, "--as-json-lines",
         ]
         try:
             completed = subprocess.run(
-                command, capture_output=True, text=True, check=True
-            )
+                command, capture_output=True, text=True, check=True)
         except (subprocess.CalledProcessError, OSError) as exc:
-            logger.debug("NCBI self-node lookup failed for %s: %s", taxid, exc)
-            return None
+            logger.debug(
+                "NCBI taxonomy query failed for %d taxa: %s", len(taxids), exc)
+            return {}
+        lines: dict[str, str] = {}
         for line in completed.stdout.splitlines():
             line = line.strip()
             if not line:
@@ -687,14 +766,10 @@ class DiscoveryOrchestrator:
                 payload = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            taxonomy = payload.get("taxonomy", {})
-            current = taxonomy.get("current_scientific_name", {})
-            name = current.get("name")
-            rank = taxonomy.get("rank") or "no_rank"
-            resolved_id = taxonomy.get("tax_id")
-            if name and resolved_id is not None:
-                return _Ancestor(int(resolved_id), str(rank).lower(), str(name))
-        return None
+            tax_id = payload.get("taxonomy", {}).get("tax_id")
+            if tax_id is not None:
+                lines[str(tax_id)] = line
+        return lines
 
     def _fetch_lineage_via_ncbi(self, taxid: int) -> list[_Ancestor]:
         """Fetch a taxon's lineage from the NCBI Datasets CLI.
@@ -716,28 +791,10 @@ class DiscoveryOrchestrator:
             ``parents`` resolves, else canonical species-to-root), or an empty list
             if the CLI returns nothing usable.
         """
-        command = [
-            "datasets",
-            "summary",
-            "taxonomy",
-            "taxon",
-            str(taxid),
-            "--as-json-lines",
-        ]
-        try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-        except (subprocess.CalledProcessError, OSError) as exc:
-            logger.debug(
-                "NCBI taxonomy fallback failed for TaxID %s: %s", taxid, exc
-            )
+        line = self._ncbi_taxonomy_line(taxid)
+        if not line:
             return []
-
-        taxonomy = self._parse_taxonomy(completed.stdout)
+        taxonomy = self._parse_taxonomy(line)
         if not taxonomy:
             return []
 
