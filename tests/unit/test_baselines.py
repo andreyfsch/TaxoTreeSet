@@ -4,6 +4,8 @@ from unittest.mock import patch
 
 from taxotreeset.benchmark.baselines import (
     export_retained_reference,
+    parse_centrifuge_output,
+    parse_kaiju_output,
     parse_kraken2_output,
     taxid_rank_map,
 )
@@ -77,3 +79,31 @@ class TestParseKraken2Output:
 
     def test_ignores_malformed_lines(self):
         assert parse_kraken2_output(["garbage", ""], {}) == {}
+
+
+class TestParseKaijuOutput:
+    def test_reuses_kraken2_format(self):
+        # Kaiju emits the same C|U <read> <taxid> shape.
+        ranks = taxid_rank_map(_LIN)
+        preds = parse_kaiju_output(["C\tr1\tT1", "U\tr2\t0"], ranks)
+        assert preds["r1"] == ("T1", "species")
+        assert preds["r2"] == (None, None)
+
+
+class TestParseCentrifugeOutput:
+    def test_keeps_best_score_per_read_and_abstains_on_zero(self):
+        ranks = taxid_rank_map(_LIN)
+        lines = [
+            "readID\tseqID\ttaxID\tscore\t2ndBestScore\thitLength\tqueryLength\tnumMatches",
+            "r1\tNC_1\tGA\t900\t0\t150\t150\t2",     # r1: lower score
+            "r1\tNC_2\tT1\t1800\t0\t150\t150\t2",    # r1: higher score -> wins
+            "r2\tNC_3\t0\t0\t0\t0\t150\t0",          # unclassified -> abstain
+            "r3\tNC_4\tF\t500\t0\t150\t150\t1",
+        ]
+        preds = parse_centrifuge_output(lines, ranks)
+        assert preds["r1"] == ("T1", "species")   # best-scoring assignment
+        assert preds["r2"] == (None, None)
+        assert preds["r3"] == ("F", "family")
+
+    def test_skips_header_and_malformed(self):
+        assert parse_centrifuge_output(["readID\tseqID\ttaxID", "junk"], {}) == {}

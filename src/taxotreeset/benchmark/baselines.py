@@ -92,3 +92,46 @@ def parse_kraken2_output(
         else:
             predictions[read_id] = (taxid, taxid_rank.get(taxid))
     return predictions
+
+
+def parse_kaiju_output(
+    lines: Any, taxid_rank: dict[str, str]
+) -> dict[str, tuple[str | None, str | None]]:
+    """Parse Kaiju per-read output into scorer predictions.
+
+    Kaiju's default output is ``C|U <read_id> <taxid>`` — the same three-column
+    shape Kraken2 emits — so this delegates to :func:`parse_kraken2_output`, giving
+    all three baselines one prediction schema for the scorer.
+    """
+    return parse_kraken2_output(lines, taxid_rank)
+
+
+def parse_centrifuge_output(
+    lines: Any, taxid_rank: dict[str, str]
+) -> dict[str, tuple[str | None, str | None]]:
+    """Parse Centrifuge per-read output into scorer predictions.
+
+    Centrifuge writes a TSV (header ``readID seqID taxID score ...``) with **one
+    row per assignment**, so a read may appear several times; the highest-scoring
+    taxID is kept per read. An unclassified read (``taxID`` 0 or blank) becomes an
+    abstention. The header row and malformed lines are skipped.
+    """
+    best: dict[str, tuple[int, str]] = {}
+    for line in lines:
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) < 4 or parts[0] == "readID":
+            continue
+        read_id, taxid, score = parts[0], parts[2].strip(), parts[3]
+        try:
+            score_val = int(score)
+        except ValueError:
+            continue
+        if read_id not in best or score_val > best[read_id][0]:
+            best[read_id] = (score_val, taxid)
+    predictions: dict[str, tuple[str | None, str | None]] = {}
+    for read_id, (_, taxid) in best.items():
+        if taxid in ("0", ""):
+            predictions[read_id] = (None, None)
+        else:
+            predictions[read_id] = (taxid, taxid_rank.get(taxid))
+    return predictions

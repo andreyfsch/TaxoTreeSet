@@ -12,6 +12,8 @@ import logging
 
 from taxotreeset.benchmark.baselines import (
     export_retained_reference,
+    parse_centrifuge_output,
+    parse_kaiju_output,
     parse_kraken2_output,
     taxid_rank_map,
 )
@@ -116,7 +118,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Convert a k-mer tool's per-read output into scorer predictions.",
     )
     pb.add_argument(
-        "--tool", choices=["kraken2"], default="kraken2",
+        "--tool", choices=["kraken2", "kaiju", "centrifuge"], default="kraken2",
         help="Baseline tool whose output format to parse (default kraken2).",
     )
     pb.add_argument("--input", "-i", required=True, help="Tool per-read output.")
@@ -279,8 +281,13 @@ def _run_parse_baseline(args: argparse.Namespace) -> None:
 
     registry = NCBIRegistry(registry_path=args.registry)
     taxid_rank = taxid_rank_map(registry.registry.get("lineages", {}))
+    parser = {
+        "kraken2": parse_kraken2_output,
+        "kaiju": parse_kaiju_output,
+        "centrifuge": parse_centrifuge_output,
+    }[args.tool]
     with open(args.input, encoding="utf-8") as f:
-        predictions = parse_kraken2_output(f, taxid_rank)
+        predictions = parser(f, taxid_rank)
     rows = [
         {"read_id": rid, "predicted_taxid": taxid or "", "predicted_rank": rank or ""}
         for rid, (taxid, rank) in predictions.items()

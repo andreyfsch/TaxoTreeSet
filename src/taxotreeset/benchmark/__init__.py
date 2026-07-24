@@ -10,6 +10,8 @@ specified in ``docs/clade_holdout_benchmark.md``.
 
 from taxotreeset.benchmark.baselines import (
     export_retained_reference,
+    parse_centrifuge_output,
+    parse_kaiju_output,
     parse_kraken2_output,
     taxid_rank_map,
 )
@@ -36,6 +38,8 @@ __all__ = [
     "build_holdout_manifest",
     "classify_outcome",
     "export_retained_reference",
+    "parse_centrifuge_output",
+    "parse_kaiju_output",
     "parse_kraken2_output",
     "prune_holdout",
     "score_reads",
