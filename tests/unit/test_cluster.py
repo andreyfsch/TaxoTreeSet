@@ -3,6 +3,8 @@
 import random
 from unittest.mock import patch
 
+import pytest
+
 from taxotreeset.core._orchestration._cluster import (
     ClusterParams,
     _connected_components,
@@ -171,15 +173,15 @@ class TestEvenSplit:
 
 class TestBlockStratifiedWindows:
     def test_interleaves_val_and_test_into_the_interior(self):
-        # 1000 bp genome, max_subseq_len 100 -> 10 blocks, pattern places val at
-        # {2,9} and test at {5} (interior), not the contiguous 70-85/85-100 ends.
+        # 1000 bp genome, max_subseq_len 100 -> 10 equal-width blocks; _label_blocks
+        # spreads val/test into the interior, not the 70-85/85-100 contiguous ends.
         task = {"fasta_path": "/v", "header_id": "g1", "n": 300}
         result = {s: [] for s in ("train", "val", "test")}
         with patch(_SPLIT_MOCK, return_value="A" * 1000):
             emitted = _block_stratified_windows(task, 0, 100, result)
         assert emitted
-        assert 0.5 in {round(t["start_pct"], 1) for t in result["test"]}  # interior
-        assert any(t["start_pct"] < 0.7 for t in result["val"])          # interior
+        assert any(t["start_pct"] < 0.85 for t in result["test"])  # interior
+        assert any(t["start_pct"] < 0.70 for t in result["val"])   # interior
         assert all(result[s] for s in ("train", "val", "test"))
         assert sum(t["n"] for s in result for t in result[s]) == 300      # budget kept
 
@@ -197,7 +199,7 @@ class TestBlockStratifiedWindows:
     def test_short_genome_falls_back(self):
         task = {"fasta_path": "/v", "header_id": "g", "n": 100}
         result = {s: [] for s in ("train", "val", "test")}
-        with patch(_SPLIT_MOCK, return_value="A" * 300):  # 3 blocks < 6
+        with patch(_SPLIT_MOCK, return_value="A" * 250):  # 2 blocks < 3
             assert _block_stratified_windows(task, 0, 100, result) is False
         assert all(not result[s] for s in ("train", "val", "test"))
 
@@ -207,6 +209,102 @@ class TestBlockStratifiedWindows:
             assert _block_stratified_windows(
                 {"fasta_path": "/v", "header_id": "g", "n": 100}, 0, 100, result
             ) is False
+
+
+class TestWindowSliceLengthConsistency:
+    """Regression for the audit-caught confound: window LENGTH must not differ by
+    split. ``extract_subseqs`` clamps each window to the bp left in its slice, so
+    the old unequal-width cut (train 70%, val/test 15%) made val/test windows
+    shorter than train — a length-to-class shortcut that collapsed heads to
+    <= chance on val. Every split must now draw from equal-width regions and match
+    in window-length distribution.
+    """
+
+    def _median_lengths(self, split, genome, max_len):
+        import statistics
+
+        from taxotreeset.dataset.sequence_utils import extract_subseqs
+
+        med = {}
+        for s in ("train", "val", "test"):
+            lens = []
+            for t in split[s]:
+                sub = genome[int(len(genome) * t["start_pct"]):
+                             int(len(genome) * t["end_pct"])]
+                lens += [len(w) for w in extract_subseqs(
+                    sub, t["n"], min_len=50, max_len=max_len,
+                    rng=random.Random(0))]
+            med[s] = statistics.median(lens) if lens else 0
+        return med
+
+    def test_three_blocks_now_use_the_block_path(self):
+        # _MIN_BLOCKS_FOR_STRATIFY lowered 6 -> 3: a 3-block genome block-stratifies
+        # (equal width) instead of falling back to the contiguous cut.
+        task = {"fasta_path": "/v", "header_id": "g", "n": 90, "length": 300}
+        result = {s: [] for s in ("train", "val", "test")}
+        assert _block_stratified_windows(task, 0, 100, result) is True
+        assert all(result[s] for s in ("train", "val", "test"))
+
+    def test_block_path_medians_match_across_splits(self):
+        genome = "".join(random.Random(1).choices("ACGT", k=20000))
+        task = {"fasta_path": "/v", "header_id": "g", "n": 400,
+                "length": len(genome)}
+        split = _materialize_leaf_split(
+            [task], 0, random.Random(0), cluster_aware=True, max_subseq_len=500)
+        med = self._median_lengths(split, genome, 500)
+        assert all(med.values())
+        assert max(med.values()) - min(med.values()) <= 60, med
+
+    def test_short_genome_thirds_medians_match(self):
+        # 3000 bp, max 2000 -> 1 block < 3 -> equal-width thirds fallback.
+        genome = "".join(random.Random(2).choices("ACGT", k=3000))
+        task = {"fasta_path": "/v", "header_id": "g", "n": 90,
+                "length": len(genome)}
+        split = _materialize_leaf_split(
+            [task], 0, random.Random(0), cluster_aware=True, max_subseq_len=2000)
+        med = self._median_lengths(split, genome, 2000)
+        assert all(med.values())
+        assert max(med.values()) - min(med.values()) <= 120, med
+
+
+class TestSegmentedGenomeGrouping:
+    """A segmented/multi-contig genome (one accession, many sequences sharing a
+    ``genome_key``) is ONE genome. Below the genome-count threshold it block-
+    stratifies each segment (every segment reaches every split); at/above it a
+    genome's segments never straddle folds. Regression for the Hadaka collapse
+    (11 segments of one virus split whole -> disjoint segments in train vs val).
+    """
+
+    def _segments(self, genome_key, n_segs, n=300, length=20000):
+        return [{"fasta_path": "/v", "header_id": f"{genome_key}_s{i}",
+                 "genome_key": genome_key, "n": n, "length": length}
+                for i in range(n_segs)]
+
+    def test_single_segmented_genome_uses_window_slicing(self):
+        # 11 segments of ONE genome -> 1 genome < 4 -> window-slice each segment,
+        # so EVERY segment appears in train AND val AND test (not split whole).
+        tasks = self._segments("GCF_1", 11)
+        split = _materialize_leaf_split(
+            tasks, 1, random.Random(0), cluster_aware=True, max_subseq_len=2000,
+            min_genomes_for_genome_split=4)
+        assert all(split[s] for s in ("train", "val", "test"))
+        for s in ("train", "val", "test"):
+            seg_ids = {t["header_id"] for t in split[s]}
+            assert len(seg_ids) == 11, (s, seg_ids)  # every segment present
+
+    def test_segmented_genome_never_straddles_in_genome_level(self):
+        # 4 genomes, one segmented (3 segments). Genome-level split; the segmented
+        # genome's 3 segments must all land in the SAME split (leakage-safe).
+        tasks = (self._segments("GCF_seg", 3, length=5000)
+                 + [{"fasta_path": "/v", "header_id": f"g{i}",
+                     "genome_key": f"g{i}", "n": 300, "length": 5000}
+                    for i in range(3)])
+        split = _materialize_leaf_split(
+            tasks, 1, random.Random(0), cluster_aware=False,
+            min_genomes_for_genome_split=4)
+        holds = {s for s in ("train", "val", "test")
+                 if any(t["header_id"].startswith("GCF_seg") for t in split[s])}
+        assert len(holds) == 1, f"segmented genome straddled {holds}"
 
 
 class TestClusterParams:
@@ -271,12 +369,13 @@ class TestClusterAwareWindowSlicing:
             split = _materialize_leaf_split(
                 tasks, 0, random.Random(0), cluster_aware=True, max_subseq_len=100
             )
-        assert 0.5 in {round(t["start_pct"], 1) for t in split["test"]}
+        assert any(t["start_pct"] < 0.85 for t in split["test"])  # interior
 
-    def test_off_uses_contiguous_regions_without_reading(self):
+    def test_off_uses_contiguous_equal_thirds_without_reading(self):
         tasks = [{"fasta_path": "/v", "header_id": "g1", "n": 300}]
         with patch(_SPLIT_MOCK) as m:
             split = _materialize_leaf_split(tasks, 0, random.Random(0))
             m.assert_not_called()
-        assert split["val"][0]["start_pct"] == 0.70   # contiguous, unchanged
-        assert split["test"][0]["start_pct"] == 0.85
+        # equal-width thirds (the length-clamp fix), not the old 0.70/0.85 cut
+        assert split["val"][0]["start_pct"] == pytest.approx(1 / 3)
+        assert split["test"][0]["start_pct"] == pytest.approx(2 / 3)

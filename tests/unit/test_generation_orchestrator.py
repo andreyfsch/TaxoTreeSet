@@ -740,8 +740,11 @@ class TestMaterializeLeafSplitScarcity:
         split = orchestrator._materialize_leaf_split(
             [_leaf_task(5)], class_index=2, rng=random.Random(0)
         )
+        # Equal-width thirds (not 0.70/0.15/0.15): the split proportions come
+        # from the window budget, so equal widths keep the length clamp uniform.
         assert split["train"][0]["start_pct"] == 0.0
-        assert split["train"][0]["end_pct"] == 0.70
+        assert split["train"][0]["end_pct"] == pytest.approx(1 / 3)
+        assert split["val"][0]["start_pct"] == pytest.approx(1 / 3)
         assert split["test"][0]["end_pct"] == 1.0
         assert split["train"][0]["class_idx"] == 2
 

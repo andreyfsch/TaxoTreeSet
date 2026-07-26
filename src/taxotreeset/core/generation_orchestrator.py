@@ -1051,7 +1051,10 @@ class GenerationOrchestrator:
         Thin delegator to
         :func:`taxotreeset.core._orchestration._splits._materialize_leaf_split`;
         see that function for the genome-level vs window-slicing split semantics.
+        Tags each task with its accession (``genome_key``) first, so a segmented or
+        multi-contig genome is split as ONE genome, not one-genome-per-sequence.
         """
+        self._attach_genome_keys(leaf_tasks)
         return _materialize_leaf_split_fn(
             leaf_tasks, class_index, rng, min_genomes_for_genome_split,
             cluster_aware=self.cluster_aware_split,
@@ -1059,4 +1062,44 @@ class GenerationOrchestrator:
             cluster_params=self.cluster_params,
             block_stratify_large=block_stratify_large,
         )
+
+    @property
+    def _header_to_accession(self) -> dict:
+        """Vault-sequence-id -> accession (genome) map, built once from the registry.
+
+        Lets the leaf split group a segmented/multi-contig genome's sequences as
+        ONE genome instead of one-per-segment (see ``_splits._genome_key``), so a
+        segmented virus (e.g. influenza) is not split across the folds.
+        """
+        cache = getattr(self, "_header_to_accession_cache", None)
+        if cache is None:
+            cache = {}
+            registry_dict = getattr(self.registry, "registry", None)
+            accessions = (
+                registry_dict.get("accessions", {})
+                if isinstance(registry_dict, dict) else {}
+            )
+            for accession, entry in accessions.items():
+                for header in entry.get("headers", []):
+                    hid = header.get("id")
+                    if hid:
+                        cache[hid] = accession
+            self._header_to_accession_cache = cache
+        return cache
+
+    def _attach_genome_keys(self, tasks: list[dict]) -> None:
+        """Tag each leaf task in place with its accession as ``genome_key``.
+
+        A no-op when the registry has no accession/header map (e.g. bare unit
+        tests), leaving ``_genome_key`` to fall back to the per-sequence id.
+        """
+        mapping = self._header_to_accession
+        if not mapping:
+            return
+        for task in tasks:
+            if "genome_key" in task:
+                continue
+            hid = task.get("header_id")
+            if hid:
+                task["genome_key"] = mapping.get(hid, hid)
 

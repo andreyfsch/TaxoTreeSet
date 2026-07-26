@@ -15,15 +15,17 @@ _STRATIFIED_TRAIN_RATIO: float = 0.70
 _STRATIFIED_VAL_RATIO: float = 0.15
 _SPLITS: tuple[str, ...] = ("train", "val", "test")
 
-# Cluster-aware window-slicing (few-genome classes): a repeating block -> split
-# pattern (~5:1:1 = 71/14/14) that INTERLEAVES all three splits, so val/test
-# blocks sit among train blocks (representative) instead of the genome's ends.
-_WINDOW_SPLIT_PATTERN: tuple[str, ...] = (
-    "train", "train", "val", "train", "train", "test", "train",
-)
-# Need at least this many blocks (each >= max_subseq_len, so windows keep full
-# length) for the pattern to place every split; below it, keep the contiguous cut.
-_MIN_BLOCKS_FOR_STRATIFY: int = 6
+# Cluster-aware window-slicing (few-genome classes) cuts the genome into
+# equal-width blocks (each ~max_subseq_len) and interleaves the splits across
+# them (see _label_blocks), so val/test sample the SAME-width regions as train.
+# Equal width is not just about composition: extract_subseqs clamps each window's
+# length to the bp available to the end of its slice, so a NARROWER slice yields
+# systematically SHORTER windows. The old contiguous 70/15/15 cut gave val/test
+# far narrower regions than train, baking a length-to-class shortcut (train-long,
+# val/test-short) that made the head learn window length instead of sequence and
+# collapse to <= chance on val. Need at least this many blocks to place every
+# split; below it, the fallback uses EQUAL-WIDTH thirds for the same reason.
+_MIN_BLOCKS_FOR_STRATIFY: int = 3
 
 
 def _stratified_counts(n_total: int) -> tuple[int, int, int]:
@@ -89,6 +91,37 @@ def _enrich_task(
     }
 
 
+def _genome_key(task: dict):
+    """Genome identity for grouping the leaf tasks.
+
+    Returns the task's ``genome_key`` (the accession, injected upstream) so a
+    **segmented or multi-contig genome — one accession with many sequences — is
+    treated as ONE genome**, never as one-genome-per-segment. Falls back to the
+    sequence ``header_id`` (then a single-sequence genome is its own group, the
+    pre-grouping behaviour) and finally to object identity.
+    """
+    return task.get("genome_key") or task.get("header_id") or id(task)
+
+
+def _group_by_genome(tasks: list[dict]) -> list[list[dict]]:
+    """Group tasks into genomes (one list per genome) by :func:`_genome_key`.
+
+    Keeps a genome's sequences together so they never straddle train/val/test —
+    the leakage guarantee must hold per *genome*, not per *segment*, or a segmented
+    virus (e.g. influenza's 8 segments) would be split across the folds and the
+    head would train and be tested on disjoint segments of the same organism.
+    """
+    genomes: dict = {}
+    for task in tasks:
+        genomes.setdefault(_genome_key(task), []).append(task)
+    return list(genomes.values())
+
+
+def _unit_volume(unit: list[dict]) -> int:
+    """Total window budget of a genome (sum over its sequences)."""
+    return sum(task["n"] for task in unit)
+
+
 def _assign_stratified(
     tasks: list[dict],
     class_index: int,
@@ -106,9 +139,11 @@ def _assign_stratified(
     val and makes the head untrainable. This instead places each whole genome —
     leakage-safe, a genome never straddles splits — into the split currently
     furthest below its target volume (``0.70 / 0.15 / 0.15`` of the class's total
-    windows), largest genome first. Every split is guaranteed >= 1 genome when
-    ``len(tasks) >= 3``.
+    windows), largest genome first. Genomes are grouped by :func:`_group_by_genome`
+    so a segmented genome's sequences move together as one unit. Every split is
+    guaranteed >= 1 genome when there are >= 3 genomes.
     """
+    units = _group_by_genome(tasks)
     total = sum(task["n"] for task in tasks) or 1
     targets = {
         "train": _STRATIFIED_TRAIN_RATIO * total,
@@ -116,21 +151,22 @@ def _assign_stratified(
         "test": (1.0 - _STRATIFIED_TRAIN_RATIO - _STRATIFIED_VAL_RATIO) * total,
     }
     volume = {split: 0.0 for split in _SPLITS}
-    buckets: dict[str, list[dict]] = {split: [] for split in _SPLITS}
-    for task in sorted(tasks, key=lambda t: t["n"], reverse=True):
+    buckets: dict[str, list[list[dict]]] = {split: [] for split in _SPLITS}
+    for unit in sorted(units, key=_unit_volume, reverse=True):
         # Largest remaining deficit first; ties resolve to _SPLITS order (train).
         split = max(_SPLITS, key=lambda s: targets[s] - volume[s])
-        buckets[split].append(task)
-        volume[split] += task["n"]
+        buckets[split].append(unit)
+        volume[split] += _unit_volume(unit)
 
     _ensure_each_split_nonempty(buckets, volume)
     for split in _SPLITS:
-        for task in buckets[split]:
-            result[split].append(_enrich_task(task, class_index, 0.0, 1.0))
+        for unit in buckets[split]:
+            for task in unit:
+                result[split].append(_enrich_task(task, class_index, 0.0, 1.0))
 
 
 def _ensure_each_split_nonempty(
-    buckets: dict[str, list[dict]],
+    buckets: dict[str, list[list[dict]]],
     volume: dict[str, float],
 ) -> None:
     """Guarantee every split holds >= 1 genome (when >= 3 exist in total).
@@ -140,7 +176,8 @@ def _ensure_each_split_nonempty(
     split, move the smallest genome out of the split that has the most volume
     among those holding >= 2, restoring the >= 1-per-split invariant the old
     count-based cut guaranteed. With >= 3 genomes a donor always exists (pigeonhole),
-    and moving only from a >= 2 split can never empty the donor.
+    and moving only from a >= 2 split can never empty the donor. Each bucket entry
+    is a whole genome (a list of its sequences), so a genome moves as one unit.
     """
     for split in _SPLITS:
         if buckets[split]:
@@ -151,11 +188,11 @@ def _ensure_each_split_nonempty(
         )
         if donor is None:
             continue  # fewer than 3 genomes total; cannot fill every split
-        task = min(buckets[donor], key=lambda t: t["n"])
-        buckets[donor].remove(task)
-        volume[donor] -= task["n"]
-        buckets[split].append(task)
-        volume[split] += task["n"]
+        unit = min(buckets[donor], key=_unit_volume)
+        buckets[donor].remove(unit)
+        volume[donor] -= _unit_volume(unit)
+        buckets[split].append(unit)
+        volume[split] += _unit_volume(unit)
 
 
 def _cluster_stratified_split(
@@ -183,8 +220,13 @@ def _cluster_stratified_split(
         random split, preserving the >= 1-genome-per-split guarantee).
     """
     cp = cluster_params or ClusterParams()
+    # Cluster by GENOME (one representative sequence per genome) so a segmented
+    # genome's sequences share a cluster and never straddle splits.
+    units = _group_by_genome(tasks)
+    unit_by_key = {_genome_key(unit[0]): unit for unit in units}
+    reps = [unit[0] for unit in units]
     clusters = cluster_genomes(
-        tasks,
+        reps,
         k=cp.k,
         sketch_size=cp.sketch_size,
         threshold=cp.jaccard_threshold,
@@ -196,11 +238,14 @@ def _cluster_stratified_split(
         return None
     candidate: dict[str, list[dict]] = {split: [] for split in _SPLITS}
     for cluster in clusters:
-        if len(cluster) >= min_genomes:
-            _assign_stratified(cluster, class_index, candidate)
+        cluster_tasks = [
+            task for rep in cluster for task in unit_by_key[_genome_key(rep)]
+        ]
+        if len(cluster) >= min_genomes:  # >= min_genomes distinct genomes
+            _assign_stratified(cluster_tasks, class_index, candidate)
         else:
             # too few genomes to split three ways; keep as training signal
-            for task in cluster:
+            for task in cluster_tasks:
                 candidate["train"].append(_enrich_task(task, class_index, 0.0, 1.0))
     if all(candidate[split] for split in _SPLITS):
         return candidate
@@ -213,6 +258,52 @@ def _even_split(budget: int, n_blocks: int) -> list[int]:
     return [base + (1 if i < remainder else 0) for i in range(n_blocks)]
 
 
+def _label_blocks(n_blocks: int) -> list[str] | None:
+    """Label ``n_blocks`` equal-width blocks train/val/test, val/test interleaved.
+
+    Returns one split label per block index, with val/test blocks spread evenly
+    among the train blocks (representative composition) and >= 1 block for each of
+    the three splits. The split PROPORTIONS come from the per-split window budget
+    (:func:`_stratified_counts`), NOT the block counts — this only decides WHICH
+    equal-width regions each split samples, so every split's slice keeps the same
+    width and the window-length clamp is identical across splits. Returns ``None``
+    when there are too few blocks (< :data:`_MIN_BLOCKS_FOR_STRATIFY`) to place
+    all three splits; the caller then keeps the equal-thirds contiguous cut.
+    """
+    if n_blocks < _MIN_BLOCKS_FOR_STRATIFY:
+        return None
+    n_val = max(1, round(n_blocks * _STRATIFIED_VAL_RATIO))
+    n_test = max(1, round(
+        n_blocks * (1.0 - _STRATIFIED_TRAIN_RATIO - _STRATIFIED_VAL_RATIO)))
+    # Keep at least one train block, trimming the larger holdout first.
+    while n_val + n_test > n_blocks - 1:
+        if n_test >= n_val and n_test > 1:
+            n_test -= 1
+        elif n_val > 1:
+            n_val -= 1
+        else:
+            break
+    holdout: list[str] = []
+    v, t = n_val, n_test
+    while v or t:
+        if v:
+            holdout.append("val")
+            v -= 1
+        if t:
+            holdout.append("test")
+            t -= 1
+    labels = ["train"] * n_blocks
+    step = n_blocks / (len(holdout) + 1)  # interior, evenly spaced slots
+    used: set[int] = set()
+    for j, label in enumerate(holdout):
+        pos = min(n_blocks - 1, max(0, round((j + 1) * step)))
+        while pos in used:  # a free slot always remains (>= 1 train block kept)
+            pos = (pos + 1) % n_blocks
+        used.add(pos)
+        labels[pos] = label
+    return labels
+
+
 def _block_stratified_windows(
     task: dict,
     class_index: int,
@@ -221,14 +312,16 @@ def _block_stratified_windows(
 ) -> bool:
     """Spread one genome's windows across interleaved positional blocks.
 
-    A single/few-genome class is window-sliced, and the contiguous cut
-    (train 0-70% / val 70-85% / test 85-100%) puts compositionally-distinct genome
-    regions in different splits — so val (a genome end) can diverge from train even
-    on the same genome. Here the genome is cut into ``L // max_subseq_len`` blocks
-    (each >= ``max_subseq_len`` so windows keep full length) and the blocks are
-    assigned by :data:`_WINDOW_SPLIT_PATTERN`, which INTERLEAVES the splits so
-    val/test blocks sit among train blocks (representative composition). Windows
-    stay confined to their block, so no cross-split window overlaps (leakage-safe).
+    A single/few-genome class is window-sliced, and an unequal-width cut puts
+    both compositionally-distinct AND (because extract_subseqs clamps window
+    length to the bp left in the slice) length-distinct regions in different
+    splits — so a narrow val/test region yields shorter windows than a wide train
+    region, and the head learns window length instead of sequence. Here the genome
+    is cut into ``L // max_subseq_len`` equal-width blocks (each ~``max_subseq_len``)
+    and the blocks are assigned by :func:`_label_blocks`, which INTERLEAVES the
+    splits so val/test blocks sit among train blocks (representative composition)
+    while every split samples the SAME-width slices (identical length clamp).
+    Windows stay confined to their block, so no cross-split overlaps (leakage-safe).
 
     Args:
         task: One genome's per-leaf task (``fasta_path`` / ``header_id`` / ``n``,
@@ -255,9 +348,12 @@ def _block_stratified_windows(
     if n_blocks < _MIN_BLOCKS_FOR_STRATIFY:
         return False
 
+    labels = _label_blocks(n_blocks)
+    if labels is None:
+        return False
     blocks: dict[str, list[int]] = {split: [] for split in _SPLITS}
-    for i in range(n_blocks):
-        blocks[_WINDOW_SPLIT_PATTERN[i % len(_WINDOW_SPLIT_PATTERN)]].append(i)
+    for i, label in enumerate(labels):
+        blocks[label].append(i)
 
     n_train, n_val, n_test = _stratified_counts(task["n"])
     budgets = {"train": n_train, "val": n_val, "test": n_test}
@@ -306,12 +402,19 @@ def _assign_stratified_hybrid(
     total = sum(task["n"] for task in tasks) or 1
     threshold = _STRATIFIED_VAL_RATIO * total
     regular: list[dict] = []
-    for task in tasks:
-        if task["n"] > threshold and _block_stratified_windows(
-            task, class_index, max_subseq_len, result
+    for unit in _group_by_genome(tasks):
+        # Block-stratify a dominant genome so it doesn't skew a split — but only a
+        # single-sequence genome, since block-slicing operates on one sequence; a
+        # multi-sequence (segmented) genome is whole-assigned by _assign_stratified.
+        if (
+            len(unit) == 1
+            and unit[0]["n"] > threshold
+            and _block_stratified_windows(
+                unit[0], class_index, max_subseq_len, result
+            )
         ):
             continue  # dominant genome spread across splits
-        regular.append(task)
+        regular.extend(unit)
     if regular:
         _assign_stratified(regular, class_index, result)
 
@@ -372,7 +475,15 @@ def _materialize_leaf_split(
     shuffled = list(leaf_tasks)
     rng.shuffle(shuffled)
 
-    if len(shuffled) >= min_genomes_for_genome_split:
+    # Count distinct GENOMES (accessions via _genome_key), not sequences: a
+    # segmented/multi-contig genome is ONE genome. Counting sequences would send a
+    # single segmented genome (e.g. Hadaka virus 1, 11 segments) down the
+    # genome-level path and split its segments across the folds — train and val
+    # then hold disjoint segments of the SAME organism and the head cannot
+    # generalise (collapse to ~chance on val). Grouping it here instead
+    # block-stratifies each segment, so every segment appears in train.
+    n_genomes = len({_genome_key(task) for task in shuffled})
+    if n_genomes >= min_genomes_for_genome_split:
         if cluster_aware and block_stratify_large:
             _assign_stratified_hybrid(shuffled, class_index, result, max_subseq_len)
         elif cluster_aware and (
@@ -390,6 +501,11 @@ def _materialize_leaf_split(
                 task, class_index, max_subseq_len, result
             ):
                 continue
+            # Too short for >= 3 blocks: cut EQUAL-WIDTH thirds (not 0.70/0.15/
+            # 0.15). The split proportions come from the window budget below, so
+            # equal-width regions keep the length clamp identical across splits;
+            # unequal widths would shorten val/test windows and leak a length
+            # signal. Regions stay disjoint (leakage-safe).
             n_train, n_val, n_test = _stratified_counts(task["n"])
             if n_train > 0:
                 result["train"].append(
@@ -397,7 +513,7 @@ def _materialize_leaf_split(
                         {**task, "n": n_train},
                         class_index,
                         0.0,
-                        0.70,
+                        1 / 3,
                     )
                 )
             if n_val > 0:
@@ -405,8 +521,8 @@ def _materialize_leaf_split(
                     _enrich_task(
                         {**task, "n": n_val},
                         class_index,
-                        0.70,
-                        0.85,
+                        1 / 3,
+                        2 / 3,
                     )
                 )
             if n_test > 0:
@@ -414,7 +530,7 @@ def _materialize_leaf_split(
                     _enrich_task(
                         {**task, "n": n_test},
                         class_index,
-                        0.85,
+                        2 / 3,
                         1.0,
                     )
                 )

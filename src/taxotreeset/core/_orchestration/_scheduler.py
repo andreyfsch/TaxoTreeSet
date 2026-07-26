@@ -116,7 +116,10 @@ def _head_reliability(pos_split: dict, min_genomes_split: int = 4) -> dict:
     too few belongs genomes for a representative val/test.
     """
     def n_genomes(tasks: list) -> int:
-        return len({t.get("header_id") for t in tasks if t.get("header_id")})
+        # Count distinct GENOMES (accessions), not sequences: a segmented/multi-
+        # contig genome is one genome, so its few-genome reliability isn't masked.
+        return len({t.get("genome_key") or t.get("header_id")
+                    for t in tasks if t.get("header_id")})
 
     total = n_genomes(
         pos_split.get("train", []) + pos_split.get("val", [])
