@@ -782,12 +782,14 @@ class TestMaterializeLeafSplitVolumeBalance:
         assert len(split["val"]) >= 1
         assert len(split["test"]) >= 1
 
-    def test_whole_genomes_never_straddle_splits(self, orchestrator):
-        # Leakage safety: each genome appears in exactly one split.
+    def test_whole_genomes_never_straddle_splits(self):
+        # Leakage safety of the whole-genome (--no-cluster-aware) volume split: each
+        # genome in exactly one fold. (Cluster-aware diverse clades window-slice
+        # instead — every genome in every fold — verified elsewhere.)
         tasks = [_leaf_task(n, f"g{i}") for i, n in enumerate(self._UNEQUAL)]
-        split = orchestrator._materialize_leaf_split(
+        split = _materialize_leaf_split(
             tasks, class_index=0, rng=random.Random(3),
-            min_genomes_for_genome_split=4)
+            min_genomes_for_genome_split=4, cluster_aware=False)
         seen = [t["header_id"] for s in ("train", "val", "test") for t in split[s]]
         assert len(seen) == len(set(seen)) == len(self._UNEQUAL)
 
@@ -824,10 +826,13 @@ class TestBlockStratifyLargeNegatives:
             assert 0.10 <= v["val"] <= 0.20, f"seed {seed}: val {v['val']:.2f}"
             assert 0.10 <= v["test"] <= 0.20, f"seed {seed}: test {v['test']:.2f}"
 
-    def test_without_the_flag_the_giant_genome_still_dominates(self):
-        # b5ea511 volume-aware still can't divide one indivisible giant genome.
-        v = self._volumes(self._split(False))
-        assert v["train"] > 0.80
+    def test_without_the_flag_cluster_aware_window_slices_the_giant(self):
+        # Cluster-aware but no block-stratify-large: the diverse head window-slices
+        # EVERY genome (incl. the giant), so it spreads ~70/15/15 and no fold is
+        # dominated -- the flag is only needed for the --no-cluster-aware path.
+        v = self._volumes(self._split(False))  # cluster_aware=True, flag=False
+        assert v["train"] < 0.80
+        assert 0.08 <= v["val"] <= 0.25 and 0.08 <= v["test"] <= 0.25
 
     def test_flag_is_a_noop_without_cluster_aware(self):
         # --no-cluster-aware-split keeps the plain whole-genome split.

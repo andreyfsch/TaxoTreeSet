@@ -142,28 +142,33 @@ class TestClusterAwareSplit:
             lineages = {t["header_id"][0] for t in split[name]}
             assert lineages == {"a", "b"}, f"{name} missing a lineage: {lineages}"
 
-    def test_falls_back_to_random_when_no_structure(self, ):
+    def test_diverse_no_clusters_window_slices_all_covered(self):
         tasks = _tasks(["a1", "a2", "a3", "a4", "a5", "a6"])
         with patch(_MOCK, side_effect=lambda p, h: _SA):
             split = _materialize_leaf_split(
                 tasks, 0, random.Random(0), cluster_aware=True
             )
-        # homogeneous -> cluster_genomes returns None -> standard split, all filled
-        assert all(split[s] for s in ("train", "val", "test"))
-        assert sum(len(split[s]) for s in ("train", "val", "test")) == 6
+        # no substantial clusters -> window-slice each genome; every genome is held
+        # out in train AND val AND test (covered), so all folds are filled
+        all_genomes = {t["header_id"] for t in tasks}
+        for s in ("train", "val", "test"):
+            assert {t["header_id"] for t in split[s]} == all_genomes
 
-    def test_cluster_aware_and_off_agree_when_no_structure(self):
-        # 4 mutually DISSIMILAR genomes: no clusters AND no near-clone groups, so
-        # cluster-aware (adaptive clustering + representative fallback) is a no-op
-        # and matches the plain volume split. (Identical genomes would instead be
-        # near-clones and legitimately trigger the representative split.)
-        seqs = {h: "".join(random.Random(i).choices("ACGT", k=2000))
+    def test_cluster_aware_window_slices_a_diverse_clade_off_does_not(self):
+        # No clusters / no near-clones: cluster-aware window-slices each genome
+        # (held-out windows, all covered), while --no-cluster-aware-split keeps the
+        # whole-genome volume split (each genome in exactly one fold).
+        seqs = {h: "".join(random.Random(i).choices("ACGT", k=6000))
                 for i, h in enumerate(["a1", "a2", "a3", "a4"])}
         tasks = _tasks(["a1", "a2", "a3", "a4"])
         with patch(_MOCK, side_effect=lambda p, h: seqs[h]):
             on = _materialize_leaf_split(tasks, 0, random.Random(7), cluster_aware=True)
         off = _materialize_leaf_split(tasks, 0, random.Random(7))
-        assert on == off  # no structure at all -> identical to the plain split
+        assert on != off
+        for s in ("train", "val", "test"):              # on: every genome covered
+            assert {t["header_id"] for t in on[s]} == set(seqs)
+        off_seen = [t["header_id"] for s in ("train", "val", "test") for t in off[s]]
+        assert len(off_seen) == len(set(off_seen)) == 4  # off: each in one fold
 
 
 # ---------------------------------------------------------------------------
@@ -412,34 +417,24 @@ class TestAdaptiveClustering:
             assert C.cluster_genomes_adaptive(tasks) is None
 
 
-class TestRepresentativeSplit:
-    """No-substantial-cluster fallback: near-clone groups are spread across the
-    folds and isolated genomes go to train, so every val/test genome has a train
-    counterpart (deployment-aligned; fixes val-great / test-chance on diverse
-    singleton-dominated clades)."""
+class TestWindowsliceDiverse:
+    """Diverse genome-level clade with no substantial clusters: window-slice EACH
+    genome so val/test are held-out WINDOWS of the same genomes (all covered),
+    fixing val-great / test-chance where a whole-genome split strands a
+    sub-lineage."""
 
-    def test_representative_fallback_covers_val_test(self):
-        # n=30: near-clone PAIRS (size 2 < min_size=ceil(0.1*30)=3, so the adaptive
-        # clustering zeroes out) + dissimilar singletons -> representative fallback.
-        seqmap = {}
-        for p in range(3):                              # 3 near-clone pairs
-            s = "".join(random.Random(p).choices("ACGT", k=2000))
-            seqmap[f"p{p}a"] = s
-            seqmap[f"p{p}b"] = s
-        for i in range(24):                             # 24 dissimilar singletons
-            seqmap[f"s{i}"] = "".join(random.Random(100 + i).choices("ACGT", k=2000))
+    def test_diverse_genome_level_window_slices_every_genome(self):
+        # 5 dissimilar >= 3-block genomes, no clusters -> window-slice each genome;
+        # every genome appears in train AND is held out in val AND test.
+        seqmap = {h: "".join(random.Random(i).choices("ACGT", k=6000))
+                  for i, h in enumerate(["g0", "g1", "g2", "g3", "g4"])}
         tasks = _tasks(list(seqmap))
         with patch(_MOCK, side_effect=lambda p, h: seqmap[h]):
             split = _materialize_leaf_split(
                 tasks, 1, random.Random(0), cluster_aware=True,
                 min_genomes_for_genome_split=4)
-        assert all(split[s] for s in ("train", "val", "test"))
-        train_h = {t["header_id"] for t in split["train"]}
-        held = [t["header_id"] for s in ("val", "test") for t in split[s]]
-        # every held-out genome is a pair member (its identical twin is in train)
-        assert held and all(h.startswith("p") for h in held)
-        # all 24 dissimilar singletons stay in train (no possible counterpart)
-        assert all(f"s{i}" in train_h for i in range(24))
+        for s in ("train", "val", "test"):
+            assert {t["header_id"] for t in split[s]} == set(seqmap)  # all covered
 
 
 class TestClusterAwareWindowSlicing:

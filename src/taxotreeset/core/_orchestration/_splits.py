@@ -11,7 +11,6 @@ import random
 from taxotreeset.core._orchestration._cluster import (
     ClusterParams,
     cluster_genomes_adaptive,
-    near_clone_groups,
 )
 from taxotreeset.dataset.utils import _read_single_sequence
 
@@ -256,57 +255,45 @@ def _cluster_stratified_split(
     return None
 
 
-def _representative_split(
+def _windowslice_split(
     tasks: list[dict],
     class_index: int,
-    cluster_params: ClusterParams | None = None,
-) -> dict[str, list[dict]] | None:
-    """No-substantial-cluster fallback: a representative, deployment-aligned split.
+    result: dict[str, list[dict]],
+    max_subseq_len: int,
+    cluster_aware: bool,
+) -> None:
+    """Window-slice EACH genome across the folds (val/test = held-out WINDOWS of the
+    same genomes) — the shared few-genome / diverse-clade path.
 
-    When even the relaxed clustering finds no substantial sub-lineages (a
-    singleton-dominated diverse clade — e.g. RefSeq coronaviruses), a plain volume
-    split can strand a whole sub-lineage in val/test (val looks great, test drops
-    to ~chance). This instead spreads each near-clone GROUP across the folds and
-    sends ISOLATED genomes to train, so every val/test genome has a train
-    counterpart — the belongs head is then measured on recognising KNOWN lineages
-    (novel-lineage detection is the reject's job / the clade-holdout benchmark),
-    and val no longer over-promises what test can't deliver. Genomes are grouped by
-    accession first. Returns ``None`` (caller keeps the volume split) when there
-    are too few near-clones to seed both val and test.
+    Used both below ``min_genomes_for_genome_split`` (data-poor classes) and, for
+    cluster-aware genome-level heads, when there is no substantial cluster structure
+    — a diverse clade that is mostly singletons (e.g. RefSeq coronaviruses), where a
+    whole-genome split would strand a sub-lineage in val/test (val great, test
+    ~chance). Slicing each genome keeps every genome in train AND held out in
+    val/test, so val/test are always covered: the belongs head is measured on
+    recognising KNOWN lineages (novel-genome generalisation is the reject's /
+    clade-holdout's job). Each genome is block-stratified into equal-width blocks
+    (cluster-aware) or equal thirds when too short to block; regions stay disjoint
+    (leakage-safe).
     """
-    cp = cluster_params or ClusterParams()
-    units = _group_by_genome(tasks)
-    comps = near_clone_groups(
-        [unit[0] for unit in units], k=cp.k, sketch_size=cp.sketch_size,
-        max_genomes=cp.max_genomes,
-    )
-    if comps is None:
-        return None
-    multi = [c for c in comps if len(c) >= 2]  # near-clone groups
-    # need >= 2 held-out members total (one to seed val, one to seed test)
-    if sum(len(c) - 1 for c in multi) < 2:
-        return None
-    result: dict[str, list[dict]] = {split: [] for split in _SPLITS}
-
-    def emit(unit_idx: int, split: str) -> None:
-        for task in units[unit_idx]:
-            result[split].append(_enrich_task(task, class_index, 0.0, 1.0))
-
-    for comp in comps:  # isolated genomes -> train (no possible train counterpart)
-        if len(comp) == 1:
-            emit(comp[0], "train")
-    # each near-clone group keeps one member in train; the rest alternate across
-    # val/test so both hold recognisable genomes with a guaranteed train neighbour
-    holdout = "val"
-    for comp in sorted(multi, key=len, reverse=True):
-        members = sorted(comp)
-        emit(members[0], "train")
-        for idx in members[1:]:
-            emit(idx, holdout)
-            holdout = "test" if holdout == "val" else "val"
-    if all(result[split] for split in _SPLITS):
-        return result
-    return None
+    for task in tasks:
+        if cluster_aware and _block_stratified_windows(
+            task, class_index, max_subseq_len, result
+        ):
+            continue
+        # Too short for >= 3 blocks: equal-width thirds (not 0.70/0.15/0.15) so the
+        # window-length clamp is identical across folds; the fold proportions come
+        # from the window budget below. Regions stay disjoint (leakage-safe).
+        n_train, n_val, n_test = _stratified_counts(task["n"])
+        if n_train > 0:
+            result["train"].append(
+                _enrich_task({**task, "n": n_train}, class_index, 0.0, 1 / 3))
+        if n_val > 0:
+            result["val"].append(
+                _enrich_task({**task, "n": n_val}, class_index, 1 / 3, 2 / 3))
+        if n_test > 0:
+            result["test"].append(
+                _enrich_task({**task, "n": n_test}, class_index, 2 / 3, 1.0))
 
 
 def _even_split(budget: int, n_blocks: int) -> list[int]:
@@ -498,16 +485,17 @@ def _assign_genome_level(
         _assign_stratified_hybrid(shuffled, class_index, result, max_subseq_len)
         return
     if cluster_aware:
-        for splitter in (
-            lambda: _cluster_stratified_split(
-                shuffled, class_index, min_genomes_for_genome_split, cluster_params),
-            lambda: _representative_split(shuffled, class_index, cluster_params),
-        ):
-            assigned = splitter()
-            if assigned is not None:
-                for split in _SPLITS:
-                    result[split] = assigned[split]
-                return
+        assigned = _cluster_stratified_split(
+            shuffled, class_index, min_genomes_for_genome_split, cluster_params)
+        if assigned is not None:
+            for split in _SPLITS:
+                result[split] = assigned[split]
+            return
+        # Diverse clade with no substantial cluster structure: window-slice each
+        # genome so val/test are held-out WINDOWS of the same genomes (always
+        # covered) instead of disjoint whole genomes stranding a sub-lineage.
+        _windowslice_split(shuffled, class_index, result, max_subseq_len, True)
+        return
     _assign_stratified(shuffled, class_index, result)
 
 
@@ -585,43 +573,6 @@ def _materialize_leaf_split(
             cluster_params=cluster_params,
         )
     else:
-        for task in shuffled:
-            if cluster_aware and _block_stratified_windows(
-                task, class_index, max_subseq_len, result
-            ):
-                continue
-            # Too short for >= 3 blocks: cut EQUAL-WIDTH thirds (not 0.70/0.15/
-            # 0.15). The split proportions come from the window budget below, so
-            # equal-width regions keep the length clamp identical across splits;
-            # unequal widths would shorten val/test windows and leak a length
-            # signal. Regions stay disjoint (leakage-safe).
-            n_train, n_val, n_test = _stratified_counts(task["n"])
-            if n_train > 0:
-                result["train"].append(
-                    _enrich_task(
-                        {**task, "n": n_train},
-                        class_index,
-                        0.0,
-                        1 / 3,
-                    )
-                )
-            if n_val > 0:
-                result["val"].append(
-                    _enrich_task(
-                        {**task, "n": n_val},
-                        class_index,
-                        1 / 3,
-                        2 / 3,
-                    )
-                )
-            if n_test > 0:
-                result["test"].append(
-                    _enrich_task(
-                        {**task, "n": n_test},
-                        class_index,
-                        2 / 3,
-                        1.0,
-                    )
-                )
+        _windowslice_split(shuffled, class_index, result, max_subseq_len, cluster_aware)
 
     return result
