@@ -153,11 +153,17 @@ class TestClusterAwareSplit:
         assert sum(len(split[s]) for s in ("train", "val", "test")) == 6
 
     def test_cluster_aware_and_off_agree_when_no_structure(self):
+        # 4 mutually DISSIMILAR genomes: no clusters AND no near-clone groups, so
+        # cluster-aware (adaptive clustering + representative fallback) is a no-op
+        # and matches the plain volume split. (Identical genomes would instead be
+        # near-clones and legitimately trigger the representative split.)
+        seqs = {h: "".join(random.Random(i).choices("ACGT", k=2000))
+                for i, h in enumerate(["a1", "a2", "a3", "a4"])}
         tasks = _tasks(["a1", "a2", "a3", "a4"])
-        with patch(_MOCK, side_effect=lambda p, h: _SA):
+        with patch(_MOCK, side_effect=lambda p, h: seqs[h]):
             on = _materialize_leaf_split(tasks, 0, random.Random(7), cluster_aware=True)
         off = _materialize_leaf_split(tasks, 0, random.Random(7))
-        assert on == off  # homogeneous -> identical to the random split
+        assert on == off  # no structure at all -> identical to the plain split
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +410,36 @@ class TestAdaptiveClustering:
         with patch(_MOCK, side_effect=lambda p, h: _SA), \
              patch.object(C, "_cluster_at", return_value=None):
             assert C.cluster_genomes_adaptive(tasks) is None
+
+
+class TestRepresentativeSplit:
+    """No-substantial-cluster fallback: near-clone groups are spread across the
+    folds and isolated genomes go to train, so every val/test genome has a train
+    counterpart (deployment-aligned; fixes val-great / test-chance on diverse
+    singleton-dominated clades)."""
+
+    def test_representative_fallback_covers_val_test(self):
+        # n=30: near-clone PAIRS (size 2 < min_size=ceil(0.1*30)=3, so the adaptive
+        # clustering zeroes out) + dissimilar singletons -> representative fallback.
+        seqmap = {}
+        for p in range(3):                              # 3 near-clone pairs
+            s = "".join(random.Random(p).choices("ACGT", k=2000))
+            seqmap[f"p{p}a"] = s
+            seqmap[f"p{p}b"] = s
+        for i in range(24):                             # 24 dissimilar singletons
+            seqmap[f"s{i}"] = "".join(random.Random(100 + i).choices("ACGT", k=2000))
+        tasks = _tasks(list(seqmap))
+        with patch(_MOCK, side_effect=lambda p, h: seqmap[h]):
+            split = _materialize_leaf_split(
+                tasks, 1, random.Random(0), cluster_aware=True,
+                min_genomes_for_genome_split=4)
+        assert all(split[s] for s in ("train", "val", "test"))
+        train_h = {t["header_id"] for t in split["train"]}
+        held = [t["header_id"] for s in ("val", "test") for t in split[s]]
+        # every held-out genome is a pair member (its identical twin is in train)
+        assert held and all(h.startswith("p") for h in held)
+        # all 24 dissimilar singletons stay in train (no possible counterpart)
+        assert all(f"s{i}" in train_h for i in range(24))
 
 
 class TestClusterAwareWindowSlicing:

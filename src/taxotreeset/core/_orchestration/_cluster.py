@@ -214,3 +214,44 @@ def cluster_genomes_adaptive(
         if clusters_idx is not None:
             return [[tasks[i] for i in cluster] for cluster in clusters_idx]
     return None
+
+
+# Loose Jaccard at which two genomes count as recognisable near-neighbours for the
+# representative no-cluster fallback (below the tightest relax; still well above
+# the ~0 of truly unrelated genomes).
+_NN_THRESHOLD: float = 0.05
+
+
+def near_clone_groups(
+    tasks: list[dict],
+    *,
+    k: int = _KMER_K,
+    sketch_size: int = _SKETCH_SIZE,
+    threshold: float = _NN_THRESHOLD,
+    max_genomes: int = _MAX_GENOMES,
+) -> list[list[int]] | None:
+    """Connected components at a loose ``threshold`` (raw — no substantiality gate).
+
+    Unlike :func:`cluster_genomes`, this keeps *every* component, including the
+    singletons: it is the input to the representative no-cluster fallback, which
+    spreads each near-clone group across the folds (so every val/test genome has a
+    train counterpart) and sends isolated genomes to train. Returns index lists,
+    or ``None`` when there are too few / too many genomes to bother.
+    """
+    n = len(tasks)
+    if n < 2 or n > max_genomes:
+        return None
+    sketches = [
+        _genome_sketch(
+            _read_single_sequence(t.get("fasta_path", ""), t.get("header_id", "")),
+            k, sketch_size,
+        )
+        for t in tasks
+    ]
+    edges = [
+        (i, j)
+        for i in range(n)
+        for j in range(i + 1, n)
+        if _jaccard(sketches[i], sketches[j], sketch_size) >= threshold
+    ]
+    return _connected_components(n, edges)
