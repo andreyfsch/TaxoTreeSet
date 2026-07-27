@@ -151,3 +151,66 @@ def cluster_genomes(
     if sum(1 for cluster in clusters_idx if len(cluster) >= min_size) < 2:
         return None
     return [[tasks[i] for i in cluster] for cluster in clusters_idx]
+
+
+# Threshold relaxations tried (after the default) when the default zeroes out.
+# A diverse clade (e.g. coronaviruses: every pairwise MinHash Jaccard sits below
+# the 0.30 default) yields NO clusters at the default, so the split falls back to
+# a volume-only assignment that can strand a whole sub-lineage in val/test (val
+# looks great, test collapses to ~chance). Relaxing the Jaccard threshold recovers
+# the segregable sub-lineages so each is spread across the folds.
+_RELAX_SCHEDULE: tuple[float, ...] = (0.20, 0.15, 0.10, 0.07, 0.05)
+
+
+def _cluster_at(sketches, n, threshold, sketch_size, min_size):
+    """Cluster pre-computed sketches at ``threshold``; return the components only
+    when there are >= 2 substantial clusters, else ``None``."""
+    edges = [
+        (i, j)
+        for i in range(n)
+        for j in range(i + 1, n)
+        if _jaccard(sketches[i], sketches[j], sketch_size) >= threshold
+    ]
+    clusters_idx = _connected_components(n, edges)
+    if sum(1 for cluster in clusters_idx if len(cluster) >= min_size) < 2:
+        return None
+    return clusters_idx
+
+
+def cluster_genomes_adaptive(
+    tasks: list[dict],
+    *,
+    k: int = _KMER_K,
+    sketch_size: int = _SKETCH_SIZE,
+    threshold: float = _JACCARD_THRESHOLD,
+    min_cluster_genomes: int = _MIN_CLUSTER_GENOMES,
+    min_cluster_frac: float = _MIN_CLUSTER_FRAC,
+    max_genomes: int = _MAX_GENOMES,
+) -> list[list[dict]] | None:
+    """Like :func:`cluster_genomes`, but sketch ONCE and relax on an empty result.
+
+    Tries the default ``threshold`` first (unchanged behaviour for heads that
+    already cluster); if it finds no actionable structure, it retries at the
+    progressively lower thresholds in :data:`_RELAX_SCHEDULE` (reusing the same
+    sketches), returning the first that yields >= 2 substantial clusters. This
+    keeps diverse clades — whose every pairwise Jaccard is below the default —
+    from falling through to a non-representative volume split. Returns ``None``
+    only when even the loosest threshold finds no segregable sub-lineages.
+    """
+    n = len(tasks)
+    if n < 2 or n > max_genomes:
+        return None
+    sketches = [
+        _genome_sketch(
+            _read_single_sequence(t.get("fasta_path", ""), t.get("header_id", "")),
+            k, sketch_size,
+        )
+        for t in tasks
+    ]
+    min_size = max(min_cluster_genomes, math.ceil(min_cluster_frac * n))
+    schedule = [threshold] + [t for t in _RELAX_SCHEDULE if t < threshold]
+    for t in schedule:
+        clusters_idx = _cluster_at(sketches, n, t, sketch_size, min_size)
+        if clusters_idx is not None:
+            return [[tasks[i] for i in cluster] for cluster in clusters_idx]
+    return None

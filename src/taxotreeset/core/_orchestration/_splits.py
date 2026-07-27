@@ -8,7 +8,10 @@ rely on. There is no orchestrator state here — every caller passes what it nee
 
 import random
 
-from taxotreeset.core._orchestration._cluster import ClusterParams, cluster_genomes
+from taxotreeset.core._orchestration._cluster import (
+    ClusterParams,
+    cluster_genomes_adaptive,
+)
 from taxotreeset.dataset.utils import _read_single_sequence
 
 _STRATIFIED_TRAIN_RATIO: float = 0.70
@@ -225,7 +228,7 @@ def _cluster_stratified_split(
     units = _group_by_genome(tasks)
     unit_by_key = {_genome_key(unit[0]): unit for unit in units}
     reps = [unit[0] for unit in units]
-    clusters = cluster_genomes(
+    clusters = cluster_genomes_adaptive(
         reps,
         k=cp.k,
         sketch_size=cp.sketch_size,

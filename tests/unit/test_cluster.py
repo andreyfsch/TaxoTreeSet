@@ -324,7 +324,7 @@ class TestClusterParams:
             k=15, sketch_size=64, jaccard_threshold=0.55,
             min_cluster_genomes=4, min_cluster_frac=0.25, max_genomes=99)
         with patch(
-            "taxotreeset.core._orchestration._splits.cluster_genomes",
+            "taxotreeset.core._orchestration._splits.cluster_genomes_adaptive",
             return_value=None,
         ) as m:
             _materialize_leaf_split(
@@ -359,6 +359,51 @@ class TestClusterParams:
             for split in ("train", "val", "test"):
                 assert {t["header_id"][0] for t in explicit[split]} == {
                     t["header_id"][0] for t in implicit[split]}
+
+
+class TestAdaptiveClustering:
+    """``cluster_genomes_adaptive`` tries the default threshold, then relaxes if it
+    zeroes — so a diverse clade (coronaviruses: every pairwise Jaccard below the
+    default) recovers segregable sub-lineages instead of falling through to a
+    non-representative volume split (val great, test ~chance)."""
+
+    def test_relaxes_when_default_zeroes(self):
+        from taxotreeset.core._orchestration import _cluster as C
+        tasks = _tasks(["a1", "a2", "a3", "b1", "b2", "b3"])
+        seen = []
+
+        def fake_cluster_at(sketches, n, threshold, sketch_size, min_size):
+            seen.append(threshold)
+            return [[0, 1, 2], [3, 4, 5]] if threshold <= 0.15 else None
+
+        with patch(_MOCK, side_effect=lambda p, h: _SA), \
+             patch.object(C, "_cluster_at", side_effect=fake_cluster_at):
+            out = C.cluster_genomes_adaptive(tasks)
+        assert out is not None                     # relaxation recovered structure
+        assert seen[0] == C._JACCARD_THRESHOLD     # tried the default first
+        assert any(t <= 0.15 for t in seen)        # then relaxed lower
+
+    def test_no_relax_when_default_finds_structure(self):
+        from taxotreeset.core._orchestration import _cluster as C
+        tasks = _tasks(["a1", "a2", "b1", "b2"])
+        seen = []
+
+        def fake_cluster_at(sketches, n, threshold, sketch_size, min_size):
+            seen.append(threshold)
+            return [[0, 1], [2, 3]]
+
+        with patch(_MOCK, side_effect=lambda p, h: _SA), \
+             patch.object(C, "_cluster_at", side_effect=fake_cluster_at):
+            out = C.cluster_genomes_adaptive(tasks)
+        assert out is not None
+        assert seen == [C._JACCARD_THRESHOLD]      # first try succeeded, no relax
+
+    def test_returns_none_when_even_loosest_finds_nothing(self):
+        from taxotreeset.core._orchestration import _cluster as C
+        tasks = _tasks(["a1", "a2", "a3"])
+        with patch(_MOCK, side_effect=lambda p, h: _SA), \
+             patch.object(C, "_cluster_at", return_value=None):
+            assert C.cluster_genomes_adaptive(tasks) is None
 
 
 class TestClusterAwareWindowSlicing:
