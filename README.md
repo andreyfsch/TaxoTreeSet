@@ -259,14 +259,19 @@ be identical to the child's.
 
 The per-class budget is distributed across a class's genomes in proportion to
 their length, so longer genomes contribute more windows. The train/val/test
-split is **by whole genome** whenever a class has at least three genomes: each
-genome is assigned entirely to a single split, so no sliding window is ever
-shared between splits — there is no leakage. Only when a class has fewer than
-three genomes does it fall back to slicing a single sequence positionally
-(70 / 15 / 15), accepting some intra-genome leakage as the price of having any
-data at all for that class. Both modes are **cluster-aware by default**
-(`--no-cluster-aware-split` to disable), keeping the split representative when a
-class's genomes are phylogenetically clustered — see below.
+split is **by whole genome** whenever a class has at least three *distinct*
+genomes: each genome is assigned entirely to a single split, so no sliding
+window is ever shared between splits — there is no leakage. "Distinct" counts
+genomes, not sequences: a segmented or multi-contig genome (e.g. an 8-segment
+influenza) is **one** genome, so its segments never scatter across splits (which
+would let train and val hold different pieces of the same organism). Below three
+genomes the split falls back to slicing each genome positionally into three
+equal-width regions (window counts 70 / 15 / 15), accepting some intra-genome
+leakage as the price of having any data at all for that class. All modes are
+**cluster-aware by default** (`--no-cluster-aware-split` to disable): the
+whole-genome split above is what the plain path and a *clustered* class use, but a
+diverse many-genome clade with no segregable sub-lineages is instead
+**window-sliced** so `val`/`test` stay representative — see below.
 
 ### Cluster-aware splitting (default)
 
@@ -280,17 +285,28 @@ resembles `train`) looks great. A single per-head F1 then hides an unstable,
 non-representative split; the `val`↔`test` gap is the tell.
 
 The cluster-aware split is **on by default** (`--no-cluster-aware-split` opts out,
-restoring the plain random / contiguous split). It makes the split representative
-and is **self-verifying** — where genomes aren't clustered it falls back to the
-plain split, so it is never *wrong*, only occasionally unnecessary:
+restoring the plain random / contiguous split). It keeps the split representative
+in two structure-dependent ways, and is **self-verifying** — it inspects each
+class's genomes and picks the mode that fits, so it never produces a *worse* split
+than the plain one:
 
 - **Genome-level.** It MinHash-clusters the class's genomes (tool-free: a bottom-k
-  sketch of each genome's k-mers, single-linkage by the Jaccard estimate) and, only
-  when it finds actionable structure (≥ 2 well-separated clusters), spreads each
-  cluster across train/val/test so every split spans every sub-lineage. With no
-  such structure it keeps the random split. On RefSeq (≈ 1 genome/species) genomes
-  are usually diverse, so this is mostly a guard for denser collections (e.g.
-  GenBank strain sets); tune when it engages with `--cluster-jaccard-threshold`,
+  sketch of each genome's k-mers, single-linkage by the Jaccard estimate), starting
+  at `--cluster-jaccard-threshold` (default 0.30) and **relaxing the threshold**
+  (down to ~0.05) when the default finds nothing — so a diverse clade whose every
+  pairwise Jaccard sits below the default still surfaces its segregable sub-lineages.
+  When it finds actionable structure (≥ 2 well-separated clusters) it spreads each
+  cluster across train/val/test, so every split spans every sub-lineage. When there
+  is genuinely no segregable structure — a diverse clade of near-singletons, common
+  on RefSeq (≈ 1 genome/species) — a whole-genome split would strand a sub-lineage
+  in `val` (val collapses while `test`, which resembles `train`, looks great), so it
+  instead **window-slices every genome**: `val`/`test` become held-out *windows* of
+  the same genomes, so every genome is in `train` and represented in `val`/`test`.
+  This is deliberate, not a fallback — a belongs/detector head's job is to recognize
+  *known* lineages (flagging genuinely novel clades is the reject class's and the
+  [clade-holdout benchmark](#clade-holdout-open-set-benchmark-optional)'s job), so
+  measuring it on held-out windows of the training genomes is the aligned test. Tune
+  when the clustering engages with `--cluster-jaccard-threshold`,
   `--cluster-min-genomes`, and `--cluster-min-frac`.
 - **Single / few-genome classes.** These have no genomes to redistribute, so the
   positional fallback is the risk instead: cutting one genome into three contiguous
@@ -457,7 +473,7 @@ Key options:
 | `--min-leaves-per-class` | 3             | Minimum sequence leaves for a child to stay a standalone class |
 | `--rare-taxa-strategy`   | fallback      | `fallback` (divert rare taxa) or `keep` (retain all classes)   |
 | `--keep-imbalance`       | off           | Keep each class up to its own capacity (capped by `--max-n-per-class`) instead of undersampling to the sibling minimum; records `class_weights` in `label_map.json` |
-| `--no-cluster-aware-split` | (on)        | Cluster-aware splitting is **on by default** (MinHash cluster-stratified + block-stratified windows keep train/val/test representative for non-i.i.d. genomes; self-verifying). This flag opts out; tune the default with `--cluster-jaccard-threshold` / `--cluster-min-genomes` / `--cluster-min-frac` |
+| `--no-cluster-aware-split` | (on)        | Cluster-aware splitting is **on by default**: MinHash cluster-stratification (adaptive threshold) spreads sub-lineages, a diverse clade with none is window-sliced, and few-genome classes are block-stratified — keeping train/val/test representative; self-verifying. This flag opts out; tune with `--cluster-jaccard-threshold` / `--cluster-min-genomes` / `--cluster-min-frac` |
 | `--all-ranks`            | off           | Resolve lineages at full NCBI granularity (sub-ranks/clades), not just the 8 canonical ranks |
 | `--binary-only`          | off           | One belongs/not-belongs head per node instead of multi-class heads (with `--binary-budget`, `--extract-batch-size`) |
 | `--holdout-clades` / `--holdout-rank` | off | Open-set benchmark: withhold whole clades from training and write `benchmark_manifest_<scope>.json` (explicit TaxIDs, or a `--holdout-fraction` sample at a rank; `--holdout-seed`). Pair with `--no-sync`. See [clade-holdout benchmark](#clade-holdout-open-set-benchmark-optional) |

@@ -477,9 +477,10 @@ def _assign_genome_level(
     """Assign whole genomes to folds (the ``>= min_genomes`` path).
 
     Negatives with a dominant genome are block-stratified. Otherwise a cluster-aware
-    head tries, in order, MinHash sub-lineage stratification and — for diverse
-    singleton-dominated clades — the representative near-clone split, each falling
-    through to the plain volume split when it finds no actionable structure.
+    head tries MinHash sub-lineage stratification first and, for a diverse clade with
+    no segregable sub-lineages, window-slices EVERY genome (val/test = held-out
+    windows of the same genomes) rather than a whole-genome volume split that could
+    strand a sub-lineage in val. A non-cluster-aware head uses the plain volume split.
     """
     if cluster_aware and block_stratify_large:
         _assign_stratified_hybrid(shuffled, class_index, result, max_subseq_len)
