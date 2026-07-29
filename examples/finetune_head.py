@@ -296,6 +296,11 @@ def main():
         greater_is_better=True,
         label_smoothing_factor=0.1,
         fp16=use_fp16,
+        # torch >=2.9 dispatches the default adamw_torch to the *foreach* Adam kernel,
+        # which asserts grad_scale is None -- so resuming an fp16 run through GradScaler
+        # dies with AssertionError in _multi_tensor_adam. The fused kernel accepts
+        # grad_scale/found_inf natively. Same algorithm, different kernel.
+        optim="adamw_torch_fused",
         logging_steps=25,
         report_to="none",
         save_total_limit=2,
