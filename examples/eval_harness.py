@@ -128,10 +128,18 @@ def forest_roots(registry) -> list[str]:
 
     Emulates the permissive root: it would push all of these and let each
     self-verify, so running them all is the faithful equivalent.
+
+    Enumerates every PACKED head, not the keys of ``meta.tree``. ``tree`` is built
+    as a parent -> children map, so a head with no children never becomes a key —
+    and a single-node component is neither a key nor anyone's child, so iterating
+    keys drops it entirely. On the pilot bundle that silently lost 5 of 7 entry
+    points (1032474, 10474 Fuselloviridae, 154834, 1611875, 2872567) and with them
+    1,350 of the 12,350 eval reads, 10.9%, whose expected commit is at one of
+    those heads. They would have scored as unexplained abstentions.
     """
     tree = registry.meta.tree or {}
     children = {c for kids in tree.values() for c in kids}
-    return [t for t in tree if t not in children]
+    return [t for t in registry.taxids if t not in children]
 
 
 def phylocascade_predictions(
