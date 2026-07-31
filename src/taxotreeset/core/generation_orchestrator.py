@@ -201,6 +201,7 @@ class GenerationOrchestrator:
         reject_fraction: float = 1.0,
         reject_near_far_start: float = 0.5,
         reject_near_far_end: float = 0.9,
+        reject_near_far_span: int = 9,
         reject_cross_domain: list[str] | None = None,
         reject_cross_domain_sample: int = 200,
         reject_cross_domain_depth: int = 2,
@@ -269,12 +270,21 @@ class GenerationOrchestrator:
                 nearest ancestor's sibling clades (near; the rest from farther
                 clades) at the SHALLOWEST reject-eligible head (the root's
                 children). Shallow heads see diverse intruders, so this is low.
-            reject_near_far_end: The same fraction at the DEEPEST head. Upstream
-                heads prune distant intruders, so a deep head mostly meets near
-                (sibling) intruders — this is high (near-heavy). The near fraction
-                is linearly interpolated between start and end by the head's depth
-                (relative to the tree's depth). Set ``end == start`` for a flat,
+            reject_near_far_end: The same fraction once the head is
+                ``reject_near_far_span`` pruning levels below the shallowest,
+                and for everything deeper. Upstream heads prune distant
+                intruders, so a deep head mostly meets near (sibling) intruders
+                — this is high (near-heavy). Set ``end == start`` for a flat,
                 depth-independent ratio.
+            reject_near_far_span: Pruning levels over which the near fraction
+                travels from start to end, after which it saturates. This is a
+                property of how well heads prune, NOT of the tree: scaling by
+                the tree's own maximum depth instead would make every existing
+                head's negative composition shift when an unrelated, deeper
+                domain is added — and since FR is measured on this bucket and
+                feeds the inference-time prune margin, that drift would reach
+                the cascade's calibration silently. The default 9 reproduces
+                the previous tree-relative behaviour exactly on the viral tree.
         """
         self.registry: Any = registry
         self.config_path: str = config_path
@@ -313,6 +323,7 @@ class GenerationOrchestrator:
         self.reject_fraction: float = reject_fraction
         self.reject_near_far_start: float = reject_near_far_start
         self.reject_near_far_end: float = reject_near_far_end
+        self.reject_near_far_span: int = reject_near_far_span
         self.reject_cross_domain: list[str] = reject_cross_domain or []
         self.reject_cross_domain_sample: int = reject_cross_domain_sample
         self.reject_cross_domain_depth: int = reject_cross_domain_depth

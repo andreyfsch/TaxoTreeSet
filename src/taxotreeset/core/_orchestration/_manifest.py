@@ -192,6 +192,9 @@ def _write_run_metadata(
             "n_per_class": v.get("n_per_class", 0),
             "n_leaves": v.get("num_leaves", 0),
             "n_classes": len(labels),
+            "reject_near_ratio": v.get("reject_near_ratio"),
+            "reject_near_leaves": v.get("reject_near_leaves"),
+            "reject_far_leaves": v.get("reject_far_leaves"),
             "classes": [
                 {
                     "taxid": label_taxid,
@@ -257,6 +260,13 @@ def _write_run_metadata(
             "reject_fraction": ctx.reject_fraction,
             "reject_near_far_start": ctx.reject_near_far_start,
             "reject_near_far_end": ctx.reject_near_far_end,
+            # Recorded because start/end alone do NOT determine a head's realized
+            # near fraction — the span (previously the tree's own max decidable
+            # depth) scales it. Without this, two runs with byte-identical flags
+            # over different vault contents produce different negative
+            # distributions and nothing in the artifact distinguishes them, while
+            # the FR measured on that bucket feeds the cascade's prune margin.
+            "reject_near_far_span": ctx.reject_near_far_span,
             "binary_only": ctx.binary_only,
             "binary_budget": ctx.binary_budget,
             "all_ranks": ctx.all_ranks,

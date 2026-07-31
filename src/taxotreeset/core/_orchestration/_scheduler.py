@@ -439,9 +439,10 @@ class _CascadeScheduler:
                 cross_domain_leaves=self.ctx._cross_domain_pool,
                 cross_domain_max_depth=self.ctx.reject_cross_domain_depth,
             )
+            near_ratio = self._reject_near_ratio(node)
             neg_tasks = build_reject_tasks(
                 near_leaves=near, far_leaves=far, n_reject=budget,
-                near_far_ratio=self._reject_near_ratio(node),
+                near_far_ratio=near_ratio,
                 min_subseq_len=self.ctx.min_subseq_len,
             )
             if not pos_tasks or not neg_tasks:
@@ -473,6 +474,15 @@ class _CascadeScheduler:
                 "scenario": "binary_belongs",
                 "n_per_class": budget,
                 "num_leaves": num_leaves,
+                # The REALIZED reject composition. The global start/end/span do
+                # not pin it down per head: the near/far pools are capped and
+                # unevenly populated, so a head can ask for a near fraction its
+                # pools cannot supply. Recorded so FR — measured on this bucket
+                # and added to the prune margin at inference — can be traced to
+                # the distribution it was measured against.
+                "reject_near_ratio": near_ratio,
+                "reject_near_leaves": len(near),
+                "reject_far_leaves": len(far),
                 "labels": {
                     f"not_belongs_{taxid}": {
                         "class_idx": 0, "taxid": f"not_belongs_{taxid}",
@@ -846,8 +856,23 @@ class _CascadeScheduler:
         heads under long single-child chains (e.g. a strain sitting directly
         under a clade). The near fraction is linearly interpolated from
         ``reject_near_far_start`` at decidable depth 2 (the root's decidable
-        children) to ``reject_near_far_end`` at the deepest decidable node.
+        children) to ``reject_near_far_end`` after ``reject_near_far_span``
+        further pruning levels, and saturates there.
         ``end == start`` gives a flat, depth-independent ratio.
+
+        The scale is a SPAN, not the tree's own maximum depth. The span answers
+        "over how many pruning levels do distant intruders stop mattering",
+        which is a property of how well heads prune (their false-accept rate) —
+        not of how deep some unrelated clade happens to reach. Normalising by
+        ``max(depths.values())`` instead made a head's negative composition a
+        function of global tree shape: extending the tree to a deeper domain
+        would silently lower the near fraction of every existing head, though
+        nothing about its own ancestry had changed. Since FR is measured on this
+        bucket and is added to the inference-time prune margin, that drift would
+        reach the cascade's calibration constants unannounced.
+
+        The default span 9 reproduces the previous behaviour exactly on the
+        viral tree (whose deepest decidable node is at 11, and ``d_min`` is 2).
 
         Args:
             node: The head (parent) node being scheduled.
@@ -856,13 +881,13 @@ class _CascadeScheduler:
             Near fraction in ``[start, end]`` for this head's decidable depth.
         """
         start, end = self.ctx.reject_near_far_start, self.ctx.reject_near_far_end
+        span = self.ctx.reject_near_far_span
+        if span <= 0:
+            return start
         depths = self._decidable_depths(node.root)
         d_min = 2                         # a decidable child of the root
-        d_max = max(depths.values()) if depths else d_min
-        if d_max <= d_min:
-            return start
         d = depths.get(id(node), d_min)
-        frac = min(1.0, max(0.0, (d - d_min) / (d_max - d_min)))
+        frac = min(1.0, max(0.0, (d - d_min) / span))
         return start + (end - start) * frac
 
     def _decidable_depths(self, root: Node) -> dict:

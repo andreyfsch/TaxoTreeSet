@@ -655,8 +655,8 @@ class TestMaybeAddRejectClass:
 
     def test_near_ratio_interpolates_over_decidable_depth(self, orchestrator):
         # Branching (non-passthrough) tree — each node is a real decision with
-        # >=2 taxonomic children. Decidable depths A=2, CA=3, GA=4; d_max=4, so
-        # the near fraction runs start -> end linearly over decidable depth.
+        # >=2 taxonomic children. Decidable depths A=2, CA=3, GA=4. With span=2
+        # the near fraction runs start -> end over two pruning levels.
         root = _reject_node("1", None, "superkingdom", "Root")
         a = _reject_node("2", root, "kingdom", "A")
         _reject_node("3", root, "kingdom", "B")
@@ -667,9 +667,60 @@ class TestMaybeAddRejectClass:
         _rej_leaf("g1", ga)
         orchestrator.reject_near_far_start = 0.4
         orchestrator.reject_near_far_end = 0.9
+        orchestrator.reject_near_far_span = 2
         assert orchestrator._reject_near_ratio(a) == pytest.approx(0.4)     # d2
         assert orchestrator._reject_near_ratio(ca) == pytest.approx(0.65)   # d3
         assert orchestrator._reject_near_ratio(ga) == pytest.approx(0.9)    # d4
+
+    def test_near_ratio_does_not_depend_on_tree_max_depth(self, orchestrator):
+        """The whole point of the span: a head's ratio is set by its OWN ancestry.
+
+        Scaling by the tree's deepest node instead made every existing head's
+        negative composition shift when an unrelated, deeper clade was added —
+        and since FR is measured on that bucket and feeds the inference-time
+        prune margin, the drift reached the cascade's calibration silently.
+        """
+        def build(extra_depth: int):
+            root = _reject_node("1", None, "superkingdom", "Root")
+            a = _reject_node("2", root, "kingdom", "A")
+            _reject_node("3", root, "kingdom", "B")
+            ca = _reject_node("20", a, "phylum", "CA")
+            _reject_node("21", a, "phylum", "CB")
+            _rej_leaf("g0", ca)
+            # An unrelated branch that reaches deeper, under the OTHER kingdom.
+            node = _reject_node("30", root, "kingdom", "Deep")
+            for i in range(extra_depth):
+                sib = _reject_node(f"4{i}", node, "clade", f"sib{i}")
+                node = _reject_node(f"5{i}", node, "clade", f"deep{i}")
+                _rej_leaf(f"sl{i}", sib)
+            _rej_leaf("dl", node)
+            return ca
+
+        orchestrator.reject_near_far_start = 0.5
+        orchestrator.reject_near_far_end = 0.9
+        orchestrator.reject_near_far_span = 9
+        shallow_tree = orchestrator._reject_near_ratio(build(1))
+        deep_tree = orchestrator._reject_near_ratio(build(6))
+        assert shallow_tree == pytest.approx(deep_tree)
+
+    def test_near_ratio_saturates_past_the_span(self, orchestrator):
+        """Beyond the span the ratio holds at ``end`` instead of overshooting.
+
+        A head 15 pruning levels down is not more sheltered than one at 9 — by
+        then the distant intruders are gone either way. This is what lets a
+        deeper domain reuse the same curve.
+        """
+        root = _reject_node("1", None, "superkingdom", "Root")
+        node = _reject_node("2", root, "kingdom", "A")
+        _reject_node("3", root, "kingdom", "B")
+        for i in range(8):
+            _reject_node(f"6{i}", node, "clade", f"sib{i}")
+            node = _reject_node(f"7{i}", node, "clade", f"n{i}")
+        _rej_leaf("g1", node)
+        orchestrator.reject_near_far_start = 0.5
+        orchestrator.reject_near_far_end = 0.9
+        orchestrator.reject_near_far_span = 3
+        assert orchestrator._reject_near_ratio(node) == pytest.approx(0.9)
 
     def test_near_ratio_ignores_passthrough_depth(self, orchestrator):
         # A node under a long single-child (passthrough) chain has high RAW tree
@@ -689,6 +740,7 @@ class TestMaybeAddRejectClass:
         _rej_leaf("d1", deep)
         orchestrator.reject_near_far_start = 0.5
         orchestrator.reject_near_far_end = 0.9
+        orchestrator.reject_near_far_span = 2
         assert pt_leaf.depth > deep.depth                  # raw depth: 5 > 4 ...
         assert orchestrator._reject_near_ratio(pt_leaf) == pytest.approx(0.5)  # ...but decidable d2
         assert orchestrator._reject_near_ratio(deep) == pytest.approx(0.9)     # decidable d4
