@@ -141,11 +141,19 @@ def phylocascade_predictions(
     limit: int | None = None,
     device: str = "cpu",
     log_every: int = 250,
+    inferer_factory=None,
 ) -> tuple[dict, list[dict]]:
     """One classify() call per read, per entry point; deepest accepting commit wins.
 
     Returns (predictions, diagnostics). Diagnostics carry the entry point used, the
     stop_reason, and whether the commit was bundle-exhausted rather than terminal.
+
+    Args:
+        inferer_factory: Optional ``registry -> NodeInferer``. When given, that
+            inferer replaces the DNABERT-2 one and EVERYTHING else — registry,
+            reject margin, false-reject weighting, deepest-survivor rule, true-path
+            consistency — stays identical, so the run isolates the head model as
+            the only variable. Used by the GC-only baseline.
     """
     from phylocascadeglm._registry import AdapterRegistry
     from phylocascadeglm.classify import Classifier
@@ -159,8 +167,12 @@ def phylocascade_predictions(
     def exhausted(taxid: str) -> bool:
         return not registry.children(str(taxid))
 
+    # One inferer instance is shared across entry points: it is stateless per call
+    # and the real one caches an expensive backbone.
+    shared = inferer_factory(registry) if inferer_factory else None
     classifiers = {
-        r: Classifier(bundle_path, device=device, root_taxid=r) for r in roots
+        r: Classifier(bundle_path, device=device, root_taxid=r, inferer=shared)
+        for r in roots
     }
 
     preds: dict[str, tuple[str | None, str | None]] = {}
@@ -237,6 +249,14 @@ def main() -> None:
     p.add_argument("--device", default="cpu")
     p.add_argument("--diagnostics", type=Path, default=None,
                    help="Write the per-read cascade diagnostics as JSONL.")
+    p.add_argument("--gc-baseline", action="store_true",
+                   help="Also run a GC-only cascade: identical traversal, every head "
+                        "replaced by a logistic on GC content fitted on that head's own "
+                        "train split. If the real cascade only ties this, the language "
+                        "model is not what is doing the work.")
+    p.add_argument("--datasets-root", type=Path,
+                   default=BASE / "datasets_binary_allranks",
+                   help="Dataset tree the GC heads are fitted on.")
     args = p.parse_args()
 
     import pyarrow.parquet as pq
@@ -274,6 +294,32 @@ def main() -> None:
                 for d in diags:
                     fh.write(json.dumps(d) + "\n")
             print(f"  per-read diagnostics -> {args.diagnostics}")
+
+    if args.gc_baseline:
+        if not args.bundle:
+            p.error("--gc-baseline needs --bundle (it reuses the bundle's tree)")
+        from gc_cascade import GCInferer, build_dataset_index, load_or_fit
+
+        from phylocascadeglm._registry import AdapterRegistry
+
+        registry = AdapterRegistry(args.bundle / "adapter_registry.json")
+        taxids = list((registry.meta.tree or {}).keys())
+        print(f"\nfitting {len(taxids)} GC heads on their own train splits…")
+        index = build_dataset_index(args.datasets_root)
+        coefs = load_or_fit(args.bundle / "gc_heads.json", taxids, index)
+        missing = sum(1 for t in taxids if coefs.get(str(t), (0.0, 0.0)) == (0.0, 0.0))
+        if missing:
+            print(f"  {missing}/{len(taxids)} heads got an uninformative fit "
+                  f"(no dataset, one class, or no GC variance) — they emit p=0.5")
+
+        preds, diags = phylocascade_predictions(
+            args.bundle, rows, entry_points=args.entry_points,
+            limit=args.limit, device=args.device,
+            inferer_factory=lambda reg: GCInferer(reg, coefs),
+        )
+        scored = rows[:args.limit] if args.limit else rows
+        print(f"\nGC-only cascade: {sum(1 for v in preds.values() if v[0])} commits")
+        print_report("GC-only cascade", score_reads(scored, preds))
 
 
 if __name__ == "__main__":
