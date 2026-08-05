@@ -33,6 +33,7 @@ from taxotreeset.core.generation import (
     make_reject_bucket_node,
     register_virtual_bucket,
     sample_reject_leaves,
+    summarise_reject_provenance,
 )
 from taxotreeset.core.generation.constants import is_recursion_terminator
 from taxotreeset.core._orchestration._splits import _SPLITS
@@ -445,6 +446,7 @@ class _CascadeScheduler:
                 near_far_ratio=near_ratio,
                 min_subseq_len=self.ctx.min_subseq_len,
             )
+            reject_provenance = summarise_reject_provenance(near, far, neg_tasks)
             if not pos_tasks or not neg_tasks:
                 skipped += 1
                 continue
@@ -481,6 +483,11 @@ class _CascadeScheduler:
                 # and added to the prune margin at inference — can be traced to
                 # the distribution it was measured against.
                 "reject_near_ratio": near_ratio,
+                # WHICH organisms this head learned to reject. The parquets keep
+                # only (seq, class_idx), so without this a trained head cannot be
+                # asked what its negatives were — the question every false-accept
+                # investigation has run into.
+                "reject_provenance": reject_provenance,
                 "reject_near_leaves": len(near),
                 "reject_far_leaves": len(far),
                 "labels": {

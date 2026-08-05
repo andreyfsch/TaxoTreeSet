@@ -118,6 +118,13 @@ def _write_label_maps(scheduling_artifacts: dict[str, Any]) -> None:
         # this with the training behaviour that determines the final verdict.
         if v.get("reliability"):
             label_map["reliability"] = v["reliability"]
+        # WHICH organisms the head was trained to reject. Without it a trained
+        # head cannot be asked what its negatives were: the parquets carry only
+        # (seq, class_idx), and a head that accepts every foreign organism looks
+        # identical on disk whether it saw a tight cluster of near-duplicates or a
+        # broad sweep of the tree.
+        if v.get("reject_provenance"):
+            label_map["reject_provenance"] = v["reject_provenance"]
         if balance_mode == "keep":
             # "balanced" class weights (total / (n_classes * n_c)) so a trainer
             # can offset the on-disk imbalance in its loss (or drive oversampling).

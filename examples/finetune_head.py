@@ -329,6 +329,21 @@ def main():
 
     # ---- evaluate on test set ----
     log.info("Evaluating on test set")
+    # Score the TRAIN split too. Without it a failed head cannot be triaged: a
+    # model at chance on val may have fit the training data perfectly (overfitting
+    # — fix with less capacity and more regularisation) or not at all (underfitting
+    # — fix with a larger LR or more steps), and the two demand opposite changes.
+    # Diagnosing this after the fact costs an adapter reload plus a full inference
+    # pass per head, which does not scale to a 16k-head tree.
+    #
+    # Capped and evaluated with the best checkpoint already loaded, so it measures
+    # the model that is actually saved.
+    _n_train_eval = min(len(ds_train), 2000)
+    train_results = trainer.evaluate(
+        ds_train.select(range(_n_train_eval)), metric_key_prefix="train_eval")
+    log.info("Train f1_macro=%.4f (on %d rows)",
+             train_results.get("train_eval_f1_macro", float("nan")), _n_train_eval)
+
     test_results = trainer.evaluate(ds_test, metric_key_prefix="test")
     log.info("Test f1_macro=%.4f  accuracy=%.4f",
              test_results.get("test_f1_macro", float("nan")),
@@ -352,6 +367,7 @@ def main():
     # ---- save metrics ----
     metrics = {
         "epoch_logs": metrics_cb.epoch_logs,
+        "train_eval": train_results,
         "test": test_results,
         "test_classification_report": report,
         "test_confusion_matrix": cm,

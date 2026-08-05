@@ -265,6 +265,10 @@ def main() -> None:
     p.add_argument("--datasets-root", type=Path,
                    default=BASE / "datasets_binary_allranks",
                    help="Dataset tree the GC heads are fitted on.")
+    p.add_argument("--gc-only", action="store_true",
+                   help="Skip the DNABERT-2 cascade and score only the GC one. The "
+                        "bundle is still needed for its tree and calibration; this "
+                        "just avoids paying for a neural pass already measured.")
     args = p.parse_args()
 
     import pyarrow.parquet as pq
@@ -286,7 +290,7 @@ def main() -> None:
         print(f"\n{name}: {len(preds)} reads committed, {unranked} with unknown rank")
         print_report(name, score_reads(rows, preds))
 
-    if args.bundle:
+    if args.bundle and not args.gc_only:
         preds, diags = phylocascade_predictions(
             args.bundle, rows, entry_points=args.entry_points,
             limit=args.limit, device=args.device,
@@ -311,7 +315,11 @@ def main() -> None:
         from phylocascadeglm._registry import AdapterRegistry
 
         registry = AdapterRegistry(args.bundle / "adapter_registry.json")
-        taxids = list((registry.meta.tree or {}).keys())
+        # Every packed head, not meta.tree's keys — tree is a parent -> children
+        # map, so a head with no children is absent from it. On the pilot bundle
+        # that was 18 of 47, and the 29 missing ones would have silently fitted
+        # no GC rule and emitted p=0.5 at every node they decide.
+        taxids = list(registry.taxids)
         print(f"\nfitting {len(taxids)} GC heads on their own train splits…")
         index = build_dataset_index(args.datasets_root)
         coefs = load_or_fit(args.bundle / "gc_heads.json", taxids, index)

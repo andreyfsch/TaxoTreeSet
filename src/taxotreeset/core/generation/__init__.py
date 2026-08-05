@@ -19,6 +19,7 @@ from taxotreeset.core.generation.reject_bucket import (
     build_reject_tasks,
     make_reject_bucket_node,
     sample_reject_leaves,
+    summarise_reject_provenance,
 )
 from taxotreeset.core.generation.virtual_id import make_virtual_id
 
@@ -34,4 +35,5 @@ __all__ = [
     "make_virtual_id",
     "register_virtual_bucket",
     "sample_reject_leaves",
+    "summarise_reject_provenance",
 ]

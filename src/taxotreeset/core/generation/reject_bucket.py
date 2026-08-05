@@ -241,7 +241,69 @@ def build_reject_tasks(
 
     tasks: list[dict] = []
     if n_near and near_leaves:
-        tasks.extend(_allocate_n_across_leaves(near_leaves, n_near, min_subseq_len))
+        near_tasks = _allocate_n_across_leaves(near_leaves, n_near, min_subseq_len)
+        for t in near_tasks:
+            t["reject_pool"] = "near"
+        tasks.extend(near_tasks)
     if n_far and far_leaves:
-        tasks.extend(_allocate_n_across_leaves(far_leaves, n_far, min_subseq_len))
+        far_tasks = _allocate_n_across_leaves(far_leaves, n_far, min_subseq_len)
+        for t in far_tasks:
+            t["reject_pool"] = "far"
+        tasks.extend(far_tasks)
     return tasks
+
+
+def summarise_reject_provenance(
+    near_leaves: list, far_leaves: list, tasks: list[dict]
+) -> dict:
+    """Describe WHICH organisms a head was actually trained to reject.
+
+    The parquets carry only ``(seq, class_idx)``, so once a head is trained there
+    is no way to ask what its negatives were — and that is the question the FA
+    diagnosis keeps running into. A head accepting 100% of foreign organisms may
+    have been shown a tight cluster of near-duplicates or a broad sweep of the
+    tree, and nothing on disk distinguishes the two.
+
+    Records the leaf counts each pool contributed, the DISTINCT source organisms
+    (not windows: 20,000 windows drawn from two genomes are two examples
+    resampled), and the realised near/far split, which can differ from the
+    requested ratio when one pool cannot supply its share.
+
+    Args:
+        near_leaves: The near pool handed to :func:`build_reject_tasks`.
+        far_leaves: The far pool.
+        tasks: Its output, already tagged with ``reject_pool``.
+
+    Returns:
+        A JSON-serialisable dict for ``label_map.json``.
+    """
+    def _src(leaf) -> str:
+        return str(getattr(leaf, "header_id", None)
+                   or getattr(leaf, "name", None)
+                   or id(leaf))
+
+    def _clade(leaf) -> str:
+        p = getattr(leaf, "parent", None)
+        return str(getattr(p, "name", "?")) if p is not None else "?"
+
+    by_pool: dict[str, list[dict]] = {"near": [], "far": []}
+    for t in tasks:
+        by_pool.setdefault(t.get("reject_pool", "?"), []).append(t)
+
+    out: dict = {}
+    for pool, leaves in (("near", near_leaves), ("far", far_leaves)):
+        ts = by_pool.get(pool, [])
+        used = {t.get("header_id") for t in ts if t.get("header_id")}
+        out[pool] = {
+            "pool_leaves": len(leaves),
+            "leaves_used": len(used),
+            "windows": sum(int(t.get("n", 0)) for t in ts),
+            "source_clades": sorted({_clade(leaf) for leaf in leaves})[:50],
+            "n_source_clades": len({_clade(leaf) for leaf in leaves}),
+        }
+    tot = sum(out[p]["windows"] for p in ("near", "far"))
+    out["realised_near_fraction"] = (
+        out["near"]["windows"] / tot if tot else None
+    )
+    out["distinct_sources"] = out["near"]["leaves_used"] + out["far"]["leaves_used"]
+    return out

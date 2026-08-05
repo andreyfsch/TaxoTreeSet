@@ -155,7 +155,9 @@ class GCInferer(NodeInferer):
         self._coefs = coefs
 
     def infer(self, windows: list[str], taxid: str) -> np.ndarray:
-        node = self._registry.get(str(taxid))
+        node = self._registry.get_node(str(taxid))
+        if node is None:
+            return np.zeros(2, dtype=float)
         n = int(getattr(node, "num_labels", 2))
         logits = np.zeros(n, dtype=float)
 
