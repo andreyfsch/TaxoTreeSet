@@ -61,7 +61,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from tqdm import tqdm
 
-from taxotreeset.dataset.sequence_utils import extract_subseqs
+from taxotreeset.dataset.sequence_utils import mutate_sequence, extract_subseqs
 from taxotreeset.dataset.utils import (
     _pool_worker_initializer,
     _read_single_sequence,
@@ -156,6 +156,7 @@ def _write_split_parquet(
     output_path: str,
     max_subseq_len: int,
     min_subseq_len: int = _DEFAULT_MIN_SUBSEQ_LEN,
+    mutation_rate: float = 0.0,
 ) -> None:
     """Write subsequences from a list of tasks to a Parquet file.
 
@@ -193,7 +194,8 @@ def _write_split_parquet(
     try:
         for task in tasks:
             extracted_rows = _extract_subseqs_for_task(
-                task, max_subseq_len, min_subseq_len
+                task, max_subseq_len, min_subseq_len,
+                mutation_rate=mutation_rate
             )
             buffer.extend(extracted_rows)
             if len(buffer) >= _BUFFER_SIZE_ROWS:
@@ -208,6 +210,8 @@ def _extract_subseqs_for_task(
     task: dict[str, Any],
     max_subseq_len: int,
     min_subseq_len: int = _DEFAULT_MIN_SUBSEQ_LEN,
+    mutation_rate: float = 0.0,
+    seed: int = 42,
 ) -> list[dict[str, Any]]:
     """Read, slice, and sample subsequences for a single task.
 
@@ -240,9 +244,26 @@ def _extract_subseqs_for_task(
     )
 
     class_index = int(task["class_idx"])
-    return [
+    rows = [
         {"seq": subseq, "class_idx": class_index} for subseq in sampled_subsequences
     ]
+    # Synthetic divergence. Each window also enters as a mutated copy, so the head
+    # sees the taxon as it would look a few percent away from the reference — the
+    # regime where the k-mer baselines score exactly 0.000 and the cascade is
+    # supposed to earn its keep. The copy carries the same label: a diverged member
+    # of the taxon is still a member, which is precisely the generalisation the
+    # reference-only windows never demand.
+    if mutation_rate > 0 and sampled_subsequences:
+        import random as _random
+        rng = _random.Random(
+            (seed, task.get("header_id", ""), task.get("class_idx", 0)).__hash__()
+        )
+        rows.extend(
+            {"seq": mutate_sequence(subseq, mutation_rate, rng),
+             "class_idx": class_index}
+            for subseq in sampled_subsequences
+        )
+    return rows
 
 
 def _buffer_to_arrow_table(buffer: list[dict[str, Any]]) -> pa.Table:

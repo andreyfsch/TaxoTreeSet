@@ -207,7 +207,7 @@ class TestWriteSplitParquet:
 
         call_count = {"n": 0}
 
-        def fake_extract(task, max_subseq_len, min_subseq_len=100):
+        def fake_extract(task, max_subseq_len, min_subseq_len=100, **_kwargs):
             call_count["n"] += 1
             return big_batch
 

@@ -102,6 +102,50 @@ def _build_iupac_translation_table() -> dict[int, int]:
 _IUPAC_TRANSLATE_TABLE: dict[int, int] = _build_iupac_translation_table()
 
 
+_MUT_ALT = {"A": "CGT", "C": "AGT", "G": "ACT", "T": "ACG",
+            "a": "cgt", "c": "agt", "g": "act", "t": "acg"}
+
+
+def mutate_sequence(sequence: str, rate: float, rng) -> str:
+    """Substitute a fraction ``rate`` of bases, uniformly among the other three.
+
+    Simulates divergence from the reference so a head can learn a taxon it has not
+    literally seen. The rate has a direct reading: 0.05 stands for an organism 5%
+    diverged, which is what the tool is asked to still place correctly — the
+    parameter is a statement of intended scope, not a knob to tune.
+
+    Motivated by measurement. On the pilot's evaluation set the k-mer baselines
+    score exactly 0.000 beyond mash distance 0.20, while the cascade stays
+    non-zero; training only on reference windows asks a head to generalise to a
+    divergence it was never shown. Substitution only, no indels: the windows are
+    fixed-length and the downstream tokenizer pads to the batch, so length changes
+    would confound the comparison with un-augmented heads.
+
+    Non-ACGT characters (N, IUPAC ambiguity codes) are left alone — mutating an
+    already-ambiguous position adds no information.
+
+    Args:
+        sequence: The window to mutate.
+        rate: Fraction of positions to substitute, in [0, 1]. 0 returns the input.
+        rng: ``random.Random`` for reproducibility with the run's seed.
+
+    Returns:
+        The mutated sequence, of identical length.
+    """
+    if rate <= 0 or not sequence:
+        return sequence
+    n = len(sequence)
+    k = int(round(n * rate))
+    if k <= 0:
+        return sequence
+    out = list(sequence)
+    for pos in rng.sample(range(n), min(k, n)):
+        alt = _MUT_ALT.get(out[pos])
+        if alt:
+            out[pos] = alt[rng.randrange(3)]
+    return "".join(out)
+
+
 def get_complement(sequence: str) -> str:
     """Return the reverse complement of a DNA sequence with IUPAC support.
 
