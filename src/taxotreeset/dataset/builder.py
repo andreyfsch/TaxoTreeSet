@@ -89,6 +89,7 @@ _SHARD_ROWS_TARGET = 50_000
 def extract_parent_node_worker(
     job: tuple,
     min_subseq_len: int = _DEFAULT_MIN_SUBSEQ_LEN,
+    mutation_rate: float = 0.0,
 ) -> bool:
     """Build train/val/test Parquet files for a single parent node.
 
@@ -112,6 +113,9 @@ def extract_parent_node_worker(
             value is a list of task dicts with keys 'fasta_path',
             'header_id', 'start_pct', 'end_pct', 'n', and 'class_idx'.
         min_subseq_len: Lower bound on each subsequence length, in bp.
+        mutation_rate: Substitution rate for augmented copies, applied to the
+            TRAIN split only — val and test must stay real sequence, or the
+            held-out score measures synthetic mutants instead of organisms.
 
     Returns:
         True on completion. Failures within a single task are logged
@@ -144,6 +148,7 @@ def extract_parent_node_worker(
             output_path=tmp_path,
             max_subseq_len=max_subseq_len,
             min_subseq_len=min_subseq_len,
+            mutation_rate=mutation_rate if split == "train" else 0.0,
         )
         if os.path.exists(tmp_path):
             os.replace(tmp_path, output_path)
@@ -315,15 +320,23 @@ def _partition_tasks(
     return [s for s in shards if s]
 
 
-def _shard_hash(shard_tasks: list[dict[str, Any]]) -> str:
+def _shard_hash(
+    shard_tasks: list[dict[str, Any]],
+    mutation_rate: float = 0.0,
+) -> str:
     """Return a short content hash of a shard's ordered task list.
 
     Embedded in the part-file name so a resumed run only reuses a part when its
     task set is byte-identical. If the upstream schedule changed (different tasks,
     counts, or partition), the hash changes, the part is recomputed, and the stale
     part — no longer referenced by any plan — is cleaned up by ``_plan_shards``.
+
+    ``mutation_rate`` participates because augmentation changes the rows a shard
+    produces while leaving its tasks untouched: hashing tasks alone would let a
+    run at a new rate silently reuse parts built at the old one.
     """
     digest = hashlib.blake2s(digest_size=4)
+    digest.update(repr(round(mutation_rate, 6)).encode())
     for t in shard_tasks:
         digest.update(
             repr((
@@ -339,6 +352,7 @@ def _plan_shards(
     jobs: list[tuple],
     shard_rows_target: int,
     min_subseq_len: int = _DEFAULT_MIN_SUBSEQ_LEN,
+    mutation_rate: float = 0.0,
 ) -> tuple[list[tuple], list[tuple]]:
     """Fan head-jobs out into per-(head, split, shard) shard-jobs + merge-jobs.
 
@@ -355,11 +369,14 @@ def _plan_shards(
         shard_rows_target: Approximate rows per shard (see ``_partition_tasks``).
         min_subseq_len: Lower bound on each subsequence length, in bp; carried in
             each shard-job so the worker extracts to the configured floor.
+        mutation_rate: Substitution rate for augmented copies. Carried per
+            shard-job and resolved to 0.0 for val/test here, so a held-out split
+            is never scored on synthetic mutants.
 
     Returns:
         ``(shard_jobs, merge_jobs)``. A shard-job is ``(target_dir, split,
-        part_path, shard_tasks, max_subseq_len, min_subseq_len)``; a merge-job is
-        ``(target_dir, split, part_paths, final_path)``.
+        part_path, shard_tasks, max_subseq_len, min_subseq_len, mutation_rate)``;
+        a merge-job is ``(target_dir, split, part_paths, final_path)``.
     """
     import glob
 
@@ -375,18 +392,20 @@ def _plan_shards(
             if os.path.exists(final_path):
                 continue  # resume: this split is already built
             part_paths: list[str] = []
+            split_rate = mutation_rate if split == "train" else 0.0
             for idx, shard_tasks in enumerate(
                 _partition_tasks(tasks, shard_rows_target)
             ):
                 part_path = os.path.join(
                     target_dir,
-                    f"{split}.part{idx:05d}.{_shard_hash(shard_tasks)}."
+                    f"{split}.part{idx:05d}."
+                    f"{_shard_hash(shard_tasks, split_rate)}."
                     f"{output_format}",
                 )
                 part_paths.append(part_path)
                 shard_jobs.append((
                     target_dir, split, part_path, shard_tasks,
-                    max_subseq_len, min_subseq_len,
+                    max_subseq_len, min_subseq_len, split_rate,
                 ))
             # Drop any parts of this split not in the current plan (stale hash or
             # a higher index from a bigger prior partition), so a changed
@@ -413,19 +432,22 @@ def _shard_worker(shard_job: tuple) -> bool:
 
     Args:
         shard_job: ``(target_dir, split, part_path, shard_tasks, max_subseq_len,
-            min_subseq_len)``.
+            min_subseq_len, mutation_rate)``. ``_plan_shards`` has already zeroed
+            ``mutation_rate`` for val/test.
 
     Returns:
         True on completion.
     """
     (
-        target_dir, _split, part_path, shard_tasks, max_subseq_len, min_subseq_len
+        target_dir, _split, part_path, shard_tasks, max_subseq_len, min_subseq_len,
+        mutation_rate,
     ) = shard_job
     if os.path.exists(part_path):
         return True  # resume: this shard is already built
     os.makedirs(target_dir, exist_ok=True)
     tmp_path = f"{part_path}.tmp"
-    _write_split_parquet(shard_tasks, tmp_path, max_subseq_len, min_subseq_len)
+    _write_split_parquet(shard_tasks, tmp_path, max_subseq_len, min_subseq_len,
+                         mutation_rate=mutation_rate)
     if os.path.exists(tmp_path):
         os.replace(tmp_path, part_path)
     return True
@@ -505,6 +527,7 @@ class DatasetBuilder:
         seed: int,
         output_format: str,
         min_subseq_len: int = _DEFAULT_MIN_SUBSEQ_LEN,
+        mutation_rate: float = 0.0,
     ) -> None:
         """Initialize the dataset builder.
 
@@ -520,12 +543,16 @@ class DatasetBuilder:
             min_subseq_len: Lower bound on each subsequence length, in bp —
                 the ``--min-subseq-len`` used upstream for capacity and
                 n-distribution, so extraction samples to the same floor.
+            mutation_rate: Per-base substitution rate for augmented copies of
+                each window, appended with the same label. Applies to the TRAIN
+                split only. 0.0 disables augmentation.
         """
         self.output_dir: str = output_dir
         self.max_subseq_len: int = max_subseq_len
         self.seed: int = seed
         self.output_format: str = output_format
         self.min_subseq_len: int = min_subseq_len
+        self.mutation_rate: float = mutation_rate
 
     def build_node_dataset(
         self,
@@ -553,7 +580,8 @@ class DatasetBuilder:
         """
         if not parallel:
             return [
-                extract_parent_node_worker(job, self.min_subseq_len)
+                extract_parent_node_worker(job, self.min_subseq_len,
+                                           self.mutation_rate)
                 for job in jobs
             ]
 
@@ -563,7 +591,7 @@ class DatasetBuilder:
         # of a batch). Shards write part files; a merge pass concatenates each
         # split's parts back into the single <split>.<fmt> file downstream expects.
         shard_jobs, merge_jobs = _plan_shards(
-            jobs, _SHARD_ROWS_TARGET, self.min_subseq_len
+            jobs, _SHARD_ROWS_TARGET, self.min_subseq_len, self.mutation_rate
         )
         if not shard_jobs and not merge_jobs:
             return [True] * len(jobs)  # every split already built (resume)

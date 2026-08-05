@@ -131,6 +131,32 @@ class TestPlanShards:
         assert sj2[0][2] != sj1[0][2]                # new content hash -> new path
         assert not os.path.exists(sj1[0][2])         # stale part cleaned up
 
+    def test_mutation_rate_applies_to_train_only(self, tmp_path):
+        # Augmenting a held-out split would score the head on synthetic mutants
+        # instead of real organisms, so val/test carry rate 0.0 regardless.
+        target = tmp_path / "head"
+        target.mkdir()
+        t = {"n": 5, "fasta_path": "/f", "header_id": "H",
+             "start_pct": 0.0, "end_pct": 1.0, "class_idx": 0}
+        tasks = {"train": [t], "val": [dict(t)], "test": [dict(t)]}
+        shard_jobs, _ = _plan_shards(
+            [_job("t", str(target), tasks)], 1000, mutation_rate=0.05
+        )
+        rates = {os.path.basename(j[2]).split(".")[0]: j[6] for j in shard_jobs}
+        assert rates == {"train": 0.05, "val": 0.0, "test": 0.0}
+
+    def test_changed_mutation_rate_gets_new_part(self, tmp_path):
+        # The tasks are identical at both rates, so hashing tasks alone would let
+        # a run at a new rate silently reuse parts built at the old one.
+        target = tmp_path / "head"
+        target.mkdir()
+        t = {"n": 5, "fasta_path": "/f", "header_id": "H",
+             "start_pct": 0.0, "end_pct": 1.0, "class_idx": 0}
+        job = _job("t", str(target), {"train": [t]})
+        a, _ = _plan_shards([job], 1000, mutation_rate=0.0)
+        b, _ = _plan_shards([job], 1000, mutation_rate=0.05)
+        assert a[0][2] != b[0][2]
+
 
 # ---------------------------------------------------------------------------
 # end-to-end: sharded == serial, merge, resume

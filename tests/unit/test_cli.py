@@ -462,6 +462,7 @@ class TestGenerateRun:
             output_format="parquet",
             max_subseq_len=2000,
             min_subseq_len=100,
+            mutation_rate=0.0,
             registry=str(registry),
             output=str(tmp_path / "output"),
             min_abundance=2,

@@ -174,6 +174,7 @@ class GenerationOrchestrator:
         config_path: str = "configs/mapping.json",
         max_subseq_len: int = 2000,
         min_subseq_len: int = 100,
+        mutation_rate: float = 0.0,
         seed: int = 42,
         output_format: str = "parquet",
         min_subclades_per_bucket: int = 5,
@@ -223,6 +224,11 @@ class GenerationOrchestrator:
             max_subseq_len: Upper bound on subseq length, in bp.
             min_subseq_len: Lower bound on subseq length and the
                 sliding-window size for capacity measurement, in bp.
+            mutation_rate: Per-base substitution rate for an augmented copy of
+                each TRAIN window, appended with the same label (val and test
+                stay real sequence). Targets heads whose clade offers no close
+                relative between splits, where the model memorises its train
+                genomes instead of learning the clade. 0.0 disables it.
             seed: Random seed for reproducible splits and sampling.
             output_format: 'parquet' or 'csv'.
             min_subclades_per_bucket: Minimum subclade count for a
@@ -297,6 +303,11 @@ class GenerationOrchestrator:
                 f"max_subseq_len ({max_subseq_len})."
             )
         self.min_subseq_len: int = min_subseq_len
+        if not 0.0 <= mutation_rate < 1.0:
+            raise ValueError(
+                f"mutation_rate must be in [0.0, 1.0) (got {mutation_rate})."
+            )
+        self.mutation_rate: float = mutation_rate
         self.seed: int = seed
         self.output_format: str = output_format
         self.min_subclades_per_bucket: int = min_subclades_per_bucket
@@ -359,6 +370,7 @@ class GenerationOrchestrator:
             seed=self.seed,
             output_format=self.output_format,
             min_subseq_len=self.min_subseq_len,
+            mutation_rate=self.mutation_rate,
         )
 
     def _sync_with_ncbi(self, target_group: str) -> None:

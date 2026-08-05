@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(nvidia-smi)",
+      "Bash(nvidia-smi *)",
+      "Bash(crontab -l)",
+      "Bash(conda env list)",
+      "Bash(conda list *)",
+      "Bash(datasets summary *)",
+      "Bash(datasets --version)",
+      "Bash(dataformat --version)"
+    ]
+  }
+}

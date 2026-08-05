@@ -126,6 +126,16 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "Changing it invalidates any cached capacities.",
     )
     parser.add_argument(
+        "--mutation-rate",
+        type=float,
+        default=0.0,
+        help="Per-base substitution rate for an augmented copy of each TRAIN "
+        "window, appended with the same label (val/test stay real sequence). "
+        "Aimed at heads whose clade has no close relative between splits, where "
+        "the model memorises its train genomes instead of learning the clade. "
+        "0.0 (default) disables augmentation.",
+    )
+    parser.add_argument(
         "--registry", "-r",
         type=str,
         default=str(paths.default_registry_path()),
@@ -481,6 +491,11 @@ def run(args: argparse.Namespace) -> None:
             args.min_subseq_len,
         )
         sys.exit(1)
+    if not 0.0 <= args.mutation_rate < 1.0:
+        logger.error(
+            "--mutation-rate must be in [0.0, 1.0) (got %s).", args.mutation_rate
+        )
+        sys.exit(1)
 
     if not os.path.exists(args.registry) and args.no_sync:
         logger.error(
@@ -539,6 +554,7 @@ def run(args: argparse.Namespace) -> None:
             config_path=args.mapping,
             max_subseq_len=args.max_subseq_len,
             min_subseq_len=args.min_subseq_len,
+            mutation_rate=args.mutation_rate,
             seed=args.seed,
             output_format=args.output_format,
             min_subclades_per_bucket=args.min_subclades_per_bucket,

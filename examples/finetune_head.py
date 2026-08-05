@@ -200,6 +200,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-fp16", dest="fp16", action="store_false")
     p.add_argument("--resume-from-checkpoint", type=Path, default=None,
                    help="Resume training from a saved checkpoint directory")
+    p.add_argument("--lora-rank", type=int, default=LORA_RANK,
+                   help="LoRA rank. Lower means less capacity, which is the lever "
+                        "for a head that fits its training data and not its val.")
+    p.add_argument("--lora-dropout", type=float, default=LORA_DROPOUT,
+                   help="LoRA dropout, raised alongside a lower rank to regularise.")
     p.add_argument("--seed", type=int, default=SEED,
                    help="Random seed; fixes the frozen pooler init so the adapter is reproducible")
     return p.parse_args()
@@ -248,9 +253,9 @@ def main():
 
     lora_cfg = LoraConfig(
         task_type=TaskType.SEQ_CLS,
-        r=LORA_RANK,
-        lora_alpha=LORA_ALPHA,
-        lora_dropout=LORA_DROPOUT,
+        r=args.lora_rank,
+        lora_alpha=2 * args.lora_rank,   # alpha/r held at 2, as in the defaults
+        lora_dropout=args.lora_dropout,
         target_modules=LORA_TARGET_MODULES,
         bias="none",
         # SEQ_CLS auto-saves "classifier"/"score" but NOT the pooler, which the
