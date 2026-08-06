@@ -205,6 +205,10 @@ def parse_args() -> argparse.Namespace:
                         "for a head that fits its training data and not its val.")
     p.add_argument("--lora-dropout", type=float, default=LORA_DROPOUT,
                    help="LoRA dropout, raised alongside a lower rank to regularise.")
+    p.add_argument("--freeze-pooler", action="store_true",
+                   help="Hold the pooler at init (still saved). It is 67%% of the "
+                        "trainable parameters at rank 8 and 89%% at rank 2, so "
+                        "without this the LoRA rank barely controls capacity.")
     p.add_argument("--seed", type=int, default=SEED,
                    help="Random seed; fixes the frozen pooler init so the adapter is reproducible")
     return p.parse_args()
@@ -265,6 +269,24 @@ def main():
         modules_to_save=["classifier", "score", "pooler"],
     )
     model = get_peft_model(base_model, lora_cfg)
+    if args.freeze_pooler:
+        # The pooler is 590,592 of the 887,042 trainable parameters -- 67% at rank
+        # 8, 89% at rank 2. That is why the earlier "rank 8 -> 2" experiment moved
+        # nothing: it cut total capacity by 25%, not 4x. Freezing it is the actual
+        # capacity test, taking rank 8 from 887k to 296k.
+        #
+        # Frozen but still SAVED: it stays in modules_to_save so the adapter
+        # reloads standalone. The pooler is randomly initialised (DNABERT-2 ships
+        # no pooler weights), so dropping it from modules_to_save would have
+        # PhyloCascadeGLM draw a *different* random pooler at inference and the
+        # head would not reproduce its own eval.
+        n_frozen = 0
+        for name, p in model.named_parameters():
+            if "pooler" in name and p.requires_grad:
+                p.requires_grad = False
+                n_frozen += p.numel()
+        log.info("Pooler frozen: %d parameters held at init (still persisted).",
+                 n_frozen)
     model.print_trainable_parameters()
 
     # ---- training args ----
