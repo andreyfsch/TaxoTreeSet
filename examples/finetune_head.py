@@ -343,9 +343,15 @@ def main():
     #
     # Capped and evaluated with the best checkpoint already loaded, so it measures
     # the model that is actually saved.
+    # RANDOM rows, not the first N: the parquet is written task by task, so the
+    # head of the file is one class. Head 28344 has 2000 class-1 rows before the
+    # first class-0 row, and f1_macro over a single-class slice is degenerate --
+    # it read 0.498 against a val of 0.844, which is what exposed this.
     _n_train_eval = min(len(ds_train), 2000)
+    _train_idx = np.random.default_rng(SEED).choice(
+        len(ds_train), _n_train_eval, replace=False).tolist()
     train_results = trainer.evaluate(
-        ds_train.select(range(_n_train_eval)), metric_key_prefix="train_eval")
+        ds_train.select(_train_idx), metric_key_prefix="train_eval")
     log.info("Train f1_macro=%.4f (on %d rows)",
              train_results.get("train_eval_f1_macro", float("nan")), _n_train_eval)
 
