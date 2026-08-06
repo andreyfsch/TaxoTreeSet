@@ -77,6 +77,21 @@ class TestMakeRejectBucketNode:
 
 
 class TestSampleRejectLeaves:
+    def test_dag_duplicate_never_becomes_its_own_negative(self):
+        # The taxonomy is a DAG: one genome hangs under two taxids as two distinct
+        # leaf objects. Excluding by node identity leaves the sibling's copy in the
+        # reject pool, so extraction emits byte-identical windows under both labels.
+        # Measured cost of the old behaviour: heads 28344 and 1965067 reached 97%
+        # label noise and never left val f1 ~0.55.
+        t = _build_tree()
+        twin = _seq_leaf("x1", t["p2"])          # same header_id as p1's x1
+        assert twin.header_id == t["x1"].header_id
+        near, far = sample_reject_leaves(t["p1"])
+        pool = near + far
+        assert twin not in pool
+        assert not [lf for lf in pool if lf.header_id == "x1"]
+        assert t["y1"] in pool                   # genuine siblings still included
+
     def test_excludes_own_leaves_includes_external(self):
         t = _build_tree()
         near, far = sample_reject_leaves(t["p1"])

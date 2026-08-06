@@ -150,13 +150,36 @@ def phylocascade_predictions(
     device: str = "cpu",
     log_every: int = 250,
     inferer_factory=None,
+    arbitration: str = "confidence",
 ) -> tuple[dict, list[dict]]:
-    """One classify() call per read, per entry point; deepest accepting commit wins.
+    """One classify() call per read, per entry point; an arbiter picks among them.
 
     Returns (predictions, diagnostics). Diagnostics carry the entry point used, the
-    stop_reason, and whether the commit was bundle-exhausted rather than terminal.
+    stop_reason, whether the commit was bundle-exhausted rather than terminal, and
+    EVERY entry point's offer, so arbitration policies can be compared offline
+    without paying for another neural pass.
+
+    Arbitration matters more than it looks. The entry points are DISJOINT subtrees,
+    so this is not `prefer_longest_survivor` — that rule eliminates within one tree,
+    where a deeper survivor really did survive more rejections. Across independent
+    forests a deeper path only means that subtree happens to be taller, and with a
+    per-head false-accept rate near 0.5 several subtrees accept the same read.
+
+    Picking by depth is then actively harmful, in a way that is not a matter of
+    degree: with a strict `>`, ties go to whichever root is enumerated first, so
+    every single-node subtree after the first can NEVER win a read. On the pilot
+    bundle (subtree sizes 1,1,1,1,1,14,41) that silently disenfranchised four
+    heads holding 1,300 of 12,350 reads — including head 154834, the one with val
+    f1 1.000.
+
+    Policies:
+        "confidence" — highest acceptance probability at the entry node (default).
+        "unanimous"  — abstain unless exactly one subtree accepts. Under a
+                       hierarchical F with beta<1, abstaining beats misrouting.
+        "deepest"    — the original rule, kept so the regression is reproducible.
 
     Args:
+        arbitration: One of "confidence", "unanimous", "deepest".
         inferer_factory: Optional ``registry -> NodeInferer``. When given, that
             inferer replaces the DNABERT-2 one and EVERYTHING else — registry,
             reject margin, false-reject weighting, deepest-survivor rule, true-path
@@ -189,21 +212,34 @@ def phylocascade_predictions(
     for i, row in enumerate(rows):
         if log_every and i and i % log_every == 0:
             print(f"  {i}/{len(rows)} reads", flush=True)
-        best = None
+        offers = []
         for root, clf in classifiers.items():
             res = clf.classify(row["seq"], query_id=row["read_id"])
             path = res.classification or []
             if not path:
                 continue
-            depth = len(path)
-            if best is None or depth > best[0]:
-                best = (depth, root, res)
-        if best is None:
+            offers.append({
+                "entry": root, "depth": len(path),
+                "p_entry": float(getattr(path[0], "p", 0.0)),
+                "p_min": min(float(getattr(e, "p", 0.0)) for e in path),
+                "commit": str(getattr(path[-1], "taxid", path[-1])),
+                "_res": res,
+            })
+        if not offers or (arbitration == "unanimous" and len(offers) > 1):
             preds[row["read_id"]] = (None, None)
-            diags.append({"read_id": row["read_id"], "entry": None,
-                          "stop_reason": "no_commit", "bundle_exhausted": False})
+            diags.append({
+                "read_id": row["read_id"], "entry": None,
+                "stop_reason": "ambiguous" if offers else "no_commit",
+                "bundle_exhausted": False,
+                "offers": [{k: v for k, v in o.items() if k != "_res"}
+                           for o in offers],
+            })
             continue
-        _, root, res = best
+        if arbitration == "deepest":
+            best = max(offers, key=lambda o: o["depth"])
+        else:                                  # "confidence" and "unanimous"
+            best = max(offers, key=lambda o: (o["p_entry"], o["depth"]))
+        root, res = best["entry"], best["_res"]
         leaf = res.classification[-1]
         taxid = str(getattr(leaf, "taxid", leaf))
         rank = getattr(leaf, "rank", None)
@@ -212,6 +248,7 @@ def phylocascade_predictions(
             "read_id": row["read_id"], "entry": root, "commit": taxid, "rank": rank,
             "stop_reason": getattr(res, "stop_reason", None),
             "bundle_exhausted": exhausted(taxid),
+            "offers": [{k: v for k, v in o.items() if k != "_res"} for o in offers],
         })
     return preds, diags
 
@@ -255,6 +292,12 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=None,
                    help="Score only the first N reads (smoke-testing the cascade).")
     p.add_argument("--device", default="cpu")
+    p.add_argument("--arbitration", default="confidence",
+                   choices=["confidence", "unanimous", "deepest"],
+                   help="How to pick among entry points that all accept a read. "
+                        "The entry points are disjoint subtrees, so 'deepest' is "
+                        "NOT prefer_longest_survivor — it rewards tall subtrees and "
+                        "gives every tie to whichever root is enumerated first.")
     p.add_argument("--diagnostics", type=Path, default=None,
                    help="Write the per-read cascade diagnostics as JSONL.")
     p.add_argument("--gc-baseline", action="store_true",
@@ -294,6 +337,7 @@ def main() -> None:
         preds, diags = phylocascade_predictions(
             args.bundle, rows, entry_points=args.entry_points,
             limit=args.limit, device=args.device,
+            arbitration=args.arbitration,
         )
         scored = rows[:args.limit] if args.limit else rows
         exhausted = sum(1 for d in diags if d.get("bundle_exhausted"))

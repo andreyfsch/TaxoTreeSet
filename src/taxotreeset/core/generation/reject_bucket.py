@@ -109,6 +109,19 @@ def _cap_pool(pool: list, max_per_pool: int, rng: random.Random) -> list:
     return pool
 
 
+def _leaf_key(leaf) -> tuple[str, str] | None:
+    """Identify a sequence leaf by the sequence it points at, not by its node.
+
+    ``(fasta_path, header_id)`` is what actually gets read during extraction, so two
+    leaves sharing it produce byte-identical windows however far apart they sit in
+    the tree. Returns None when either field is missing, so an unidentifiable leaf
+    is never treated as matching anything.
+    """
+    fasta = getattr(leaf, "fasta_path", None)
+    header = getattr(leaf, "header_id", None)
+    return (str(fasta), str(header)) if fasta and header else None
+
+
 def sample_reject_leaves(
     current_node,
     max_per_pool: int = _DEFAULT_MAX_REJECT_LEAVES_PER_POOL,
@@ -149,7 +162,21 @@ def sample_reject_leaves(
         supplies it.
     """
     rng = rng if rng is not None else random.Random(0)
+    # Exclude the head's own members by SEQUENCE identity, not by node identity.
+    # This taxonomy is a DAG: one genome is reachable by more than one path, so the
+    # same sequence exists as two distinct leaf objects. Set membership on the nodes
+    # therefore misses the copy hanging under a sibling, and that copy lands in the
+    # head's own reject bucket -- the identical sequence carrying both labels.
+    #
+    # Measured on the pilot: heads 28344 and 1965067 (declared siblings) share 97.5%
+    # of their positive windows, and 97% of each one's class-1 training windows sit
+    # inside its own class 0. No learning rate fixes a contradictory label; those two
+    # heads were decided at generation time and sat at val f1 ~0.55 through every
+    # hyperparameter tried.
     own_leaves = set(current_node.leaves)
+    own_keys = {
+        k for k in (_leaf_key(leaf) for leaf in own_leaves) if k is not None
+    }
     # The tree's sequence-leaf set is invariant during scheduling — bucketing only
     # re-parents subtrees within the tree and reject nodes are detached, so no
     # sequence leaf is added or removed. Cache the list on the root: recomputing
@@ -163,7 +190,10 @@ def sample_reject_leaves(
             if getattr(leaf, "rank", "") == _SEQUENCE_RANK
         ]
         root._reject_seq_leaves_cache = all_seq_leaves
-    external = [leaf for leaf in all_seq_leaves if leaf not in own_leaves]
+    external = [
+        leaf for leaf in all_seq_leaves
+        if leaf not in own_leaves and _leaf_key(leaf) not in own_keys
+    ]
 
     near: list = []
     far: list = []
@@ -179,6 +209,7 @@ def sample_reject_leaves(
                     leaf for leaf in ancestor.leaves
                     if getattr(leaf, "rank", "") == _SEQUENCE_RANK
                     and leaf not in own_leaves
+                    and _leaf_key(leaf) not in own_keys
                 ]
             if candidate:
                 near = candidate
