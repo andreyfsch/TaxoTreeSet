@@ -205,6 +205,11 @@ def parse_args() -> argparse.Namespace:
                         "for a head that fits its training data and not its val.")
     p.add_argument("--lora-dropout", type=float, default=LORA_DROPOUT,
                    help="LoRA dropout, raised alongside a lower rank to regularise.")
+    p.add_argument("--num-epochs", type=int, default=NUM_EPOCHS,
+                   help="Training epochs. Also sets the cosine schedule's horizon, "
+                        "so lowering it anneals the LR over the window where these "
+                        "heads actually peak (val turns over at epoch ~0.33) rather "
+                        "than holding a near-peak LR through 4.7 epochs of decay.")
     p.add_argument("--freeze-pooler", action="store_true",
                    help="Hold the pooler at init (still saved). It is 67%% of the "
                         "trainable parameters at rank 8 and 89%% at rank 2, so "
@@ -292,20 +297,31 @@ def main():
     # ---- training args ----
     # Use ceil to match what the Trainer actually counts as steps per epoch.
     train_steps_per_epoch = math.ceil(len(df_train) / (args.batch_size * args.grad_accum))
-    # Checkpoint ~3× per epoch for crash resilience. With load_best_model_at_end,
-    # Transformers requires save_steps to be a multiple of eval_steps, so the only
-    # way to save mid-epoch is to also eval mid-epoch: set eval_steps == save_steps.
-    # eval_steps need not divide the epoch length; eval is cheap on the small val
-    # split, so eval'ing ~3×/epoch is acceptable.
-    eval_save_every = max(train_steps_per_epoch // 3, 50)
+    # Evaluate ~3x per epoch but SAVE only once. Transformers requires save_steps to
+    # be a multiple of eval_steps, which is why these were previously equal -- but
+    # they only have to be a multiple, not identical.
+    #
+    # The split matters because the two operations cost completely different things.
+    # Eval reads a small val split and writes nothing. Saving writes a ~450 MB
+    # checkpoint, and with the output on /mnt/f that crosses the 9p/drvfs boundary
+    # into Windows. Sustained writes there are the open (NOT confirmed) hypothesis
+    # for the three WSL lockups of 2026-08-07, whose signature is a task stuck in
+    # uninterruptible sleep that even `wsl --shutdown` cannot reap.
+    #
+    # Cutting saves 3x costs at most one epoch of redone work on a crash and changes
+    # no experiment: load_best_model_at_end only needs the best checkpoint, and the
+    # eval trajectory -- the thing every finding here rests on -- is unaffected
+    # because eval cadence is unchanged.
+    eval_every = max(train_steps_per_epoch // 3, 50)
+    save_every = eval_every * 3
     # Early stopping is measured per eval, so its patience must scale with eval
     # frequency. Evaluating ~3×/epoch with patience=2 would stop after only ~0.7
     # epoch without improvement; tolerate ~2 full epochs of no improvement instead.
-    evals_per_epoch = max(1, round(train_steps_per_epoch / eval_save_every))
+    evals_per_epoch = max(1, round(train_steps_per_epoch / eval_every))
     early_stopping_patience = 2 * evals_per_epoch
     training_args = TrainingArguments(
         output_dir=str(output_dir / "checkpoints"),
-        num_train_epochs=NUM_EPOCHS,
+        num_train_epochs=args.num_epochs,
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size // 2,
         gradient_accumulation_steps=args.grad_accum,
@@ -314,10 +330,10 @@ def main():
         weight_decay=WEIGHT_DECAY,
         lr_scheduler_type="cosine",
         eval_strategy="steps",
-        eval_steps=eval_save_every,
+        eval_steps=eval_every,
         eval_accumulation_steps=20,  # offload eval preds to CPU; avoids VRAM OOM
         save_strategy="steps",
-        save_steps=eval_save_every,
+        save_steps=save_every,
         load_best_model_at_end=True,
         metric_for_best_model="f1_macro",
         greater_is_better=True,
@@ -330,7 +346,8 @@ def main():
         optim="adamw_torch_fused",
         logging_steps=25,
         report_to="none",
-        save_total_limit=2,
+        # 1 + the best checkpoint, which load_best_model_at_end protects.
+        save_total_limit=1,
         dataloader_num_workers=0,
     )
 
@@ -424,7 +441,7 @@ def main():
         "lora_dropout": LORA_DROPOUT,
         "lora_target_modules": LORA_TARGET_MODULES,
         "learning_rate": args.learning_rate,
-        "num_epochs": NUM_EPOCHS,
+        "num_epochs": args.num_epochs,
         "batch_size": args.batch_size,
         "grad_accum": args.grad_accum,
         "max_length": MAX_LENGTH,
