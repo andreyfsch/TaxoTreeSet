@@ -340,6 +340,31 @@ def _persist_scheduling_artifacts(
     """
     os.makedirs(ctx.output_dir, exist_ok=True)
 
+    def _merge_into(path: str, produced: dict) -> dict:
+        """Merge this run's entries over whatever the directory already holds.
+
+        A single-head run (``--single-level <taxid>``) schedules exactly one head,
+        so writing its manifest verbatim REPLACES the record of every other head in
+        the directory. That is how the 60-head pilot lost its metadata: a regenerate
+        of one taxid on 2026-08-03 left a manifest with a single entry, and the
+        per-head fields the whole investigation later needed -- num_leaves among
+        them -- had to be recovered by re-measuring the sequence.
+
+        Merging is safe for a full run too: it schedules every head, so its entries
+        overwrite all of the old ones and nothing stale survives.
+        """
+        existing: dict = {}
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    loaded = json.load(fh)
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except (json.JSONDecodeError, OSError):
+                existing = {}          # unreadable: treat as absent, never abort
+        existing.update(produced)
+        return existing
+
     manifest_path = os.path.join(ctx.output_dir, f"manifest_{target_group}.json")
     passthroughs_path = os.path.join(
         ctx.output_dir, f"passthroughs_{target_group}.json"
@@ -348,19 +373,18 @@ def _persist_scheduling_artifacts(
         ctx.output_dir, f"virtual_id_registry_{target_group}.json"
     )
 
+    # Merge BEFORE opening for write: open(..., "w") truncates immediately, so
+    # reading the old content inside the with-block would always see an empty file.
+    merged_manifest = _merge_into(
+        manifest_path, scheduling_artifacts["master_manifest"])
+    merged_passthroughs = _merge_into(
+        passthroughs_path, scheduling_artifacts["passthrough_map"])
+
     with open(manifest_path, "w", encoding="utf-8") as manifest_file:
-        json.dump(
-            scheduling_artifacts["master_manifest"],
-            manifest_file,
-            indent=2,
-        )
+        json.dump(merged_manifest, manifest_file, indent=2)
 
     with open(passthroughs_path, "w", encoding="utf-8") as passthrough_file:
-        json.dump(
-            scheduling_artifacts["passthrough_map"],
-            passthrough_file,
-            indent=2,
-        )
+        json.dump(merged_passthroughs, passthrough_file, indent=2)
 
     with open(virtual_registry_path, "w", encoding="utf-8") as virtual_file:
         json.dump(
