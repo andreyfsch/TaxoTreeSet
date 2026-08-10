@@ -78,6 +78,55 @@ launches B the moment A lands, with no turn in between.
 Sleep 60–120 s in the loop. Shorter adds nothing; the notification is what matters,
 not the polling rate.
 
+## The queue, not the turn boundary
+
+Writing "never end a turn with a plan" did not work: the rule was added here and
+broken two turns later. The end of a turn is simply a place where stopping feels
+natural, and prose does not change that. So continuation is structural instead.
+
+`experiments/queue_runner.sh` stays up and executes `experiments/queue.txt` in
+order. **Appending a line IS launching the experiment** -- there is no gap between
+deciding and running, and no turn boundary to stop at.
+
+    echo 'nome|<comando completo>' >> experiments/queue.txt
+
+Results land in `experiments/logs/<nome>.log` with a `.log.done` sentinel, so
+watchers work unchanged. Queue several at once: the next one starts the moment the
+previous finishes, whether or not anyone is reading.
+
+When an analysis suggests a follow-up, append it immediately, before writing a
+single sentence about it. Prose about an experiment that is already queued is a
+report; prose about one that is not is a delay.
+
+## Cheapest path to the underlying question
+
+Before each attempt, ask what would answer the QUESTION, not what would test the
+current hypothesis. A persistence limit is the wrong tool -- it would abandon a line
+that deserves pursuing. The right check is opportunity cost, applied every time.
+
+Three places in this project where the answer was already available and cheaper:
+
+**Harness speed.** Hours went into precomputing logits and a hybrid inferer, both of
+which came out slower. The question was "how do I iterate without waiting five
+hours", and a random 400-read sample answered it: 100 random reads reproduce the
+full set to 0.004, in eleven minutes. That measurement existed before the
+optimisation work started.
+
+**Head quality.** Seven metrics were built and collapsed. The question was "which
+heads hurt the result", and the end-to-end diagnostics answered it directly, with no
+proxy that could be wrong: false-positive contribution per head, 12 heads carrying
+79.9%.
+
+**Where the loss is.** Days went into tightening acceptance -- negative margins,
+abstention thresholds, three arbitration rules, per-head normalisation. The
+dominant loss turned out to be the opposite: 71% of it is reads that stop too early
+because a child head FALSELY REJECTS them. The diagnostic that showed this -- at
+which level does the descent diverge from the expected path -- costs seconds and
+uses data that was already on disk.
+
+The pattern is the same each time: an attempt tests a hypothesis, when a cheaper
+measurement would have redirected the whole line. Ask for that measurement first.
+
 ## Measurement discipline
 
 **A metric is not established until it predicts ground truth.** Seven head-quality
