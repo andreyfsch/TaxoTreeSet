@@ -142,6 +142,31 @@ def forest_roots(registry) -> list[str]:
     return [t for t in registry.taxids if t not in children]
 
 
+def _subtree_size(registry, root: str) -> int:
+    """Number of packed heads reachable from ``root``, itself included.
+
+    Used as a prior in arbitration: a read is likelier to belong to a large clade
+    than to a lone leaf. Cached on the registry because it is asked once per offer
+    per read, i.e. tens of thousands of times.
+    """
+    cache = getattr(registry, "_subtree_size_cache", None)
+    if cache is None:
+        cache = {}
+        registry._subtree_size_cache = cache
+    if root in cache:
+        return cache[root]
+    tree = registry.meta.tree or {}
+    seen, stack = set(), [str(root)]
+    while stack:
+        n = stack.pop()
+        if n in seen:
+            continue
+        seen.add(n)
+        stack.extend(str(c) for c in tree.get(n, []))
+    cache[root] = len(seen)
+    return cache[root]
+
+
 def phylocascade_predictions(
     bundle_path: Path,
     eval_rows: list[dict],
@@ -243,6 +268,7 @@ def phylocascade_predictions(
                 continue
             offers.append({
                 "entry": root, "depth": len(path),
+                "subtree_size": _subtree_size(registry, root),
                 "p_entry": float(getattr(path[0], "p", 0.0)),
                 "p_min": min(float(getattr(e, "p", 0.0)) for e in path),
                 "commit": str(getattr(path[-1], "taxid", path[-1])),
@@ -260,6 +286,21 @@ def phylocascade_predictions(
             continue
         if arbitration == "deepest":
             best = max(offers, key=lambda o: o["depth"])
+        elif arbitration == "subtree":
+            # Prefer the LARGER subtree, breaking ties on confidence. Measured on
+            # hierarchical F(0.5), the project's metric, over 12,350 reads:
+            #     confidence  0.191    depth  0.217    subtree  0.283
+            # The mechanism: heads that steal reads are single-node subtrees that
+            # simply shout louder. For reads taken by 2872567 the correct entry
+            # still scored p_entry 0.67 against the thief's 0.93 -- the right answer
+            # was in the offers, just not first. Size acts as a prior: a read is
+            # likelier to belong to a large clade than to a lone leaf.
+            #
+            # Caveat worth keeping: subtree size is a property of THIS bundle's
+            # shape. On the full tree the sizes differ, so this should be re-checked
+            # rather than assumed to carry over.
+            best = max(offers, key=lambda o: (o.get("subtree_size", 1),
+                                              o["p_entry"]))
         else:                                  # "confidence" and "unanimous"
             best = max(offers, key=lambda o: (o["p_entry"], o["depth"]))
         root, res = best["entry"], best["_res"]
@@ -337,8 +378,8 @@ def main() -> None:
                         "a biased node act as a sink: 2559587 absorbed 724 reads and "
                         "got none right. Measured false-accept runs 0.24-0.51 by "
                         "lineage distance where the cascade needs ~0.01.")
-    p.add_argument("--arbitration", default="confidence",
-                   choices=["confidence", "unanimous", "deepest"],
+    p.add_argument("--arbitration", default="subtree",
+                   choices=["subtree", "confidence", "unanimous", "deepest"],
                    help="How to pick among entry points that all accept a read. "
                         "The entry points are disjoint subtrees, so 'deepest' is "
                         "NOT prefer_longest_survivor — it rewards tall subtrees and "
