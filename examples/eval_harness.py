@@ -151,6 +151,8 @@ def phylocascade_predictions(
     log_every: int = 250,
     inferer_factory=None,
     arbitration: str = "confidence",
+    belonging_margin: float = 0.0,
+    reject_margin: float = 0.0,
 ) -> tuple[dict, list[dict]]:
     """One classify() call per read, per entry point; an arbiter picks among them.
 
@@ -200,9 +202,22 @@ def phylocascade_predictions(
 
     # One inferer instance is shared across entry points: it is stateless per call
     # and the real one caches an expensive backbone.
-    shared = inferer_factory(registry) if inferer_factory else None
+    #
+    # This used to fall through to None whenever no inferer_factory was given, i.e.
+    # in every ordinary run, and Classifier then built its OWN SingleSequenceInferer
+    # per entry point. Seven DNABERT-2 backbones on a 4 GiB card: the process
+    # reached 3.9 of 4.0 GiB, the desktop compositor was left with nothing, and the
+    # machine froze for seconds at a time during every harness run. The comment
+    # above described the intent; the code did not implement it.
+    if inferer_factory is not None:
+        shared = inferer_factory(registry)
+    else:
+        from phylocascadeglm._inferer import SingleSequenceInferer
+        shared = SingleSequenceInferer(bundle_path, device=device)
     classifiers = {
-        r: Classifier(bundle_path, device=device, root_taxid=r, inferer=shared)
+        r: Classifier(bundle_path, device=device, root_taxid=r, inferer=shared,
+                      belonging_margin=belonging_margin,
+                      reject_margin=reject_margin)
         for r in roots
     }
 
@@ -212,6 +227,14 @@ def phylocascade_predictions(
     for i, row in enumerate(rows):
         if log_every and i and i % log_every == 0:
             print(f"  {i}/{len(rows)} reads", flush=True)
+        # A precomputing inferer serves logits from a table keyed by (read, taxid),
+        # and NodeInferer.infer(windows, taxid) carries no read identity, so tell it
+        # which read this is. Harmless for the normal inferer, which has no such
+        # attribute. This is what lets a run do 60 adapter loads instead of ~172,900
+        # -- measured at 53 ms each on NVMe, that is the difference between minutes
+        # and the ~5 hours a full run currently takes.
+        if shared is not None and hasattr(shared, "current"):
+            shared.current = i
         offers = []
         for root, clf in classifiers.items():
             res = clf.classify(row["seq"], query_id=row["read_id"])
@@ -290,8 +313,30 @@ def main() -> None:
                         "Default: every head with no packed ancestor, which is what "
                         "a permissive root would push to.")
     p.add_argument("--limit", type=int, default=None,
-                   help="Score only the first N reads (smoke-testing the cascade).")
+                   help="Score only the FIRST N reads. Rarely what you want — the "
+                        "head of this eval set is far easier than the whole; prefer "
+                        "--sample-n.")
+    p.add_argument("--sample-n", type=int, default=None,
+                   help="Score a RANDOM sample of N reads. Baselines are scored on "
+                        "the same subset, so the comparison stays valid.")
+    p.add_argument("--sample-seed", type=int, default=0,
+                   help="Seed for --sample-n, so a configuration sweep compares "
+                        "runs on identical reads.")
     p.add_argument("--device", default="cpu")
+    p.add_argument("--reject-margin", type=float, default=0.0,
+                   help="Evidence a head needs to REJECT: it prunes when "
+                        "p_reject >= p_belong + reject_margin. NEGATIVE values make "
+                        "ACCEPTANCE harder, which is the lever --belonging-margin was "
+                        "mistaken for: that one only charges a score penalty the "
+                        "arbitration never reads, so sweeping it over 0.10/0.25 "
+                        "reproduced the baseline to three decimals in every bin.")
+    p.add_argument("--belonging-margin", type=float, default=0.0,
+                   help="How decisively a head must prefer belonging before the "
+                        "traversal descends into it. 0.0 (the default since always) "
+                        "accepts on any advantage however small, which is what lets "
+                        "a biased node act as a sink: 2559587 absorbed 724 reads and "
+                        "got none right. Measured false-accept runs 0.24-0.51 by "
+                        "lineage distance where the cascade needs ~0.01.")
     p.add_argument("--arbitration", default="confidence",
                    choices=["confidence", "unanimous", "deepest"],
                    help="How to pick among entry points that all accept a read. "
@@ -316,6 +361,17 @@ def main() -> None:
 
     import pyarrow.parquet as pq
     rows = pq.read_table(args.eval_parquet).to_pylist()
+    if args.sample_n:
+        # RANDOM subset, not the head of the file. --limit takes the first N, and
+        # the first N of this eval set are wildly unrepresentative: the first 200
+        # score 0.835 where the full 12,350 score 0.096. Every smoke test run
+        # against the head of the file (60 reads -> 0.883, 200 -> 0.835) was
+        # measuring an easy prefix, which is how a dead parameter survived a
+        # 10-hour sweep before anyone noticed it changed nothing.
+        import random
+        rng = random.Random(args.sample_seed)
+        rows = rng.sample(rows, min(args.sample_n, len(rows)))
+        print(f"amostra aleatoria: {len(rows)} reads (seed {args.sample_seed})")
     ranks = build_rank_map(rows)
     print(f"eval reads: {len(rows)}   taxids with a known rank: {len(ranks)}")
 
@@ -338,6 +394,8 @@ def main() -> None:
             args.bundle, rows, entry_points=args.entry_points,
             limit=args.limit, device=args.device,
             arbitration=args.arbitration,
+            belonging_margin=args.belonging_margin,
+            reject_margin=args.reject_margin,
         )
         scored = rows[:args.limit] if args.limit else rows
         exhausted = sum(1 for d in diags if d.get("bundle_exhausted"))
