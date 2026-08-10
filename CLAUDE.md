@@ -29,10 +29,54 @@ Two values on 400 reads, then a curve only if it moved.
 **Random samples, never prefixes.** `--sample-n`, not `--limit`. A 100-read random
 sample reproduced the full set to 0.004.
 
-**Watch by sentinel file, not by `pgrep`.** `pgrep -f <script>` matches the
-watcher's own command line — that happened three times, once leaving a watcher
-waiting on itself for eight hours. Have the job `touch $LOG.done` and wait on the
-file.
+## Completion notification — the exact recipe
+
+Every experiment gets a watcher that fires when it finishes and **carries the
+result**. A notification saying only "done" wastes a round trip.
+
+### What does not work, and why
+
+**`pgrep -f <script name>`.** It matches the watcher's own command line, because
+that command line contains the script name. Used three times here; once a watcher
+waited on itself for eight hours while the job had finished in twelve minutes, and
+the result was only found because Andrey asked how long was left.
+
+**`setsid nohup ... &` with no watcher.** Runs fine and notifies nobody. The turn
+ends, the job finishes silently, and the investigation stalls until he asks.
+
+**A foreground call with a long `sleep`.** It hits the 600 s tool timeout, gets
+moved to the background automatically, and what comes back is the sleep's output
+rather than the experiment's.
+
+**Polling a diagnostics file for progress.** Those are written at the END. So is
+the per-head JSON. Neither shows progress.
+
+**Reading a progress counter too early.** `log_every=250` prints nothing before
+read 250, so a rate computed at t+254 s divides by zero reads.
+
+### What works
+
+The job writes a sentinel; the watcher waits on the **file** and prints the answer:
+
+```bash
+# launch — sentinel written by the job itself, after the work
+LOG=experiments/logs/<name>.log; rm -f "$LOG.done"
+setsid nohup bash -c "<command> > $LOG 2>&1; echo done > $LOG.done" </dev/null &
+```
+
+```bash
+# watcher — separate Bash call with run_in_background: true
+until [ -f experiments/logs/<name>.log.done ]; do sleep 90; done
+echo "=== <name> ==="
+grep -A8 "^=== PhyloCascadeGLM ===" "$LOG"      # the RESULT, not just "finished"
+```
+
+A watcher may be registered after the job is already running — it only waits on the
+file. Chaining is the same trick: `until [ -f A.done ]; do sleep 60; done && <run B>`
+launches B the moment A lands, with no turn in between.
+
+Sleep 60–120 s in the loop. Shorter adds nothing; the notification is what matters,
+not the polling rate.
 
 ## Measurement discipline
 
