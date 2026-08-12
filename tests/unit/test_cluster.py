@@ -455,3 +455,49 @@ class TestClusterAwareWindowSlicing:
         # equal-width thirds (the length-clamp fix), not the old 0.70/0.85 cut
         assert split["val"][0]["start_pct"] == pytest.approx(1 / 3)
         assert split["test"][0]["start_pct"] == pytest.approx(2 / 3)
+
+
+class TestBlockGridIsWindowLengthInvariant:
+    """The held-out REGIONS of a genome must not move when the window length changes.
+
+    Blocks were once ``length // max_subseq_len`` wide while :func:`_label_blocks`
+    assigns splits by block INDEX, so a 20 kb genome cut at 250 bp (80 blocks) and the
+    same genome cut at 1100 bp (18 blocks) held out different PARTS of the genome.
+    Measured on head 11049 before the fix: 72% of one generation's test windows fell
+    inside the other generation's train regions, which invalidated every comparison
+    between a head and its regenerated version — including the reject-bucket wins.
+    """
+
+    @staticmethod
+    def _regions(length: int, max_subseq_len: int) -> dict[str, list[tuple]]:
+        task = {"fasta_path": "/v", "header_id": "g", "n": 1200, "length": length}
+        result = {s: [] for s in ("train", "val", "test")}
+        assert _block_stratified_windows(task, 0, max_subseq_len, result) is True
+        return {
+            s: sorted((round(t["start_pct"], 6), round(t["end_pct"], 6))
+                      for t in result[s])
+            for s in result
+        }
+
+    @pytest.mark.parametrize("length", [20_000, 30_000, 50_000, 200_000])
+    def test_same_regions_at_250_and_1100_bp(self, length):
+        assert self._regions(length, 250) == self._regions(length, 1100)
+
+    def test_same_regions_across_a_wide_sweep_of_window_lengths(self):
+        # Every window length that fits _SPLIT_TARGET_BLOCKS blocks in a 60 kb genome
+        # (60000 // 12 = 5000) must produce the identical grid.
+        base = self._regions(60_000, 100)
+        for max_len in (150, 250, 500, 1000, 1100, 2000, 5000):
+            assert self._regions(60_000, max_len) == base, f"divergiu em {max_len}"
+
+    def test_val_and_test_regions_are_disjoint_from_train(self):
+        r = self._regions(30_000, 1100)
+        train = r["train"]
+        for split in ("val", "test"):
+            for start, end in r[split]:
+                assert all(end <= ts or start >= te for ts, te in train)
+
+    def test_window_bound_genomes_are_the_documented_exception(self):
+        # 5 kb cannot hold 12 blocks of 1100 bp; the grid is window-bound there and
+        # still moves. Documented in _SPLIT_TARGET_BLOCKS as irreducible.
+        assert self._regions(5_000, 250) != self._regions(5_000, 1100)

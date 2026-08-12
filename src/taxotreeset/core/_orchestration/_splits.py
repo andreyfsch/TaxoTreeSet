@@ -30,6 +30,31 @@ _SPLITS: tuple[str, ...] = ("train", "val", "test")
 # split; below it, the fallback uses EQUAL-WIDTH thirds for the same reason.
 _MIN_BLOCKS_FOR_STRATIFY: int = 3
 
+# Target number of blocks per genome. The block grid is derived from the GENOME's
+# length rather than from the window length, so a genome's val/test REGIONS are the
+# same regions whatever window length the run was configured with.
+#
+# The bug this closes: blocks used to be `length // max_subseq_len` wide, and
+# _label_blocks assigns splits by block INDEX. A 20 kb genome cut at 250 bp gives 80
+# blocks; cut at 1100 bp it gives 18. Different index grids put the val/test regions
+# in different PLACES, so regenerating a head at a different window length moved the
+# held-out regions INSIDE every genome — the genomes were the same, the held-out
+# coordinates were not. Measured on head 11049: 72% of one generation's test windows
+# fell inside the other generation's TRAIN regions, which silently invalidated every
+# comparison between a head and its regenerated version. A seed cannot help; the
+# assignment is positional, not sampled.
+#
+# 12 blocks leaves _label_blocks 2 val + 2 test interleaved among 8 train.
+#
+# Blocks must stay at least max_subseq_len wide or a window would straddle two blocks
+# and leak across splits, so the width is the larger of the two. That leaves one
+# irreducible case: a genome too short to hold _SPLIT_TARGET_BLOCKS windows of the
+# configured length (below ~13 kb at 1100 bp) is window-bound, and its grid still
+# moves between runs at different window lengths. No grid can avoid it — 12 blocks of
+# 1100 bp do not fit in 5 kb. Genomes at or above that size, and genomes short enough
+# to take the equal-thirds fallback (which is already position-based), are stable.
+_SPLIT_TARGET_BLOCKS: int = 12
+
 
 def _stratified_counts(n_total: int) -> tuple[int, int, int]:
     """Split one genome's ``n_total`` subseqs into ``(n_train, n_val, n_test)``.
@@ -361,11 +386,17 @@ def _block_stratified_windows(
     length to the bp left in the slice) length-distinct regions in different
     splits — so a narrow val/test region yields shorter windows than a wide train
     region, and the head learns window length instead of sequence. Here the genome
-    is cut into ``L // max_subseq_len`` equal-width blocks (each ~``max_subseq_len``)
-    and the blocks are assigned by :func:`_label_blocks`, which INTERLEAVES the
-    splits so val/test blocks sit among train blocks (representative composition)
-    while every split samples the SAME-width slices (identical length clamp).
-    Windows stay confined to their block, so no cross-split overlaps (leakage-safe).
+    is cut into :data:`_SPLIT_TARGET_BLOCKS` equal-width blocks (widened only when a
+    window would not fit in one) and the blocks are assigned by :func:`_label_blocks`,
+    which INTERLEAVES the splits so val/test blocks sit among train blocks
+    (representative composition) while every split samples the SAME-width slices
+    (identical length clamp). Windows stay confined to their block, so no cross-split
+    overlaps (leakage-safe).
+
+    The grid comes from the genome's length rather than from ``max_subseq_len`` so a
+    genome's held-out regions are the same regions at any window length — see
+    :data:`_SPLIT_TARGET_BLOCKS` for the leakage this closes and for the one case it
+    cannot.
 
     Args:
         task: One genome's per-leaf task (``fasta_path`` / ``header_id`` / ``n``,
@@ -388,7 +419,12 @@ def _block_stratified_windows(
                                            task.get("header_id", "")))
     if length <= 0 or max_subseq_len <= 0:
         return False
-    n_blocks = length // max_subseq_len
+    # Grid derived from the GENOME (see _SPLIT_TARGET_BLOCKS), widened only when a
+    # window would not fit in a block. Using max_subseq_len as the width, as this
+    # once did, is what let a change of window length move every genome's held-out
+    # regions.
+    block_bp = max(max_subseq_len, length // _SPLIT_TARGET_BLOCKS)
+    n_blocks = length // block_bp
     if n_blocks < _MIN_BLOCKS_FOR_STRATIFY:
         return False
 

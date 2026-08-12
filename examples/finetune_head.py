@@ -105,10 +105,10 @@ def build_hf_dataset(df: pd.DataFrame) -> Dataset:
     return Dataset.from_dict({"seq": df["seq"].tolist(), "label": df["class_idx"].astype(int).tolist()})
 
 
-def tokenize_fn(batch, tokenizer):
+def tokenize_fn(batch, tokenizer, max_length: int = MAX_LENGTH):
     return tokenizer(
         batch["seq"],
-        max_length=MAX_LENGTH,
+        max_length=max_length,
         padding=False,  # dynamic padding via DataCollatorWithPadding
         truncation=True,
     )
@@ -205,6 +205,12 @@ def parse_args() -> argparse.Namespace:
                         "for a head that fits its training data and not its val.")
     p.add_argument("--lora-dropout", type=float, default=LORA_DROPOUT,
                    help="LoRA dropout, raised alongside a lower rank to regularise.")
+    p.add_argument("--max-length", type=int, default=MAX_LENGTH,
+                   help="Tokeniser cap. At 128, a 1,100 bp window tokenises to ~133 "
+                        "tokens and 51%% of long windows are TRUNCATED: the model "
+                        "sees ~585 bp of them, against ~185 bp from the old 250 bp "
+                        "windows. Raising this to 256 lets it see the whole window, "
+                        "at roughly 4x the attention cost.")
     p.add_argument("--num-epochs", type=int, default=NUM_EPOCHS,
                    help="Training epochs. Also sets the cosine schedule's horizon, "
                         "so lowering it anneals the LR over the window where these "
@@ -245,9 +251,9 @@ def main():
     log.info("Loading tokenizer %s", MODEL_ID)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
-    ds_train = build_hf_dataset(df_train).map(lambda b: tokenize_fn(b, tokenizer), batched=True, remove_columns=["seq"])
-    ds_val   = build_hf_dataset(df_val).map(lambda b: tokenize_fn(b, tokenizer), batched=True, remove_columns=["seq"])
-    ds_test  = build_hf_dataset(df_test).map(lambda b: tokenize_fn(b, tokenizer), batched=True, remove_columns=["seq"])
+    ds_train = build_hf_dataset(df_train).map(lambda b: tokenize_fn(b, tokenizer, args.max_length), batched=True, remove_columns=["seq"])
+    ds_val   = build_hf_dataset(df_val).map(lambda b: tokenize_fn(b, tokenizer, args.max_length), batched=True, remove_columns=["seq"])
+    ds_test  = build_hf_dataset(df_test).map(lambda b: tokenize_fn(b, tokenizer, args.max_length), batched=True, remove_columns=["seq"])
 
     # ---- model + LoRA ----
     log.info("Loading base model %s", MODEL_ID)
@@ -444,7 +450,7 @@ def main():
         "num_epochs": args.num_epochs,
         "batch_size": args.batch_size,
         "grad_accum": args.grad_accum,
-        "max_length": MAX_LENGTH,
+        "max_length": args.max_length,
         "fp16": use_fp16,
     }
     (output_dir / "run_config.json").write_text(json.dumps(config, indent=2))
