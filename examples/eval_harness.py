@@ -178,6 +178,9 @@ def phylocascade_predictions(
     arbitration: str = "confidence",
     belonging_margin: float = 0.0,
     reject_margin: float = 0.0,
+    consensus_agreement: float | None = None,
+    record_descent: bool = False,
+    descent_out: Path | None = None,
 ) -> tuple[dict, list[dict]]:
     """One classify() call per read, per entry point; an arbiter picks among them.
 
@@ -242,12 +245,14 @@ def phylocascade_predictions(
     classifiers = {
         r: Classifier(bundle_path, device=device, root_taxid=r, inferer=shared,
                       belonging_margin=belonging_margin,
-                      reject_margin=reject_margin)
+                      reject_margin=reject_margin,
+                      consensus_agreement=consensus_agreement)
         for r in roots
     }
 
     preds: dict[str, tuple[str | None, str | None]] = {}
     diags: list[dict] = []
+    descent: list[dict] = []
     rows = eval_rows[:limit] if limit else eval_rows
     for i, row in enumerate(rows):
         if log_every and i and i % log_every == 0:
@@ -262,7 +267,43 @@ def phylocascade_predictions(
             shared.current = i
         offers = []
         for root, clf in classifiers.items():
-            res = clf.classify(row["seq"], query_id=row["read_id"])
+            if record_descent:
+                # Every expanded node, INCLUDING the ones that rejected. The
+                # consensus is derived from the same search, so this costs no extra
+                # inference -- classify() itself is search() followed by consensus().
+                #
+                # Why record it: 71% of the loss is reads that stop too early because
+                # a child head rejects them, and each node self-verdicts ALONE against
+                # an absolute threshold, trained 50/50 and deployed at roughly 1:250.
+                # Siblings never compete. Whether that is fixable offline depends on a
+                # number nothing currently records -- when the correct child is
+                # rejected, where does it RANK among its siblings' scores. With this
+                # dump, any descent policy can be simulated without a GPU.
+                all_res = clf.classify_all(row["seq"], query_id=row["read_id"])
+                res = clf._traverser.consensus(all_res) if all_res else None
+                if res is None:
+                    continue
+                res.query_id = row["read_id"]
+                # Per RESULT, not flattened per node. Survival is a property of the
+                # PATH -- `reject_penalty == 0` means no head on it said "not mine" --
+                # and a flattened node list cannot express it: an offline replay of
+                # the current rule then disagreed with the harness by 4 points of
+                # correct and 10 of misroute, and the simulator's own validation gate
+                # caught it. Recording the rule's actual input costs nothing here.
+                descent.append({
+                    "read_id": row["read_id"], "entry": root,
+                    "results": [
+                        {"reject_penalty": round(float(r.reject_penalty), 6),
+                         "stop_reason": r.stop_reason,
+                         "partial": bool(r.partial),
+                         "path": [{"taxid": str(getattr(e, "taxid", e)),
+                                   "p": round(float(getattr(e, "p", 0.0)), 6)}
+                                  for e in (r.classification or [])]}
+                        for r in all_res
+                    ],
+                })
+            else:
+                res = clf.classify(row["seq"], query_id=row["read_id"])
             path = res.classification or []
             if not path:
                 continue
@@ -314,6 +355,12 @@ def phylocascade_predictions(
             "bundle_exhausted": exhausted(taxid),
             "offers": [{k: v for k, v in o.items() if k != "_res"} for o in offers],
         })
+    if record_descent and descent_out is not None:
+        with open(descent_out, "w") as fh:
+            for rec in descent:
+                fh.write(json.dumps(rec) + "\n")
+        print(f"  descida por read -> {descent_out}  ({len(descent)} registros)")
+
     return preds, diags
 
 
@@ -384,6 +431,15 @@ def main() -> None:
                         "The entry points are disjoint subtrees, so 'deepest' is "
                         "NOT prefer_longest_survivor — it rewards tall subtrees and "
                         "gives every tie to whichever root is enumerated first.")
+    p.add_argument("--consensus-agreement", type=float, default=None,
+                   help="Relax the LCA's unanimity to this fraction of surviving "
+                        "paths agreeing on the next step. The LCA is 1.0 and returns "
+                        "0.000 accuracy at genus on the pilot; 0.50 measured offline "
+                        "at 0.108. None keeps the current behaviour.")
+    p.add_argument("--record-descent", type=Path, default=None,
+                   help="Dump every expanded node per read (including the ones "
+                        "that rejected) as JSONL, so descent policies can be "
+                        "simulated offline. Costs no extra inference.")
     p.add_argument("--diagnostics", type=Path, default=None,
                    help="Write the per-read cascade diagnostics as JSONL.")
     p.add_argument("--gc-baseline", action="store_true",
@@ -437,6 +493,9 @@ def main() -> None:
             arbitration=args.arbitration,
             belonging_margin=args.belonging_margin,
             reject_margin=args.reject_margin,
+            consensus_agreement=args.consensus_agreement,
+            record_descent=args.record_descent is not None,
+            descent_out=args.record_descent,
         )
         scored = rows[:args.limit] if args.limit else rows
         exhausted = sum(1 for d in diags if d.get("bundle_exhausted"))

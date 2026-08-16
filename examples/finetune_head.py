@@ -179,7 +179,14 @@ class EpochMetricsCallback(TrainerCallback):
             "epoch_logs": self.epoch_logs,
             "updated_at": time.strftime("%H:%M:%S"),
         }
-        self._progress_path.write_text(json.dumps(progress, indent=2))
+        # Atomic: write beside the target, then rename. `write_text` truncates first,
+        # so a machine that dies mid-write leaves a zero- or half-length file, and
+        # every reader of it fails with JSONDecodeError at char 0. Three power cuts
+        # in 24 h produced exactly that, and the corrupted file was the only record
+        # of how far the run had got. rename() within a directory is atomic on ext4.
+        tmp = self._progress_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(progress, indent=2))
+        tmp.replace(self._progress_path)
 
 
 def parse_args() -> argparse.Namespace:
