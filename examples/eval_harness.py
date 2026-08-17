@@ -375,6 +375,22 @@ def load_eval_rows() -> list[dict]:
     return pq.read_table(EVAL_PARQUET).to_pylist()
 
 
+def _print_with_f(name: str, report: dict, rows=None, preds=None) -> None:
+    """print_report mais o F(0.5) do scorer -- a medida de topo do projeto.
+
+    Ate 2026-08-17 o harness so mencionava F(0.5) em comentario e nunca o calculava,
+    e por isso o placar do projeto vinha de um codigo que ninguem podia auditar.
+    """
+    prf = None
+    if rows is not None and preds is not None:
+        from taxotreeset.benchmark.scorer import hierarchical_prf
+        try:
+            prf = hierarchical_prf(rows, preds)
+        except ValueError as exc:            # verdade vazia: falha alto, nao zera
+            print(f"  [F(0.5) indisponivel] {exc}")
+    print_report(name, report, prf)
+
+
 def print_report(name: str, report: dict, prf: dict | None = None) -> None:
     o = report["overall"]
     if prf:
@@ -493,7 +509,7 @@ def main() -> None:
         preds = fn(path, ranks)
         unranked = sum(1 for t, r in preds.values() if r is None)
         print(f"\n{name}: {len(preds)} reads committed, {unranked} with unknown rank")
-        print_report(name, score_reads(rows, preds))
+        _print_with_f(name, score_reads(rows, preds), rows, preds)
 
     if args.bundle and not args.gc_only:
         preds, diags = phylocascade_predictions(
@@ -511,7 +527,7 @@ def main() -> None:
         print(f"\nPhyloCascadeGLM: {sum(1 for v in preds.values() if v[0])} commits; "
               f"{exhausted} of them bottomed out on a taxon with no packed children "
               f"(bundle exhausted, NOT a genuine terminal)")
-        print_report("PhyloCascadeGLM", score_reads(scored, preds))
+        _print_with_f("PhyloCascadeGLM", score_reads(scored, preds), scored, preds)
         if args.diagnostics:
             with open(args.diagnostics, "w") as fh:
                 for d in diags:
@@ -546,7 +562,7 @@ def main() -> None:
         )
         scored = rows[:args.limit] if args.limit else rows
         print(f"\nGC-only cascade: {sum(1 for v in preds.values() if v[0])} commits")
-        print_report("GC-only cascade", score_reads(scored, preds))
+        _print_with_f("GC-only cascade", score_reads(scored, preds), scored, preds)
 
 
 if __name__ == "__main__":
