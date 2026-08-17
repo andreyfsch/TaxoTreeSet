@@ -140,3 +140,93 @@ def report_csv_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
             row.update(stats)
             rows.append(row)
     return rows
+
+
+def hierarchical_prf(
+    eval_rows: list[dict],
+    predictions: dict[str, tuple[str | None, str | None]],
+    beta: float = 0.5,
+) -> dict[str, float]:
+    """Micro-averaged hierarchical precision/recall/F_beta over lineage sets.
+
+    The project's headline measure. A prediction is credited for every taxon it
+    names that lies on the true lineage, so a commit at a correct ANCESTOR earns
+    partial credit where exact match scores zero — three pilot heads land on a
+    correct ancestor 93-97% of the time. beta=0.5 weights precision four times
+    recall: for this tool abstaining beats misrouting.
+
+    Predicted set = the committed taxon plus its ancestors, reconstructed from the
+    parent links implied by the eval set's own lineages. True set = the read's
+    lineage. Micro-averaged: intersections, predicted sizes and true sizes are
+    summed over reads before the ratio, so every taxon counts once regardless of
+    how deep its read's lineage runs.
+
+    WHY THIS LIVES HERE. Until 2026-08-17 the project's headline numbers came from
+    an implementation that is in no file of any of the three repositories -- the
+    harness only ever mentioned F(0.5) in comments. Nobody could audit the
+    convention, and one convention error had already gone unnoticed for the whole
+    investigation: 6,950 of 12,350 eval reads carried an EMPTY true lineage (a
+    silent ``lineages.get(taxid, [])`` in the eval builder), which contributed
+    nothing to recall while still charging the precision denominator of any tool
+    that answered. Tools that abstain were spared; the cascade, which answers
+    everywhere, absorbed the whole penalty. Repairing the truth moved
+    PhyloCascadeGLM from 0.353 to 0.685 and Kraken2 from 0.802 to 0.653.
+
+    A read whose true lineage is empty raises rather than scoring silently: an
+    empty truth cannot be scored, and treating it as zero is what produced the
+    error above.
+
+    Args:
+        eval_rows: Eval rows carrying ``read_id`` and ``true_lineage``.
+        predictions: ``read_id -> (taxid, rank)``. Absent reads count as
+            abstentions and contribute to the true side only.
+        beta: F-measure beta. 0.5 (default) weights precision 4x recall.
+
+    Returns:
+        ``{"precision", "recall", "f_beta", "beta", "n_reads"}``.
+
+    Raises:
+        ValueError: if any row's true lineage is empty.
+    """
+    def _lineage(row: dict) -> list[str]:
+        lin = row["true_lineage"]
+        if isinstance(lin, str):
+            lin = json.loads(lin)
+        return [str(t) for t, _rank in lin]
+
+    parent: dict[str, str] = {}
+    for row in eval_rows:
+        chain = _lineage(row)[::-1]          # stored leaf-first; walk root-first
+        for above, below in zip(chain, chain[1:]):
+            parent[below] = above
+
+    def ancestors(taxid: str) -> set[str]:
+        out, seen = set(), set()
+        while taxid and taxid not in seen:
+            seen.add(taxid)
+            out.add(taxid)
+            taxid = parent.get(taxid)
+        return out
+
+    inter = pred_total = true_total = 0
+    for row in eval_rows:
+        truth = set(_lineage(row))
+        if not truth:
+            raise ValueError(
+                f"read {row.get('read_id')!r} has an empty true_lineage; an "
+                "unscoreable read must not be silently counted as zero "
+                "(see evaluation/repair_eval_lineages.py)"
+            )
+        got = predictions.get(row["read_id"])
+        pred = ancestors(str(got[0])) if got and got[0] else set()
+        inter += len(pred & truth)
+        pred_total += len(pred)
+        true_total += len(truth)
+
+    precision = inter / pred_total if pred_total else 0.0
+    recall = inter / true_total if true_total else 0.0
+    b2 = beta * beta
+    f = ((1 + b2) * precision * recall / (b2 * precision + recall)
+         if (precision + recall) else 0.0)
+    return {"precision": precision, "recall": recall, "f_beta": f,
+            "beta": beta, "n_reads": len(eval_rows)}

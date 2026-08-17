@@ -38,7 +38,12 @@ import json
 from pathlib import Path
 
 BASE = Path("/mnt/f/taxotreeset_viruses")
-EVAL_PARQUET = BASE / "baselines" / "eval_reads.parquet"
+# Reparado: 6.950 dos 12.350 reads do arquivo original carregam true_lineage VAZIA,
+# efeito de um `lineages.get(taxid, [])` silencioso no construtor. Uma verdade vazia
+# nao soma ao recall mas cobra o denominador da precisao de quem responde, o que
+# penalizava exatamente a ferramenta que nunca se abstem. Ver
+# evaluation/repair_eval_lineages.py.
+EVAL_PARQUET = BASE / "baselines" / "eval_reads_repaired.parquet"
 
 
 # --------------------------------------------------------------------------- #
@@ -370,8 +375,12 @@ def load_eval_rows() -> list[dict]:
     return pq.read_table(EVAL_PARQUET).to_pylist()
 
 
-def print_report(name: str, report: dict) -> None:
+def print_report(name: str, report: dict, prf: dict | None = None) -> None:
     o = report["overall"]
+    if prf:
+        print(f"\n=== {name} — F({prf['beta']}) hierarquico ===")
+        print(f"  precisao {prf['precision']:.3f}  recall {prf['recall']:.3f}  "
+              f"F({prf['beta']}) {prf['f_beta']:.3f}   n={prf['n_reads']}")
     print(f"\n=== {name} ===")
     print(f"  overall  n={o['n']}  " + "  ".join(
         f"{k}={o.get(k+'_rate', 0):.3f}" for k in

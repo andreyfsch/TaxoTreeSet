@@ -2,8 +2,11 @@
 
 import json
 
+import pytest
+
 from taxotreeset.benchmark.scorer import (
     classify_outcome,
+    hierarchical_prf,
     report_csv_rows,
     score_reads,
 )
@@ -88,3 +91,61 @@ class TestReportCsv:
         assert {r["group"] for r in rows} == {
             "overall", "by_expected_commit_rank", "by_distance_bin"}
         assert all("correct_rate" in r and "n" in r for r in rows)
+
+
+class TestHierarchicalPRF:
+    """The project's headline measure, pinned.
+
+    It had no implementation in any of the three repositories until 2026-08-17 --
+    the harness mentioned F(0.5) only in comments -- so the convention could not be
+    audited, and one convention error ran the length of the investigation: 6,950 of
+    12,350 eval reads carried an empty true lineage, contributing nothing to recall
+    while still charging the precision denominator of whichever tool answered.
+    """
+
+    @staticmethod
+    def _rows():
+        # a -> b -> c, stored LEAF-FIRST as the eval set does
+        return [{"read_id": "r1",
+                 "true_lineage": [["c", "species"], ["b", "genus"], ["a", "family"]]}]
+
+    def test_exact_commit_is_perfect(self):
+        out = hierarchical_prf(self._rows(), {"r1": ("c", "species")})
+        assert out["precision"] == 1.0
+        assert out["recall"] == 1.0
+        assert out["f_beta"] == 1.0
+
+    def test_correct_ancestor_earns_partial_credit(self):
+        # committing at b names {a, b}: all correct, but misses c
+        out = hierarchical_prf(self._rows(), {"r1": ("b", "genus")})
+        assert out["precision"] == 1.0
+        assert out["recall"] == pytest.approx(2 / 3)
+        # beta=0.5 favours the precise-but-shallow call over a deep wrong one
+        assert out["f_beta"] > 0.85
+
+    def test_abstention_costs_recall_only(self):
+        out = hierarchical_prf(self._rows(), {})
+        assert out["precision"] == 0.0
+        assert out["recall"] == 0.0
+        assert out["f_beta"] == 0.0
+
+    def test_beta_weights_precision_four_times(self):
+        rows = self._rows()
+        shallow = hierarchical_prf(rows, {"r1": ("a", "family")}, beta=0.5)
+        # same read scored with beta=2 (recall-weighted) must rank it lower
+        recall_weighted = hierarchical_prf(rows, {"r1": ("a", "family")}, beta=2.0)
+        assert shallow["f_beta"] > recall_weighted["f_beta"]
+
+    def test_empty_truth_raises_rather_than_scoring_zero(self):
+        # this is the bug that ran the whole investigation: an unscoreable read
+        # must not be silently counted, because it charges precision and credits
+        # nothing, penalising exactly the tools that answer everywhere
+        with pytest.raises(ValueError, match="empty true_lineage"):
+            hierarchical_prf([{"read_id": "r1", "true_lineage": []}],
+                             {"r1": ("c", "species")})
+
+    def test_accepts_json_encoded_lineages(self):
+        rows = [{"read_id": "r1",
+                 "true_lineage": json.dumps([["c", "species"], ["b", "genus"]])}]
+        out = hierarchical_prf(rows, {"r1": ("c", "species")})
+        assert out["recall"] == 1.0
