@@ -184,6 +184,7 @@ def phylocascade_predictions(
     belonging_margin: float = 0.0,
     reject_margin: float = 0.0,
     consensus_agreement: float | None = None,
+    accept_threshold: dict[str, float] | None = None,
     record_descent: bool = False,
     descent_out: Path | None = None,
 ) -> tuple[dict, list[dict]]:
@@ -251,7 +252,8 @@ def phylocascade_predictions(
         r: Classifier(bundle_path, device=device, root_taxid=r, inferer=shared,
                       belonging_margin=belonging_margin,
                       reject_margin=reject_margin,
-                      consensus_agreement=consensus_agreement)
+                      consensus_agreement=consensus_agreement,
+                      accept_threshold=accept_threshold)
         for r in roots
     }
 
@@ -303,7 +305,20 @@ def phylocascade_predictions(
                          "partial": bool(r.partial),
                          "path": [{"taxid": str(getattr(e, "taxid", e)),
                                    "p": round(float(getattr(e, "p", 0.0)), 6)}
-                                  for e in (r.classification or [])]}
+                                  for e in (r.classification or [])],
+                         # Rejeicao POR NO. Sem isto o `stop_reason` so existe por
+                         # RESULTADO, e um replay offline nao consegue reproduzir a
+                         # eliminacao: dentro do simulador o teste de rejeicao fica
+                         # vacuo, a descida vira "expandir tudo", e politicas que
+                         # dependem de quem rejeitou saem degeneradas -- foi o que
+                         # deixou a combinacao dos dois tratamentos sem medida. O
+                         # traverser ja constroi estes objetos (`PrunedBranch`, com
+                         # taxid/p/at_depth/stop_reason); so nao eram serializados.
+                         "pruned": [{"taxid": str(b.taxid),
+                                     "p": round(float(b.p), 6),
+                                     "at_depth": int(b.at_depth),
+                                     "stop_reason": b.stop_reason}
+                                    for b in (r.pruned_branches or [])]}
                         for r in all_res
                     ],
                 })
@@ -411,6 +426,19 @@ def print_report(name: str, report: dict, prf: dict | None = None) -> None:
               f"{r.get('abstain_rate',0):>9.3f}")
 
 
+def _accept_threshold(args) -> dict[str, float] | None:
+    """{taxid: limiar} a partir das duas flags, ou None."""
+    if args.accept_threshold is None or not args.accept_threshold_heads:
+        return None
+    alvo = args.accept_threshold_heads
+    caminho = Path(alvo)
+    if caminho.exists():
+        taxids = json.loads(caminho.read_text())
+    else:
+        taxids = [t.strip() for t in alvo.split(",") if t.strip()]
+    return {str(t): float(args.accept_threshold) for t in taxids}
+
+
 def main() -> None:
     import argparse
 
@@ -461,6 +489,14 @@ def main() -> None:
                         "paths agreeing on the next step. The LCA is 1.0 and returns "
                         "0.000 accuracy at genus on the pilot; 0.50 measured offline "
                         "at 0.108. None keeps the current behaviour.")
+    p.add_argument("--accept-threshold", type=float, default=None,
+                   help="limiar de p_belong que os heads de --accept-threshold-heads "
+                        "precisam superar para sobreviver. Simetrico ao "
+                        "reject_fr_penalty; trata o falso ACEITE.")
+    p.add_argument("--accept-threshold-heads", default=None,
+                   help="taxids separados por virgula, ou caminho de um JSON com a "
+                        "lista. Vem da culpa end-to-end -- a medida local NAO serve "
+                        "para escolher (papel local fica no acaso, P=0.387).")
     p.add_argument("--record-descent", type=Path, default=None,
                    help="Dump every expanded node per read (including the ones "
                         "that rejected) as JSONL, so descent policies can be "
@@ -519,6 +555,7 @@ def main() -> None:
             belonging_margin=args.belonging_margin,
             reject_margin=args.reject_margin,
             consensus_agreement=args.consensus_agreement,
+            accept_threshold=_accept_threshold(args),
             record_descent=args.record_descent is not None,
             descent_out=args.record_descent,
         )
