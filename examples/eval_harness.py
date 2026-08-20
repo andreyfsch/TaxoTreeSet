@@ -578,6 +578,11 @@ def main() -> None:
         ("Kraken2", kraken2_predictions, b / "kraken2.out"),
         ("Centrifuge", centrifuge_predictions, b / "centrifuge.out"),
         ("Kaiju", kaiju_predictions, b / "kaiju.out"),
+        # geNomad: convertido por evaluation/genomad_para_out.py, que resolve a
+        # linhagem por NOME. A coluna `taxid` do geNomad e a numeracao INTERNA
+        # dele (14788 = Paramyxoviridae; no NCBI e 11158), entao pontuar por ela
+        # casaria com taxons errados sem levantar erro.
+        ("geNomad", kraken2_predictions, b / "genomad.out"),
     ]:
         if not path.exists():
             print(f"  (skipping {name}: {path} missing)")
