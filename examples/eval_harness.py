@@ -261,9 +261,40 @@ def phylocascade_predictions(
     diags: list[dict] = []
     descent: list[dict] = []
     rows = eval_rows[:limit] if limit else eval_rows
+
+    # ESCRITA INCREMENTAL DA DESCIDA, com retomada.
+    #
+    # Ate 2026-08-20 os registros ficavam em `descent` e so iam para disco no fim.
+    # Uma travada do WSL a 8.000 de 12.350 reads apagou ~6 h de GPU: o processo
+    # morreu antes do unico write. JSONL e append-friendly, entao nao ha razao para
+    # segurar nada em memoria.
+    #
+    # Na retomada, os read_id ja gravados sao pulados. O arquivo e reaberto em modo
+    # APPEND -- abrir em "w" apagaria justamente o que se quer aproveitar.
+    _feitos: set[str] = set()
+    _fh = None
+    if record_descent and descent_out is not None:
+        if descent_out.exists():
+            with open(descent_out) as _r:
+                for _l in _r:
+                    try:
+                        _feitos.add(json.loads(_l)["read_id"])
+                    except Exception:
+                        continue          # linha truncada pela morte do processo
+            if _feitos:
+                print(f"  retomando: {len(_feitos)} reads ja gravadas em "
+                      f"{descent_out}", flush=True)
+        _fh = open(descent_out, "a")
+    _pulados = 0
     for i, row in enumerate(rows):
         if log_every and i and i % log_every == 0:
             print(f"  {i}/{len(rows)} reads", flush=True)
+        # Retomada: read ja no JSONL nao volta para a GPU. As pontuacoes desta
+        # execucao passam a cobrir SO as reads processadas agora -- o artefato
+        # completo e o arquivo, nao o resumo impresso. Avisado no fim.
+        if _feitos and row["read_id"] in _feitos:
+            _pulados += 1
+            continue
         # A precomputing inferer serves logits from a table keyed by (read, taxid),
         # and NodeInferer.infer(windows, taxid) carries no read identity, so tell it
         # which read this is. Harmless for the normal inferer, which has no such
@@ -297,7 +328,7 @@ def phylocascade_predictions(
                 # the current rule then disagreed with the harness by 4 points of
                 # correct and 10 of misroute, and the simulator's own validation gate
                 # caught it. Recording the rule's actual input costs nothing here.
-                descent.append({
+                _rec = {
                     "read_id": row["read_id"], "entry": root,
                     "results": [
                         {"reject_penalty": round(float(r.reject_penalty), 6),
@@ -321,7 +352,11 @@ def phylocascade_predictions(
                                     for b in (r.pruned_branches or [])]}
                         for r in all_res
                     ],
-                })
+                }
+                descent.append(_rec)
+                if _fh is not None:
+                    _fh.write(json.dumps(_rec) + "\n")
+                    _fh.flush()
             else:
                 res = clf.classify(row["seq"], query_id=row["read_id"])
             path = res.classification or []
@@ -375,11 +410,16 @@ def phylocascade_predictions(
             "bundle_exhausted": exhausted(taxid),
             "offers": [{k: v for k, v in o.items() if k != "_res"} for o in offers],
         })
-    if record_descent and descent_out is not None:
-        with open(descent_out, "w") as fh:
-            for rec in descent:
-                fh.write(json.dumps(rec) + "\n")
-        print(f"  descida por read -> {descent_out}  ({len(descent)} registros)")
+    if _pulados:
+        print(f"\n  AVISO: {_pulados} reads foram puladas por ja estarem no JSONL. "
+              f"As metricas abaixo cobrem apenas as {len(rows) - _pulados} reads "
+              f"processadas NESTA execucao; o artefato completo e o arquivo de "
+              f"descida.", flush=True)
+    if _fh is not None:
+        _fh.close()
+        _n = sum(1 for _ in open(descent_out))
+        print(f"  descida por read -> {descent_out}  ({_n} registros no arquivo, "
+              f"{len(descent)} desta execucao)")
 
     return preds, diags
 
