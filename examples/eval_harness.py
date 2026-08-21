@@ -583,6 +583,9 @@ def main() -> None:
         # dele (14788 = Paramyxoviridae; no NCBI e 11158), entao pontuar por ela
         # casaria com taxons errados sem levantar erro.
         ("geNomad", kraken2_predictions, b / "genomad.out"),
+        # PhaGCN2 (PhaBox2): mesmo conversor, que reconhece as duas colunas de
+        # linhagem e corta o prefixo de rank (`family:Arteriviridae`).
+        ("PhaGCN2", kraken2_predictions, b / "phagcn.out"),
     ]:
         if not path.exists():
             print(f"  (skipping {name}: {path} missing)")
