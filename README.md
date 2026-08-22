@@ -4,9 +4,9 @@ TaxoTreeSet builds balanced, hierarchically structured training datasets from
 NCBI (RefSeq by default, or GenBank) for LoRA fine-tuning of genomic language
 models. It turns a raw catalog of genome sequences into a tree of per-node
 training shards — one dataset for each internal taxonomic node, classifying that
-node's direct children — each ready to train a LoRA adapter on top of a foundation
-model
-backbone such as [DNABERT-2](https://github.com/MAGICS-LAB/DNABERT_2).
+node's direct children — each ready to train a LoRA adapter on top of a
+foundation model backbone such as
+[DNABERT-2](https://github.com/MAGICS-LAB/DNABERT_2).
 
 ## Overview
 
