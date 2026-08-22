@@ -492,15 +492,17 @@ def main():
         "train_size": len(df_train),
         "val_size": len(df_val),
         "test_size": len(df_test),
-        "lora_rank": LORA_RANK,
-        "lora_alpha": LORA_ALPHA,
-        "lora_dropout": LORA_DROPOUT,
+        # TODOS os argumentos, nao um subconjunto mantido a mao. Ate 2026-08-22
+        # este dicionario listava campo a campo e gravava as CONSTANTES
+        # LORA_RANK / LORA_ALPHA / LORA_DROPOUT, enquanto o codigo usa
+        # args.lora_rank e alpha = 2 * args.lora_rank -- entao passar --lora-rank
+        # treinava com um valor e registrava outro. Alem disso --freeze-pooler,
+        # --class-weight e --seed nao apareciam. Num treino de 16.407 heads isso e
+        # nao ter registro de como nada foi treinado. `vars(args)` nao envelhece:
+        # uma flag nova entra sozinha.
+        **{k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
+        "lora_alpha": 2 * args.lora_rank,      # derivado, nao e argumento
         "lora_target_modules": LORA_TARGET_MODULES,
-        "learning_rate": args.learning_rate,
-        "num_epochs": args.num_epochs,
-        "batch_size": args.batch_size,
-        "grad_accum": args.grad_accum,
-        "max_length": args.max_length,
         "fp16": use_fp16,
     }
     (output_dir / "run_config.json").write_text(json.dumps(config, indent=2))
