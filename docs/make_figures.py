@@ -1100,6 +1100,109 @@ def fig_clade_holdout() -> None:
     plt.close(fig)
 
 
+# ---------------------------------------------------------------------------
+# fig 13 - dereplicacao (--dereplicate)
+# ---------------------------------------------------------------------------
+
+def fig_dereplication() -> None:
+    """--dereplicate: collapse near-identical genomes before the split.
+
+    RefSeq carries ~1 genome per species, so there is nothing to collapse. GenBank
+    carries the full strain-level diversity — and one species, Influenza A, is
+    54.8% of its viral division. Panel 1 shows what generating from GenBank
+    without dereplication produces; panel 2 the fix.
+    """
+    fig, ax = _canvas(12, 7.0)
+    ax.text(50, 97, "Dereplication: one representative per near-identical group "
+            "(--dereplicate)", ha="center", fontsize=11, weight="bold")
+    ax.text(50, 92.5, "GenBank's viral division is 54.8% Influenza A — without "
+            "this pass, the head trains mostly on it",
+            ha="center", fontsize=7.4, style="italic", color="#888888")
+
+    FLU, OTHER1, OTHER2 = ORANGE, GREEN, PINK
+    lgt = {FLU: "#fae6d0", OTHER1: "#dcecdc", OTHER2: "#f7d4e1"}
+
+    def dot(cx, cy, c, r=1.3, z=3):
+        ax.add_patch(Circle((cx, cy), r, fc=lgt[c], ec=c, lw=1.2, zorder=z))
+
+    def segmented(cx, cy, c):
+        """One accession with 8 segments — ONE unit, not eight genomes."""
+        ax.add_patch(FancyBboxPatch((cx - 5.2, cy - 2.2), 10.4, 4.4,
+                     boxstyle="round,pad=0.1,rounding_size=0.5",
+                     fc="#ffffff", ec=c, lw=1.5, ls="--", zorder=5))
+        for i in range(8):
+            ax.add_patch(Rectangle((cx - 4.4 + i * 1.1, cy - 1.0), 0.75, 2.0,
+                         fc=lgt[c], ec=c, lw=0.7, zorder=6))
+
+    pool = [FLU] * 7 + [OTHER1, OTHER2]
+
+    panels = [
+        (4, "--assembly-source GenBank   (no --dereplicate)", RED,
+         [FLU] * 7 + [OTHER1, OTHER2],
+         "7 near-identical influenza genomes reach the split\n"
+         "→ the head sees one species and little else", RED),
+        (54, "--assembly-source GenBank --dereplicate 0.95", GREEN,
+         [FLU, OTHER1, OTHER2],
+         "replicas collapse to one representative;\nthe divergent genomes survive "
+         "untouched", GREEN),
+    ]
+
+    for px, title, tc, kept, _note, nc in panels:
+        ax.add_patch(FancyBboxPatch((px, 30.5), 44, 55.5,
+                     boxstyle="round,pad=0.3,rounding_size=1.0",
+                     fc="#ffffff", ec="#cccccc", lw=1.2))
+        ax.text(px + 22, 81.5, title, ha="center", fontsize=8.6, weight="bold",
+                color=tc, family="monospace")
+
+        ax.text(px + 22, 75.5, "genomes discovered for the class", ha="center",
+                fontsize=6.6, style="italic", color="#888888")
+        for i, c in enumerate(pool):
+            dot(px + 7 + i * 3.7, 70, c)
+
+        _arrow(ax, (px + 22, 65.5), (px + 22, 57), color="#bbbbbb", lw=1.5)
+        ax.text(px + 23.5, 61.5, "MinHash 21-mer" if tc is GREEN else "",
+                ha="left", va="center", fontsize=6.4, color=GREEN)
+
+        ax.add_patch(FancyBboxPatch((px + 4, 44), 36, 11,
+                     boxstyle="round,pad=0.1,rounding_size=0.5",
+                     fc="#fbfbfb", ec=BLUE, lw=1.3))
+        ax.text(px + 22, 57.5, "what reaches the split", ha="center",
+                fontsize=6.6, style="italic", color="#888888")
+        start = px + 22 - (len(kept) - 1) * 1.9
+        for i, c in enumerate(kept):
+            dot(start + i * 3.8, 49.5, c)
+
+        ax.text(px + 22, 39, f"genome count = {len(kept)}", ha="center",
+                fontsize=7.4, weight="bold", color=tc)
+        consequencia = ("replicas of the SAME genome land in train\nand in test — "
+                        "the head scores well by memorising"
+                        if len(kept) > 3 else
+                        "train and test hold genuinely distinct\ngenomes")
+        ax.text(px + 22, 33.5, consequencia, ha="center", fontsize=6.5, color=tc)
+
+
+    # o ponto sutil: a unidade e o GENOMA
+    ax.add_patch(FancyBboxPatch((17, 18.5), 68, 9.5,
+                 boxstyle="round,pad=0.2,rounding_size=0.8",
+                 fc="#fffdf7", ec=ORANGE, lw=1.3, zorder=4))
+    segmented(25, 23.2, FLU)
+    ax.text(32, 25.0, "the unit is the GENOME, not the sequence",
+            ha="left", va="center", fontsize=7.2, weight="bold", color=ORANGE,
+            zorder=7)
+    ax.text(32, 21.4, "one accession with 8 segments is sketched whole — never as "
+            "8 separate genomes", ha="left", va="center", fontsize=6.5,
+            color="#666666", zorder=7)
+
+    ax.text(50, 2.4, "Runs BEFORE the genome count that chooses genome-level vs "
+            "window-slicing, so that decision sees distinct genomes, not replicas."
+            "  Greedy: each genome is compared only against the representatives "
+            "kept so far.  Off by default — RefSeq has ~1 genome/species.",
+            ha="center", fontsize=6.9, style="italic", color="#555555")
+
+    fig.savefig(FIG / "dereplication.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     fig_taxotreeset()
     fig_generate_detail()
@@ -1113,6 +1216,7 @@ if __name__ == "__main__":
     fig_tree_of_heads()
     fig_cluster_aware_split()
     fig_clade_holdout()
+    fig_dereplication()
     print(f"Figures written to {FIG}/")
     for p in sorted(FIG.glob("*.png")):
         print(f"  {p.name}")

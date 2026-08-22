@@ -377,6 +377,8 @@ host phylogenetic signal. It is off by default and has no effect on viruses.
 
 ### Source database and dereplication
 
+![Dereplication: generating from GenBank without --dereplicate lets seven near-identical influenza genomes reach the split, so replicas of the same genome land in train and test; --dereplicate 0.95 collapses them to one representative while the divergent genomes survive. The unit is the genome: an accession with eight segments is sketched whole, never as eight genomes](docs/figures/dereplication.png)
+
 By default TaxoTreeSet discovers genomes from **RefSeq**, NCBI's curated set —
 roughly one representative assembly per species. `--assembly-source` switches this
 to `GenBank` (or `all`), which carries the full strain-level diversity that RefSeq
