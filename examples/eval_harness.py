@@ -443,10 +443,42 @@ def _print_with_f(name: str, report: dict, rows=None, preds=None) -> None:
             prf = hierarchical_prf(rows, preds)
         except ValueError as exc:            # verdade vazia: falha alto, nao zera
             print(f"  [F(0.5) indisponivel] {exc}")
-    print_report(name, report, prf)
+    print_report(name, report, prf, _f_por_bin(rows, preds))
 
 
-def print_report(name: str, report: dict, prf: dict | None = None) -> None:
+def _f_por_bin(rows, preds) -> dict[str, float]:
+    """F(0.5) hierarquico POR FAIXA DE DIVERGENCIA.
+
+    POR QUE O AGREGADO ENGANA. As faixas medem regimes diferentes e o agregado as
+    mistura na proporcao em que aparecem no conjunto. Medido em 1.200 reads de
+    1200 bp: na faixa `identical` o Kraken2 marca F(0,5)=1,000 e o geNomad 0,668;
+    na faixa `>=0,10` -- 852 das 1.200 reads -- a ordem se INVERTE, 0,526 contra
+    0,741. Um numero unico esconde as duas coisas.
+
+    Isto e o que a literatura pede e quase nunca reporta: `OBJECTIVES.md` O5 e a
+    revisao de Schoier et al. recomendam "open-set robustness vs. taxonomic
+    distance: bin targets by ANI ... and report all above metrics per bin".
+    """
+    if rows is None or preds is None:
+        return {}
+    import collections
+    from taxotreeset.benchmark.scorer import hierarchical_prf
+    por_bin = collections.defaultdict(list)
+    for row in rows:
+        por_bin[row.get("distance_bin", "?")].append(row)
+    ids_por_bin = {b: {r["read_id"] for r in sub} for b, sub in por_bin.items()}
+    saida = {}
+    for b, sub in por_bin.items():
+        p = {k: v for k, v in preds.items() if k in ids_por_bin[b]}
+        try:
+            saida[b] = hierarchical_prf(sub, p)["f_beta"]
+        except ValueError:
+            pass                                  # verdade vazia nessa faixa
+    return saida
+
+
+def print_report(name: str, report: dict, prf: dict | None = None,
+                 f_bin: dict[str, float] | None = None) -> None:
     o = report["overall"]
     if prf:
         print(f"\n=== {name} — F({prf['beta']}) hierarquico ===")
@@ -456,14 +488,17 @@ def print_report(name: str, report: dict, prf: dict | None = None) -> None:
     print(f"  overall  n={o['n']}  " + "  ".join(
         f"{k}={o.get(k+'_rate', 0):.3f}" for k in
         ("correct", "over_commit", "too_shallow", "misroute", "abstain")))
+    f_bin = f_bin or {}
     print("  by divergence bin:")
     print(f"    {'bin':<14}{'n':>6}{'correct':>9}{'over':>8}{'shallow':>9}"
-          f"{'misroute':>10}{'abstain':>9}")
+          f"{'misroute':>10}{'abstain':>9}{'F(0.5)':>9}")
     for b, r in report["by_distance_bin"].items():
+        f = f_bin.get(b)
         print(f"    {b:<14}{r['n']:>6}"
               f"{r.get('correct_rate',0):>9.3f}{r.get('over_commit_rate',0):>8.3f}"
               f"{r.get('too_shallow_rate',0):>9.3f}{r.get('misroute_rate',0):>10.3f}"
-              f"{r.get('abstain_rate',0):>9.3f}")
+              f"{r.get('abstain_rate',0):>9.3f}"
+              + (f"{f:>9.3f}" if f is not None else f"{'--':>9}"))
 
 
 def _accept_threshold(args) -> dict[str, float] | None:
