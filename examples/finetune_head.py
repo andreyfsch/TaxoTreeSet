@@ -32,6 +32,12 @@ import logging
 import math
 import os
 import time
+
+# Antes dos imports pesados: torch e transformers sozinhos custam segundos, e essa
+# e a parte que um worker residente eliminaria. Marcado depois deles, media 0,0 --
+# foi o que o proprio smoke test mostrou.
+_PROCESS_START = time.time()
+
 from pathlib import Path
 
 # Must be set before any CUDA allocation; expandable_segments eliminates
@@ -89,6 +95,41 @@ WEIGHT_DECAY = 0.01
 MAX_LENGTH = 128
 SEED = 42
 # ---------------------------------------------------------------------------
+
+
+class PhaseTimer:
+    """Cronometro de fases, para saber ONDE vai o tempo fora do Trainer.
+
+    Motivacao, medida em 2026-08-22: o custo fixo por head (wall-clock menos
+    `train_runtime`) tem mediana de 916 s em 13 treinos locais. Duas pecas foram
+    identificadas e removidas -- uma passada redundante sobre o teste (~370 s) e a
+    re-tokenizacao a cada processo (~25 s nos tres splits) -- e o restante NAO
+    estava explicado. Atribuir o resto a carregar o backbone teria sido palpite: o
+    backbone custa 9,8 s.
+
+    Em 16.407 heads no HoreKa, onde o treino em si dura minutos, o custo fixo e que
+    decide o wall-clock. Esta instrumentacao nao altera o treino -- so registra --
+    e sai em `metrics.json` sob `phase_seconds`.
+    """
+
+    def __init__(self) -> None:
+        self.fases: dict[str, float] = {}
+        self._t = time.time()
+
+    def marca(self, nome: str) -> None:
+        agora = time.time()
+        self.fases[nome] = round(agora - self._t, 2)
+        self._t = agora
+
+    def resumo(self, total: float) -> str:
+        contadas = sum(self.fases.values())
+        linhas = [f"{'fase':>22}  {'s':>8}  {'%':>5}"]
+        for nome, seg in self.fases.items():
+            linhas.append(f"{nome:>22}  {seg:>8.1f}  {seg / total * 100:>4.1f}%")
+        linhas.append(f"{'(nao instrumentado)':>22}  {total - contadas:>8.1f}  "
+                      f"{(total - contadas) / total * 100:>4.1f}%")
+        linhas.append(f"{'TOTAL do processo':>22}  {total:>8.1f}  100.0%")
+        return "\n".join(linhas)
 
 
 def load_splits(data_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -322,7 +363,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def main():
+    fases = PhaseTimer()
     args = parse_args()
+    fases.fases["import + startup"] = round(fases._t - _PROCESS_START, 2)
     # Seed BEFORE any model construction: the BertPooler is frozen at its random
     # init under LoRA, so without a fixed seed the (unsaved) pooler is different
     # on every run and the saved adapter cannot be reproduced.
@@ -340,18 +383,22 @@ def main():
     # ---- data ----
     log.info("Loading splits from %s", data_dir)
     df_train, df_val, df_test = load_splits(data_dir)
+    fases.marca("ler parquets")
     num_labels = int(df_train["class_idx"].max()) + 1
     log.info("train=%d val=%d test=%d classes=%d", len(df_train), len(df_val), len(df_test), num_labels)
 
     # ---- tokenizer ----
     log.info("Loading tokenizer %s", MODEL_ID)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
+    fases.marca("carregar tokenizer")
 
     ds_train, ds_val, ds_test = (
         tokenized_split(df, data_dir / f"{nome}.parquet", tokenizer,
                         args.max_length, args.tokenized_cache)
         for nome, df in (("train", df_train), ("val", df_val), ("test", df_test))
     )
+    len(ds_train), len(ds_val), len(ds_test)      # forca o gerador antes de medir
+    fases.marca("tokenizar (3 splits)")
 
     # ---- model + LoRA ----
     log.info("Loading base model %s", MODEL_ID)
@@ -377,6 +424,7 @@ def main():
         # correctly standalone (e.g. in PhyloCascadeGLM inference).
         modules_to_save=["classifier", "score", "pooler"],
     )
+    fases.marca("carregar backbone")
     model = get_peft_model(base_model, lora_cfg)
     if args.freeze_pooler:
         # The pooler is 590,592 of the 887,042 trainable parameters -- 67% at rank
@@ -491,6 +539,7 @@ def main():
 
         trainer_cls = _TrainerPesado
 
+    fases.marca("montar LoRA + trainer")
     trainer = trainer_cls(
         model=model,
         args=training_args,
@@ -508,6 +557,7 @@ def main():
     t0 = time.time()
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
     elapsed = time.time() - t0
+    fases.marca("trainer.train()")
     log.info("Training done in %.1f min", elapsed / 60)
 
     # ---- evaluate on test set ----
@@ -532,6 +582,7 @@ def main():
         ds_train.select(_train_idx), metric_key_prefix="train_eval")
     log.info("Train f1_macro=%.4f (on %d rows)",
              train_results.get("train_eval_f1_macro", float("nan")), _n_train_eval)
+    fases.marca("avaliar amostra do train")
 
     # ---- test: UMA passada, nao duas ----
     # Ate 2026-08-22 havia um trainer.evaluate(ds_test) aqui e um
@@ -557,11 +608,13 @@ def main():
     labels_test = raw_preds.label_ids
     report = classification_report(labels_test, preds_test, output_dict=True, zero_division=0)
     cm     = confusion_matrix(labels_test, preds_test).tolist()
+    fases.marca("predizer o teste")
 
     # ---- save adapter ----
     log.info("Saving LoRA adapter to %s", adapter_dir)
     model.save_pretrained(adapter_dir)
     tokenizer.save_pretrained(adapter_dir)
+    fases.marca("salvar adapter")
 
     # ---- save metrics ----
     metrics = {
@@ -571,10 +624,18 @@ def main():
         "test_classification_report": report,
         "test_confusion_matrix": cm,
         "elapsed_seconds": elapsed,
+        "phase_seconds": fases.fases,
     }
     metrics_path = output_dir / "metrics.json"
+    fases.marca("salvar metricas")
+    total = time.time() - _PROCESS_START
+    # total_processo fica FORA de phase_seconds: somado junto, ele dobrava a soma e
+    # a linha "(nao instrumentado)" saia negativa -- que foi como o defeito apareceu.
+    metrics["phase_seconds"] = dict(fases.fases)
+    metrics["total_process_seconds"] = round(total, 2)
     metrics_path.write_text(json.dumps(metrics, indent=2))
     log.info("Metrics saved to %s", metrics_path)
+    log.info("Onde foi o tempo deste head:\n%s", fases.resumo(total))
 
     # ---- save run config ----
     config = {
