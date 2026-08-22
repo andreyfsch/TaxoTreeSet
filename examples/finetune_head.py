@@ -189,6 +189,13 @@ class EpochMetricsCallback(TrainerCallback):
         tmp.replace(self._progress_path)
 
 
+def _add_class_weight(p) -> None:
+    p.add_argument("--class-weight", default=None,
+                   help="Correcao de priori DURANTE o treino: 'balanced' usa a "
+                        "frequencia do split, ou um float que pesa a classe "
+                        "positiva. Ausente: cross-entropy sem peso, como antes.")
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--data-dir", required=True, type=Path,
@@ -229,6 +236,7 @@ def parse_args() -> argparse.Namespace:
                         "without this the LoRA rank barely controls capacity.")
     p.add_argument("--seed", type=int, default=SEED,
                    help="Random seed; fixes the frozen pooler init so the adapter is reproducible")
+    _add_class_weight(p)
     return p.parse_args()
 
 
@@ -365,7 +373,42 @@ def main():
     )
 
     metrics_cb = EpochMetricsCallback(output_dir)
-    trainer = Trainer(
+
+    # --class-weight: correcao de priori DURANTE o treino.
+    #
+    # Os heads treinam 50/50 e operam a ~1:250. A correcao *post-hoc* foi testada e
+    # piorou (UNTRIED.md item 3), mas peso de classe durante o treino nunca foi --
+    # e e onde a fronteira se forma, nao depois dela. `balanced` usa a frequencia
+    # observada no split de treino; um float w pesa a classe positiva por w.
+    trainer_cls = Trainer
+    if args.class_weight:
+        import torch as _torch
+
+        if args.class_weight == "balanced":
+            cont = ds_train["labels"] if "labels" in ds_train.column_names else ds_train["label"]
+            n = len(cont); n1 = sum(1 for x in cont if int(x) == 1); n0 = n - n1
+            pesos = [n / (2 * max(n0, 1)), n / (2 * max(n1, 1))]
+        else:
+            pesos = [1.0, float(args.class_weight)]
+        print(f"  peso de classe: {pesos[0]:.3f} / {pesos[1]:.3f}", flush=True)
+
+        class _TrainerPesado(Trainer):
+            """Trainer com cross-entropy ponderada. So muda a perda."""
+
+            def compute_loss(self, model, inputs, return_outputs=False, **kw):
+                labels = inputs.pop("labels")
+                out = model(**inputs)
+                w = _torch.tensor(pesos, device=out.logits.device,
+                                  dtype=out.logits.dtype)
+                perda = _torch.nn.functional.cross_entropy(
+                    out.logits.view(-1, out.logits.size(-1)), labels.view(-1),
+                    weight=w)
+                inputs["labels"] = labels
+                return (perda, out) if return_outputs else perda
+
+        trainer_cls = _TrainerPesado
+
+    trainer = trainer_cls(
         model=model,
         args=training_args,
         train_dataset=ds_train,
