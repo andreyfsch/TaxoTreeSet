@@ -211,6 +211,7 @@ class GenerationOrchestrator:
         binary_extract_batch_size: int = 300,
         all_ranks: bool = False,
         assembly_source: str = "RefSeq",
+        derep_threshold: float | None = None,
         plasmids: bool = False,
         plasmid_release: str | None = None,
         plasmid_no_fetch: bool = False,
@@ -346,6 +347,7 @@ class GenerationOrchestrator:
         self.binary_extract_batch_size: int = binary_extract_batch_size
         self.all_ranks: bool = all_ranks
         self.assembly_source: str = assembly_source
+        self.derep_threshold: float | None = derep_threshold
         self.plasmids: bool = plasmids
         self.plasmid_release: str | None = plasmid_release
         self.plasmid_no_fetch: bool = plasmid_no_fetch
@@ -1086,6 +1088,7 @@ class GenerationOrchestrator:
             max_subseq_len=self.max_subseq_len,
             cluster_params=self.cluster_params,
             block_stratify_large=block_stratify_large,
+            derep_threshold=self.derep_threshold,
         )
 
     @property

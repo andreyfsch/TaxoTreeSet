@@ -6,13 +6,17 @@ per-leaf extraction tasks into balanced train/val/test partitions with the
 rely on. There is no orchestrator state here — every caller passes what it needs.
 """
 
+import logging
 import random
 
 from taxotreeset.core._orchestration._cluster import (
     ClusterParams,
     cluster_genomes_adaptive,
+    dereplicate_units,
 )
 from taxotreeset.dataset.utils import _read_single_sequence
+
+logger = logging.getLogger(__name__)
 
 _STRATIFIED_TRAIN_RATIO: float = 0.70
 _STRATIFIED_VAL_RATIO: float = 0.15
@@ -545,6 +549,7 @@ def _materialize_leaf_split(
     max_subseq_len: int = 2000,
     cluster_params: ClusterParams | None = None,
     block_stratify_large: bool = False,
+    derep_threshold: float | None = None,
 ) -> dict[str, list[dict]]:
     """Split a single child's per-leaf tasks into train/val/test.
 
@@ -578,6 +583,14 @@ def _materialize_leaf_split(
             volume would dominate a split is block-stratified across splits instead
             of assigned whole — see :func:`_assign_stratified_hybrid`. Set for
             *negatives*, whose pool can be dominated by one large external genome.
+        derep_threshold: Jaccard MinHash a partir do qual dois genomas contam como
+            replicas e um so representante e mantido. ``None`` (padrao) NAO
+            deduplica -- o comportamento fica identico ao de antes, que e o que o
+            RefSeq quer (~1 genoma por especie, nada a colapsar). Necessario fora
+            do RefSeq: o GenBank viral e 54,8% Influenza A, e sem deduplicar o head
+            treina majoritariamente nela. Aplicado ANTES do split, entao a
+            contagem de genomas que decide genome-level x window-slice ja e a
+            contagem deduplicada.
 
     Returns:
         Dictionary with 'train', 'val', 'test' keys; each value
@@ -591,6 +604,21 @@ def _materialize_leaf_split(
 
     shuffled = list(leaf_tasks)
     rng.shuffle(shuffled)
+
+    # Deduplicacao ANTES de contar genomas: a contagem que decide genome-level x
+    # window-slice tem de ser a contagem de genomas DISTINTOS, senao 300 replicas
+    # quase identicas passariam pelo limiar e o split genome-level seria feito
+    # sobre replicas. Desligada por padrao (derep_threshold=None) -- o RefSeq tem
+    # ~1 genoma por especie e nao ha o que colapsar.
+    if derep_threshold is not None:
+        antes = _group_by_genome(shuffled)
+        depois = dereplicate_units(antes, threshold=derep_threshold)
+        if len(depois) < len(antes):
+            logger.info(
+                "Dereplicacao da classe %s: %d -> %d genomas (Jaccard >= %.2f)",
+                class_index, len(antes), len(depois), derep_threshold,
+            )
+        shuffled = [t for unit in depois for t in unit]
 
     # Count distinct GENOMES (accessions via _genome_key), not sequences: a
     # segmented/multi-contig genome is ONE genome. Counting sequences would send a

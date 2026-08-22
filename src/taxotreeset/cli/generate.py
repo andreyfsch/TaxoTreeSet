@@ -430,6 +430,18 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "it for more parallelism headroom. Default 300.",
     )
     parser.add_argument(
+        "--dereplicate",
+        type=float,
+        default=None,
+        metavar="JACCARD",
+        help="Colapsa genomas quase identicos antes do split, guardando um "
+             "representante por grupo (MinHash 21-mer). Ausente: NAO "
+             "deduplica, que e o certo para RefSeq (~1 genoma por especie). "
+             "OBRIGATORIO com --assembly-source GenBank: o GenBank viral e "
+             "54,8%% Influenza A, e sem deduplicar o head treina "
+             "majoritariamente nela. Valor tipico: 0.95.",
+    )
+    parser.add_argument(
         "--assembly-source",
         choices=["RefSeq", "GenBank", "all"],
         default="RefSeq",
@@ -595,6 +607,7 @@ def run(args: argparse.Namespace) -> None:
             binary_extract_batch_size=args.extract_batch_size,
             all_ranks=args.all_ranks,
             assembly_source=getattr(args, "assembly_source", "RefSeq"),
+            derep_threshold=getattr(args, "dereplicate", None),
             plasmids=args.plasmids,
             plasmid_release=args.plasmid_release,
             plasmid_no_fetch=args.no_fetch,

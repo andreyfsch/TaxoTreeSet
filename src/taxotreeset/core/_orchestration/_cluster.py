@@ -214,3 +214,72 @@ def cluster_genomes_adaptive(
         if clusters_idx is not None:
             return [[tasks[i] for i in cluster] for cluster in clusters_idx]
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Dereplicacao
+# --------------------------------------------------------------------------- #
+# A clusterizacao acima resolve o SPLIT: ela mantem todos os genomas e espalha as
+# sub-linhagens por train/val/test. Isso nao ajuda contra redundancia de FONTE.
+#
+# Medido em 2026-08-22: o GenBank viral tem 268.312 genomas contra 15.091 do
+# RefSeq, mas Influenza A sozinha e 147.147 deles -- 54,8%. Um head treinado sobre
+# isso ve majoritariamente influenza, e redundancia de clade e o preditor de falha
+# mais forte ja medido neste projeto (r=0,692). A expansao util do GenBank, sem
+# Influenza A e SARS-CoV-2, e 7,2x e nao 17,8x -- mas so depois de deduplicar.
+#
+# Por que guloso e nao clusterizacao: `cluster_genomes` e O(n^2) e desiste acima de
+# 300 genomas. O guloso compara cada genoma so contra os REPRESENTANTES ja aceitos,
+# entao o custo e O(n * r) com r = quantos sobrevivem. Se a deduplicacao morde --
+# que e o caso que motiva isto -- r fica pequeno e 147k entradas sao viaveis.
+_DEREP_JACCARD = 0.95
+
+
+def dereplicate_units(
+    units: list[list[dict]],
+    *,
+    threshold: float = _DEREP_JACCARD,
+    k: int = _KMER_K,
+    sketch_size: int = _SKETCH_SIZE,
+) -> list[list[dict]]:
+    """Colapsa genomas quase identicos, guardando um representante de cada grupo.
+
+    A unidade e o GENOMA, nao a sequencia: ``units`` vem de ``_group_by_genome``,
+    entao um virus segmentado (influenza tem 8 segmentos) e sketchado inteiro e
+    mantido ou descartado inteiro. Sketchar por segmento faria os 8 segmentos
+    parecerem 8 genomas distintos e a deduplicacao nao morderia justamente onde
+    ela mais importa.
+
+    A ordem de entrada e preservada e o primeiro de cada grupo e o representante,
+    entao o resultado e deterministico para uma mesma ordem de entrada.
+
+    Args:
+        units: Genomas, cada um a lista de tasks daquele acesso.
+        threshold: Jaccard MinHash a partir do qual dois genomas sao replicas.
+            1.0 desliga na pratica (so identicos colapsam).
+        k: tamanho do k-mer.
+        sketch_size: tamanho do sketch bottom-k.
+
+    Returns:
+        Os genomas mantidos, na ordem de entrada.
+    """
+    if threshold >= 1.0 or len(units) < 2:
+        return units
+
+    mantidos: list[list[dict]] = []
+    sketches_mantidos: list[frozenset[int]] = []
+    for unit in units:
+        seq = "".join(
+            _read_single_sequence(t.get("fasta_path", ""), t.get("header_id", ""))
+            for t in unit
+        )
+        sk = _genome_sketch(seq, k, sketch_size)
+        if not sk:
+            mantidos.append(unit)          # sem sketch nao ha como julgar; mantem
+            continue
+        if any(_jaccard(sk, outro, sketch_size) >= threshold
+               for outro in sketches_mantidos):
+            continue
+        mantidos.append(unit)
+        sketches_mantidos.append(sk)
+    return mantidos
