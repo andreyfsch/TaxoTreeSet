@@ -450,13 +450,23 @@ def main():
     log.info("Train f1_macro=%.4f (on %d rows)",
              train_results.get("train_eval_f1_macro", float("nan")), _n_train_eval)
 
-    test_results = trainer.evaluate(ds_test, metric_key_prefix="test")
+    # ---- test: UMA passada, nao duas ----
+    # Ate 2026-08-22 havia um trainer.evaluate(ds_test) aqui e um
+    # trainer.predict(ds_test) logo abaixo: duas passadas completas sobre o teste,
+    # a primeira inteiramente descartada. `predict` devolve `.metrics` calculado
+    # pelo mesmo compute_metrics, alem das predicoes cruas -- entao ele sozinho da
+    # tudo o que as duas davam.
+    #
+    # Medido: eval_runtime ~370 s por passada no head 2732408, contra 916 s de custo
+    # fixo total fora do Trainer. Em 16.407 heads no HoreKa, e a maior peca do
+    # overhead que a memoria do projeto atribuia ao carregamento do backbone -- que
+    # custa 9,8 s na primeira vez e 0,7 s depois.
+    raw_preds = trainer.predict(ds_test, metric_key_prefix="test")
+    test_results = dict(raw_preds.metrics or {})
     log.info("Test f1_macro=%.4f  accuracy=%.4f",
              test_results.get("test_f1_macro", float("nan")),
              test_results.get("test_accuracy", float("nan")))
 
-    # ---- full classification report + confusion matrix on test set ----
-    raw_preds = trainer.predict(ds_test)
     logits_test = raw_preds.predictions
     if isinstance(logits_test, tuple):
         logits_test = logits_test[0]
