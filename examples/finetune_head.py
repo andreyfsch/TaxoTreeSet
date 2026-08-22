@@ -26,6 +26,7 @@ Outputs written to --output-dir:
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import math
@@ -40,7 +41,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import numpy as np
 import pandas as pd
 import torch
-from datasets import Dataset
+from datasets import Dataset, load_from_disk
 from peft import LoraConfig, TaskType, get_peft_model
 from sklearn.metrics import (
     accuracy_score,
@@ -99,6 +100,72 @@ def load_splits(data_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFram
             f"{name}.parquet missing expected columns"
         )
     return train, val, test
+
+
+def tokenized_split(
+    df: pd.DataFrame,
+    parquet_path: Path,
+    tokenizer,
+    max_length: int,
+    cache_dir: Path | None,
+) -> Dataset:
+    """Tokenize a split, reusing a cached copy when the inputs are unchanged.
+
+    POR QUE ISTO EXISTE. Medido em 2026-08-22 no head 2732408 (42.216 linhas de
+    treino), com uma chave que os DOIS caches erram para nao medir aquecimento:
+
+        sem cache, HF frio        12,6 s
+        com cache, 1a vez (MISS)  13,3 s
+        com cache, 2a vez (HIT)    1,3 s   -> 11,3 s por processo, no split maior
+
+    Uma leitura anterior de 79,9 s para o `.map` estava contaminada: era a primeira
+    tokenizacao do processo e incluia o aquecimento da biblioteca `datasets`. O
+    numero honesto e ~12 s no train e menos nos outros dois splits.
+
+    O ganho e por PROCESSO, e o que o torna relevante e a retomada: hoje um
+    --resume-from-checkpoint re-tokeniza tudo antes de continuar de onde parou, e
+    no HoreKa a re-submissao a cada 48 h de walltime torna isso rotina.
+
+    Nao substitui o cache interno do `datasets`, que ja acerta quando o fingerprint
+    do dataset em memoria se repete. O que este acrescenta e controle de ONDE o
+    cache vive -- decisivo num cluster, onde ele deve ficar no scratch local do no.
+
+    A chave cobre o que muda o resultado: o parquet de origem (caminho, tamanho e
+    mtime), a identidade do tokenizador e o comprimento maximo. Um erro de chave
+    so pode causar um MISS, que recomputa -- nunca um hit errado, porque tamanho e
+    mtime mudam junto com o conteudo.
+
+    Nota de escala: sao 3 arquivos por split, 9 por head. Em 16.407 heads isso da
+    ~148 mil arquivos, entao no cluster aponte ``--tokenized-cache`` para o scratch
+    local do no, nao para o sistema de arquivos paralelo.
+    """
+    ds = build_hf_dataset(df)
+    if cache_dir is None:
+        return ds.map(lambda b: tokenize_fn(b, tokenizer, max_length),
+                      batched=True, remove_columns=["seq"])
+
+    st = parquet_path.stat()
+    chave = hashlib.sha256(
+        f"{parquet_path.resolve()}|{st.st_size}|{st.st_mtime_ns}|"
+        f"{MODEL_ID}|{max_length}".encode()).hexdigest()[:32]
+    alvo = cache_dir / chave
+    if alvo.exists():
+        try:
+            cached = load_from_disk(str(alvo))
+            log.info("Tokenized cache HIT  %s (%d rows)", parquet_path.name, len(cached))
+            return cached
+        except Exception as exc:                     # cache corrompido nao pode matar o treino
+            log.warning("Tokenized cache unreadable at %s (%s); recomputing", alvo, exc)
+
+    log.info("Tokenized cache MISS %s; tokenizing", parquet_path.name)
+    tokenized = ds.map(lambda b: tokenize_fn(b, tokenizer, max_length),
+                       batched=True, remove_columns=["seq"])
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        tokenized.save_to_disk(str(alvo))
+    except Exception as exc:                         # disco cheio / somente leitura
+        log.warning("Could not write tokenized cache to %s (%s)", alvo, exc)
+    return tokenized
 
 
 def build_hf_dataset(df: pd.DataFrame) -> Dataset:
@@ -189,6 +256,19 @@ class EpochMetricsCallback(TrainerCallback):
         tmp.replace(self._progress_path)
 
 
+def _add_tokenized_cache(p) -> None:
+    p.add_argument("--tokenized-cache", type=Path,
+                   default=Path.home() / ".cache" / "taxotreeset" / "tokenized",
+                   help="Directory for cached tokenized splits. Tokenizing the train "
+                        "split costs ~12 s and is paid again by every process, "
+                        "including a --resume-from-checkpoint. On a cluster point "
+                        "this at node-local scratch, not the parallel filesystem: "
+                        "9 files per head, ~148k across the full tree.")
+    p.add_argument("--no-tokenized-cache", dest="tokenized_cache",
+                   action="store_const", const=None,
+                   help="Tokenize every time; write nothing.")
+
+
 def _add_class_weight(p) -> None:
     p.add_argument("--class-weight", default=None,
                    help="Correcao de priori DURANTE o treino: 'balanced' usa a "
@@ -237,6 +317,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=SEED,
                    help="Random seed; fixes the frozen pooler init so the adapter is reproducible")
     _add_class_weight(p)
+    _add_tokenized_cache(p)
     return p.parse_args()
 
 
@@ -266,9 +347,11 @@ def main():
     log.info("Loading tokenizer %s", MODEL_ID)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 
-    ds_train = build_hf_dataset(df_train).map(lambda b: tokenize_fn(b, tokenizer, args.max_length), batched=True, remove_columns=["seq"])
-    ds_val   = build_hf_dataset(df_val).map(lambda b: tokenize_fn(b, tokenizer, args.max_length), batched=True, remove_columns=["seq"])
-    ds_test  = build_hf_dataset(df_test).map(lambda b: tokenize_fn(b, tokenizer, args.max_length), batched=True, remove_columns=["seq"])
+    ds_train, ds_val, ds_test = (
+        tokenized_split(df, data_dir / f"{nome}.parquet", tokenizer,
+                        args.max_length, args.tokenized_cache)
+        for nome, df in (("train", df_train), ("val", df_val), ("test", df_test))
+    )
 
     # ---- model + LoRA ----
     log.info("Loading base model %s", MODEL_ID)
