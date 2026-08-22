@@ -4,13 +4,34 @@
 Each figure is a self-contained matplotlib schematic (no external data), so the
 docs stay reproducible:
 
-    python docs/make_figures.py
+    python docs/make_figures.py                 # all figures
+    python docs/make_figures.py --only pipeline # just one
+    python docs/make_figures.py --list          # what is available
 
 Figures are written to docs/figures/.
+
+WHY THE VERSION IS PINNED. Matplotlib renders text slightly differently between
+releases, so regenerating one figure under a different version silently rewrites
+every OTHER figure too — same picture, different bytes. That happened on
+2026-08-22: adding one figure left twelve unrelated PNGs modified, ~15% smaller,
+with no content change. Nobody would review that diff, and it would land in a
+public repo.
+
+Two guards, therefore: ``--only`` regenerates a single figure, and the version
+below must match the one that produced the committed PNGs. Use the ``taxotreeset-
+docs`` conda environment:
+
+    conda create -n taxotreeset-docs -c conda-forge python=3.12 matplotlib=3.10.1
+    conda run -n taxotreeset-docs python docs/make_figures.py --only <name>
 """
+import argparse
+import sys
 from pathlib import Path
 
 import matplotlib
+
+# A versao que gerou os PNGs commitados, lida do metadado "Software" deles.
+EXPECTED_MPL = "3.10.1"
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -1203,20 +1224,68 @@ def fig_dereplication() -> None:
     plt.close(fig)
 
 
-if __name__ == "__main__":
-    fig_taxotreeset()
-    fig_generate_detail()
-    fig_generate_visual()
-    fig_virtual_buckets()
-    fig_reject_bucket()
-    fig_binary_heads()
-    fig_capacity_bottomup()
-    fig_distribution_split()
-    fig_selective_download()
-    fig_tree_of_heads()
-    fig_cluster_aware_split()
-    fig_clade_holdout()
-    fig_dereplication()
+# Nome da figura (o do PNG) -> funcao que a desenha.
+FIGURES = {
+    "pipeline": fig_taxotreeset,
+    "generate_stages": fig_generate_detail,
+    "generate_balancing": fig_generate_visual,
+    "virtual_buckets": fig_virtual_buckets,
+    "reject_bucket": fig_reject_bucket,
+    "binary_heads": fig_binary_heads,
+    "capacity_bottomup": fig_capacity_bottomup,
+    "split_distribution": fig_distribution_split,
+    "selective_download": fig_selective_download,
+    "parameterization": fig_tree_of_heads,
+    "cluster_aware_split": fig_cluster_aware_split,
+    "clade_holdout": fig_clade_holdout,
+    "dereplication": fig_dereplication,
+}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--only", metavar="NAME",
+                    help="Regenerate a single figure (see --list). Without it, "
+                         "every figure is rewritten, which churns the ones you "
+                         "did not touch.")
+    ap.add_argument("--list", action="store_true",
+                    help="List the figure names and exit.")
+    ap.add_argument("--force", action="store_true",
+                    help="Render even when the matplotlib version differs from "
+                         f"the pinned {EXPECTED_MPL}. Expect byte-level churn in "
+                         "every figure produced.")
+    a = ap.parse_args()
+
+    if a.list:
+        for nome in sorted(FIGURES):
+            print(nome)
+        return 0
+
+    if matplotlib.__version__ != EXPECTED_MPL and not a.force:
+        print(f"matplotlib {matplotlib.__version__} != {EXPECTED_MPL}, which "
+              f"produced the committed figures.", file=sys.stderr)
+        print("Rendering now would rewrite every figure with no content change. "
+              "Use the pinned environment:", file=sys.stderr)
+        print("  conda run -n taxotreeset-docs python docs/make_figures.py "
+              f"{'--only ' + a.only if a.only else ''}".rstrip(), file=sys.stderr)
+        print("  (or pass --force if the version bump is intentional)",
+              file=sys.stderr)
+        return 1
+
+    if a.only:
+        if a.only not in FIGURES:
+            print(f"Unknown figure {a.only!r}. Try --list.", file=sys.stderr)
+            return 1
+        alvo = {a.only: FIGURES[a.only]}
+    else:
+        alvo = FIGURES
+
+    for nome, fn in alvo.items():
+        fn()
+        print(f"  {nome}.png")
     print(f"Figures written to {FIG}/")
-    for p in sorted(FIG.glob("*.png")):
-        print(f"  {p.name}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -814,5 +814,25 @@ pytest
 ```
 
 Coverage is available with `pytest --cov=taxotreeset`, and linting with
-`ruff check src tests`. The README figures are regenerated, from no external
-data, with `python docs/make_figures.py`.
+`ruff check src tests`.
+
+### Regenerating the figures
+
+Every figure in this README is a self-contained matplotlib schematic drawn by
+`docs/make_figures.py` — no external data, so the docs stay reproducible.
+
+Matplotlib renders text slightly differently between releases, so the version is
+**pinned to the one that produced the committed PNGs**. Without that pin,
+regenerating a single figure rewrites all thirteen: same picture, different bytes,
+and a diff nobody can review. The script refuses to run under a different version
+and tells you what to do.
+
+```
+conda create -n taxotreeset-docs -c conda-forge python=3.12 matplotlib=3.10.1
+conda run -n taxotreeset-docs python docs/make_figures.py --list
+conda run -n taxotreeset-docs python docs/make_figures.py --only dereplication
+```
+
+Use `--only <name>` when changing one figure; omitting it rewrites every figure.
+`--force` renders under a different matplotlib anyway — intended for a deliberate
+version bump, which regenerates all thirteen and updates `EXPECTED_MPL`.
