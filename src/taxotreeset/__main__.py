@@ -24,7 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="taxotreeset",
         description="TaxoTreeSet - balanced hierarchical genomic datasets "
-        "from NCBI RefSeq for cascaded fine-tuning.",
+        "from NCBI (RefSeq or GenBank) for cascaded fine-tuning.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     subparsers = parser.add_subparsers(

@@ -1,10 +1,11 @@
 # TaxoTreeSet
 
 TaxoTreeSet builds balanced, hierarchically structured training datasets from
-NCBI RefSeq for LoRA fine-tuning of genomic language models. It turns a raw
-catalog of genome sequences into a tree of per-node training shards — one
-dataset for each internal taxonomic node, classifying that node's direct
-children — each ready to train a LoRA adapter on top of a foundation model
+NCBI (RefSeq by default, or GenBank) for LoRA fine-tuning of genomic language
+models. It turns a raw catalog of genome sequences into a tree of per-node
+training shards — one dataset for each internal taxonomic node, classifying that
+node's direct children — each ready to train a LoRA adapter on top of a foundation
+model
 backbone such as [DNABERT-2](https://github.com/MAGICS-LAB/DNABERT_2).
 
 ## Overview
@@ -93,7 +94,7 @@ TaxID or clade for your own scope.
 ```
 export NCBI_API_KEY=your_key_here
 
-# 1. Scan NCBI and cache the clade's RefSeq genomes in the LMDB vault
+# 1. Scan NCBI and cache the clade's genomes in the LMDB vault (RefSeq by default)
 python3 -m taxotreeset discover --taxon-id 11118
 
 # 2. Build the balanced, per-head train/val/test datasets
@@ -343,6 +344,71 @@ It is applied by the auto-sync (with `--no-sync`, the existing lineages are used
 as-is); note the sync **overwrites** the registry's cached lineages, so a later run
 without `--all-ranks` reverts to canonical.
 
+### Reproducibility, resources and data shaping
+
+The flags above decide *what* is generated. These decide how the run behaves:
+
+**Reproducibility.** `--seed` (default 42) fixes the splits and the subsequence
+sampling, so a rerun with the same inputs yields the same datasets.
+
+**Parallelism.** `--workers` sets the CPU worker processes for the parallel leaf
+phase of the bottom-up capacity pass, defaulting to `cpu_count - 1`; pass `1` to
+disable. `--gpu-workers` adds GPU workers for large leaves in that pass (requires
+CuPy), one per CUDA device, auto-detected by default; pass `0` to disable.
+
+**Storage.** `--tmp-dir` relocates the download archives and extracted genomes away
+from the OS temp directory — worth setting to an external drive, since on WSL the
+default inflates the VHDX on the system drive. `--spill-dir` does the same for large
+capacity supernodes spilled to disk during the capacity pass, which is what keeps a
+wide clade (Insecta, say) from exhausting RAM. `--output-format` chooses `parquet`
+(default) or `csv`.
+
+**Data shaping.** `--min-subseq-len` (default 100 bp) is both the minimum window
+length and the sliding-window size used to measure each taxon's capacity — changing
+it invalidates cached capacities. `--min-abundance` (default 2) is the sequence
+count a taxon needs to avoid fallback redirection. `--mutation-rate` appends an
+augmented copy of each *train* window at the given per-base substitution rate,
+leaving val and test as real sequence; it targets heads whose clade has no close
+relative between splits, where the model memorises its train genomes instead of
+learning the clade. `0.0` (default) disables it. `--exclude-plasmids` drops plasmid
+sequences at ingestion, matched heuristically from the FASTA defline, so they never
+reach the vault: plasmids are horizontally transferred and carry little reliable
+host phylogenetic signal. It is off by default and has no effect on viruses.
+
+### Source database and dereplication
+
+By default TaxoTreeSet discovers genomes from **RefSeq**, NCBI's curated set —
+roughly one representative assembly per species. `--assembly-source` switches this
+to `GenBank` (or `all`), which carries the full strain-level diversity that RefSeq
+curates away. The flag applies both to the discovery query and to the cross-domain
+negative sampling, so positives and negatives always come from the same source.
+
+**Outside RefSeq, dereplication is not optional.** GenBank's viral division holds
+268,312 assemblies against RefSeq's 15,091 — but a single species, *Influenza A
+virus*, accounts for **147,147 of them (54.8%)**, and SARS-CoV-2 for another 4.6%.
+Discounting those two, the usable expansion is **7.2x**, not 17.8x. Generating from
+GenBank without dereplicating produces a training set that is mostly influenza,
+which is the failure mode the balancing is meant to prevent, reintroduced at the
+level of the whole tree.
+
+`--dereplicate JACCARD` collapses near-identical genomes before the split, keeping
+one representative per group. Each genome is sketched with a bottom-k MinHash over
+its 21-mers (no external tool), and a genome is dropped when its MinHash Jaccard to
+an already-kept representative reaches the threshold. `0.95` is a reasonable
+starting point.
+
+Two properties are worth knowing:
+
+- **The unit is the genome, not the sequence.** A segmented or multi-contig genome
+  is sketched as a whole and kept or dropped as a whole, so influenza's eight
+  segments never look like eight separate genomes.
+- **It runs before the genome count** that chooses between the genome-level split
+  and window-slicing, so that decision sees distinct genomes rather than replicas.
+
+The pass is greedy: each genome is compared only against the representatives kept
+so far, not pairwise against everything. Omit the flag and nothing is dropped,
+which is the right behaviour for RefSeq.
+
 ### Clade-holdout open-set benchmark (optional)
 
 ![Clade-holdout benchmark: a whole clade B is withheld from training and its genomes become labeled novel reads; a classifier is scored on whether it backs off to the deepest retained ancestor rho-star instead of over-committing to a retained sibling](docs/figures/clade_holdout.png)
@@ -476,11 +542,15 @@ Key options:
 | `--no-cluster-aware-split` | (on)        | Cluster-aware splitting is **on by default**: MinHash cluster-stratification (adaptive threshold) spreads sub-lineages, a diverse clade with none is window-sliced, and few-genome classes are block-stratified — keeping train/val/test representative; self-verifying. This flag opts out; tune with `--cluster-jaccard-threshold` / `--cluster-min-genomes` / `--cluster-min-frac` |
 | `--all-ranks`            | off           | Resolve lineages at full NCBI granularity (sub-ranks/clades), not just the 8 canonical ranks |
 | `--binary-only`          | off           | One belongs/not-belongs head per node instead of multi-class heads (with `--binary-budget`, `--extract-batch-size`) |
-| `--holdout-clades` / `--holdout-rank` | off | Open-set benchmark: withhold whole clades from training and write `benchmark_manifest_<scope>.json` (explicit TaxIDs, or a `--holdout-fraction` sample at a rank; `--holdout-seed`). Pair with `--no-sync`. See [clade-holdout benchmark](#clade-holdout-open-set-benchmark-optional) |
+| `--holdout-clades` / `--holdout-rank` | off | Open-set benchmark: withhold whole clades from training and write `benchmark_manifest_<scope>.json` (explicit TaxIDs, or a `--holdout-fraction` sample at a rank; `--holdout-seed`; `--holdout-manifest` overrides where it is written). Pair with `--no-sync`. See [clade-holdout benchmark](#clade-holdout-open-set-benchmark-optional) |
+| `--assembly-source`      | `RefSeq`      | Discover from `GenBank` (full strain-level diversity) or `all` instead of curated RefSeq. Applies to the cross-domain negatives too. **Pair with `--dereplicate`** — see [source database and dereplication](#source-database-and-dereplication) |
+| `--dereplicate`          | off           | Collapse near-identical genomes before the split (MinHash 21-mer Jaccard; `0.95` is a reasonable start), keeping one representative per group. Not needed for RefSeq; required for GenBank, whose viral division is 54.8% *Influenza A* |
 
 Behind these options, the per-head mechanics are illustrated in
 [How it works](#how-it-works): `--root` / `--stop-at` / `--single-level` /
 `--all-ranks` shape generation ([Parameterizing generation](#parameterizing-generation));
+`--assembly-source` and `--dereplicate` choose the source database and collapse its
+redundancy ([Source database and dereplication](#source-database-and-dereplication));
 `--binary-only` switches every node to a
 [binary belongs/not-belongs head](#binary-heads-optional);
 `--approximate-capacity` toggles how
@@ -514,6 +584,30 @@ python3 -m taxotreeset separability data/datasets --csv separability.csv
 | `--k`         | 4       | k-mer length; the feature space is `4**k`             |
 | `--max-train` | 4000    | Class-balanced cap on training rows per head          |
 | `--max-test`  | 3000    | Cap on test rows per head                             |
+| `--csv`       | —       | Also write an aggregate CSV across all heads          |
+| `--no-write`  | off     | Report only; do not modify the `label_map.json` files |
+
+### Optional: compositional-confound audit
+
+`taxotreeset composition` is the other post-generation diagnostic, and it needs no
+extra (numpy only). For every head it reports per-class sequence length and
+nucleotide composition, and flags [virtual classes](#virtual-buckets) whose GC
+content is an outlier relative to the canonical ones. Results are written into each
+`label_map.json` under `composition_audit`, and optionally to an aggregate CSV.
+
+The question it answers is whether a head could score well for the wrong reason. A
+virtual bucket that happens to be GC-shifted relative to its siblings is separable
+by base composition alone, so a strong `kmer_separability` there is a confound
+rather than a signal — this audit is what tells the two apart.
+
+```
+python3 -m taxotreeset composition data/datasets --csv composition.csv
+```
+
+| Option        | Default | Purpose                                               |
+|---------------|---------|-------------------------------------------------------|
+| `dataset_dir` | —       | Root of a generated dataset tree (positional)         |
+| `--split`     | `train` | Which split to read per head                          |
 | `--csv`       | —       | Also write an aggregate CSV across all heads          |
 | `--no-write`  | off     | Report only; do not modify the `label_map.json` files |
 
