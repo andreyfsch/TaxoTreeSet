@@ -210,6 +210,7 @@ class GenerationOrchestrator:
         binary_budget: int = 30000,
         binary_extract_batch_size: int = 300,
         all_ranks: bool = False,
+        assembly_source: str = "RefSeq",
         plasmids: bool = False,
         plasmid_release: str | None = None,
         plasmid_no_fetch: bool = False,
@@ -344,6 +345,7 @@ class GenerationOrchestrator:
         self.binary_budget: int = binary_budget
         self.binary_extract_batch_size: int = binary_extract_batch_size
         self.all_ranks: bool = all_ranks
+        self.assembly_source: str = assembly_source
         self.plasmids: bool = plasmids
         self.plasmid_release: str | None = plasmid_release
         self.plasmid_no_fetch: bool = plasmid_no_fetch

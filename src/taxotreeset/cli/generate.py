@@ -430,6 +430,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "it for more parallelism headroom. Default 300.",
     )
     parser.add_argument(
+        "--assembly-source",
+        choices=["RefSeq", "GenBank", "all"],
+        default="RefSeq",
+        help="Fonte de montagem do NCBI: RefSeq (padrao, curado, ~1 representante por especie), GenBank (diversidade de linhagem completa) ou all. ATENCAO: fora do RefSeq a deduplicacao nao e opcional -- o GenBank viral tem 268.312 genomas contra 15.091 do RefSeq, mas Influenza A sozinha e 147.147 deles (54,8%%). A expansao util, sem Influenza A e SARS-CoV-2, e 7,2x.",
+    )
+    parser.add_argument(
         "--all-ranks",
         action="store_true",
         help="Resolve lineages at FULL NCBI granularity (subgenus, subfamily, "
@@ -588,6 +594,7 @@ def run(args: argparse.Namespace) -> None:
             binary_budget=args.binary_budget,
             binary_extract_batch_size=args.extract_batch_size,
             all_ranks=args.all_ranks,
+            assembly_source=getattr(args, "assembly_source", "RefSeq"),
             plasmids=args.plasmids,
             plasmid_release=args.plasmid_release,
             plasmid_no_fetch=args.no_fetch,

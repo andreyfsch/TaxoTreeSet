@@ -112,6 +112,7 @@ class DiscoveryOrchestrator:
         registry: Any,
         mapping_config: dict[str, Any],
         all_ranks: bool = False,
+        assembly_source: str = "RefSeq",
     ) -> None:
         """Initialize the orchestrator with a registry and mapping config.
 
@@ -126,10 +127,24 @@ class DiscoveryOrchestrator:
                 ``ranked_lineage``. The extra intermediate taxa become heads
                 wherever they branch (single-child sub-ranks are still
                 collapsed by passthroughs).
+            assembly_source: Fonte de montagem passada ao ``datasets``:
+                ``"RefSeq"`` (padrao), ``"GenBank"`` ou ``"all"``. RefSeq e
+                curado e traz ~1 representante por especie; GenBank traz a
+                diversidade de linhagem inteira.
+
+                DEDUPLICACAO NAO E OPCIONAL FORA DO REFSEQ. Medido em
+                2026-08-22: o GenBank viral tem 268.312 genomas contra 15.091
+                do RefSeq, mas **Influenza A sozinha e 147.147 deles, 54,8%**.
+                Sem deduplicar, o conjunto de treino fica majoritariamente
+                influenza -- que e o preditor de falha mais forte ja medido
+                neste projeto (redundancia de clade, r=0,692) aplicado ao
+                conjunto inteiro. A expansao util, tirando Influenza A e
+                SARS-CoV-2, e 7,2x e nao 17,8x.
         """
         self.registry: Any = registry
         self.mapping: dict[str, Any] = mapping_config
         self.all_ranks: bool = all_ranks
+        self.assembly_source: str = assembly_source
         self.tree_root: Node = Node("root")
         # taxid -> its NCBI taxonomy json-line ("" = looked up, none found), shared
         # by the lineage + self-node fallbacks and warmed by prefetch_ncbi_taxonomy.
@@ -309,7 +324,8 @@ class DiscoveryOrchestrator:
             return []
         command = [
             "datasets", "summary", "genome", "taxon", str(taxid),
-            "--assembly-source", "RefSeq", "--reference", "--as-json-lines",
+            "--assembly-source", self.assembly_source, "--reference",
+            "--as-json-lines",
         ]
         logger.info(
             "Sampling up to %d reference genome(s) under TaxID %s (cross-domain "
@@ -375,7 +391,8 @@ class DiscoveryOrchestrator:
             assembly report dictionaries. Empty dict on subprocess
             failure.
         """
-        command = self._build_summary_command(root_id_str, assembly_levels)
+        command = self._build_summary_command(
+            root_id_str, assembly_levels, self.assembly_source)
         logger.info(f"Spawning NCBI Datasets CLI subprocess for TaxID: {root_id_str}")
 
         env = os.environ.copy()
@@ -418,12 +435,14 @@ class DiscoveryOrchestrator:
     def _build_summary_command(
         root_id_str: str,
         assembly_levels: str,
+        assembly_source: str = "RefSeq",
     ) -> list[str]:
         """Construct the NCBI Datasets CLI command argument list.
 
         Args:
             root_id_str: Root TaxID as string.
             assembly_levels: Comma-separated assembly levels.
+            assembly_source: "RefSeq" (padrao), "GenBank" ou "all".
 
         Returns:
             Command argument list suitable for subprocess.Popen.
@@ -435,7 +454,7 @@ class DiscoveryOrchestrator:
             "taxon",
             root_id_str,
             "--assembly-source",
-            "RefSeq",
+            assembly_source,
             "--assembly-level",
             assembly_levels,
             "--as-json-lines",

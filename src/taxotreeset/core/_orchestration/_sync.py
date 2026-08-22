@@ -76,6 +76,7 @@ class _SyncManager:
             registry=self.ctx.registry,
             mapping_config=mapping_config,
             all_ranks=self.ctx.all_ranks,
+            assembly_source=getattr(self.ctx, "assembly_source", "RefSeq"),
         )
         if scope_taxids is None:
             # "all": re-discover every domain already present in the registry,
@@ -140,6 +141,7 @@ class _SyncManager:
             registry=self.ctx.registry,
             mapping_config=mapping_config,
             all_ranks=self.ctx.all_ranks,
+            assembly_source=getattr(self.ctx, "assembly_source", "RefSeq"),
         )
         discovery.discover_from_reports(
             reports, root_id_str=PLASMID_SCOPE_KEY, vault_lmdb_path=lmdb_path)
@@ -457,6 +459,7 @@ class _SyncManager:
             children_list,
             min_subclades_per_bucket=self.ctx.min_subclades_per_bucket,
             all_ranks=self.ctx.all_ranks,
+            assembly_source=getattr(self.ctx, "assembly_source", "RefSeq"),
         )
         if not effective_children:
             return
