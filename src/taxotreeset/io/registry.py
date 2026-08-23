@@ -63,6 +63,7 @@ class NCBIRegistry:
                     "organism": "<organism_name>",
                     "is_reference": <bool>,
                     "total_sequence_length": <int or None>,
+                    "release_date": "<YYYY-MM-DD or None>",
                     "downloaded": <bool>,
                     "local_path": "<path_to_lmdb or None>"
                 }
@@ -385,6 +386,19 @@ class NCBIRegistry:
             "organism": organism_name,
             "is_reference": is_reference,
             "total_sequence_length": total_sequence_length,
+            # Data de deposito da montagem no NCBI, para o CORTE TEMPORAL.
+            #
+            # POR QUE ISTO PRECISA SER CAPTURADO NA DESCOBERTA. Quando a versao de
+            # producao treinar com tudo o que existe, nao sobra conjunto retido --
+            # e a pergunta "como validar" fica sem resposta por construcao. O corte
+            # temporal resolve: treinar com o que foi depositado ate a data T e
+            # avaliar no que veio depois. Isso simula exatamente a condicao de
+            # implantacao (organismos novos aparecendo) e nao pode ser burlado,
+            # porque a data e do NCBI e nao nossa.
+            #
+            # Sem gravar aqui, reconstruir depois exige re-consultar o NCBI para
+            # cada montagem da arvore.
+            "release_date": assembly_info.get("release_date"),
             "downloaded": False,
             "download_deferred": False,
             "local_path": None,
