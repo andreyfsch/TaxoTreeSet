@@ -297,6 +297,19 @@ class EpochMetricsCallback(TrainerCallback):
         tmp.replace(self._progress_path)
 
 
+def _add_test_eval_max(p) -> None:
+    p.add_argument("--test-eval-max", type=int, default=None,
+                   help="Avalia o teste numa amostra de N linhas em vez do split "
+                        "inteiro. Ausente (padrao): teste completo. Medido em "
+                        "2026-08-24 no head 2732506 (9.787 linhas de teste): "
+                        "completo 408 s / f1 0,7160; amostra de 2.000 83 s / "
+                        "0,7236 -- 80%% do tempo por 0,0076 de f1. Os limiares que "
+                        "classificam heads em audit_learning.py usam margens de "
+                        "0,08 e 0,12 sobre test_f1, dez vezes esse erro, entao a "
+                        "certificacao nao muda. Recomendado no cluster, onde a "
+                        "passada de teste e ~81%% do custo fixo por head.")
+
+
 def _add_tokenized_cache(p) -> None:
     p.add_argument("--tokenized-cache", type=Path,
                    default=Path.home() / ".cache" / "taxotreeset" / "tokenized",
@@ -359,6 +372,7 @@ def parse_args() -> argparse.Namespace:
                    help="Random seed; fixes the frozen pooler init so the adapter is reproducible")
     _add_class_weight(p)
     _add_tokenized_cache(p)
+    _add_test_eval_max(p)
     return p.parse_args()
 
 
@@ -595,7 +609,14 @@ def main():
     # fixo total fora do Trainer. Em 16.407 heads no HoreKa, e a maior peca do
     # overhead que a memoria do projeto atribuia ao carregamento do backbone -- que
     # custa 9,8 s na primeira vez e 0,7 s depois.
-    raw_preds = trainer.predict(ds_test, metric_key_prefix="test")
+    ds_test_eval = ds_test
+    if args.test_eval_max and args.test_eval_max < len(ds_test):
+        _idx = np.random.default_rng(args.seed).choice(
+            len(ds_test), args.test_eval_max, replace=False).tolist()
+        ds_test_eval = ds_test.select(_idx)
+        log.info("Teste avaliado numa amostra de %d de %d linhas (--test-eval-max)",
+                 len(ds_test_eval), len(ds_test))
+    raw_preds = trainer.predict(ds_test_eval, metric_key_prefix="test")
     test_results = dict(raw_preds.metrics or {})
     log.info("Test f1_macro=%.4f  accuracy=%.4f",
              test_results.get("test_f1_macro", float("nan")),
