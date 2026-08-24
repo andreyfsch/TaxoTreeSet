@@ -1097,7 +1097,6 @@ def fig_clade_holdout() -> None:
     ax.text(75, 89, "2.  Score a novel read from B",
             ha="center", fontsize=9, weight="bold", color=PINK)
     _box(ax, 63, 76, 24, 8, "novel read (from B)", ec=PINK, fontsize=7.4)
-    _arrow(ax, (75, 76), (75, 68), color="#bbbbbb", lw=1.4)
     # correct: back off to rho*
     _box(ax, 55, 55, 40, 9,
          "✓  commit at ρ* = F   (correct back-off)", ec=GREEN,
@@ -1108,7 +1107,11 @@ def fig_clade_holdout() -> None:
     # too shallow
     _box(ax, 55, 25, 40, 9,
          "✗  abstain above F   (too shallow)", ec=GREY, fontsize=7.8)
-    _arrow(ax, (75, 68), (75, 64.3), color="#2e7d32", lw=1.4)
+    # ONE arrow from the read to the outcome that counts as correct. This used to
+    # be two stacked arrows on the same axis -- grey 76->68 then green 68->64.3 --
+    # so the figure showed a grey arrowhead ending in mid-air with a second, green
+    # arrow starting just below it, which reads as a rendering fault.
+    _arrow(ax, (75, 76), (75, 64.3), color="#2e7d32", lw=1.4)
     ax.text(75, 17, "reported per rank × per ANI-distance bin, vs a "
             "retained-only\nk-mer baseline (Kraken2 / Centrifuge)",
             ha="center", fontsize=6.6, style="italic", color="#555555")
