@@ -7,6 +7,7 @@ import pytest
 from taxotreeset.benchmark.scorer import (
     classify_outcome,
     hierarchical_prf,
+    load_ncbi_parents,
     report_csv_rows,
     score_reads,
 )
@@ -110,30 +111,30 @@ class TestHierarchicalPRF:
                  "true_lineage": [["c", "species"], ["b", "genus"], ["a", "family"]]}]
 
     def test_exact_commit_is_perfect(self):
-        out = hierarchical_prf(self._rows(), {"r1": ("c", "species")})
+        out = hierarchical_prf(self._rows(), {"r1": ("c", "species")}, strict=False)
         assert out["precision"] == 1.0
         assert out["recall"] == 1.0
         assert out["f_beta"] == 1.0
 
     def test_correct_ancestor_earns_partial_credit(self):
         # committing at b names {a, b}: all correct, but misses c
-        out = hierarchical_prf(self._rows(), {"r1": ("b", "genus")})
+        out = hierarchical_prf(self._rows(), {"r1": ("b", "genus")}, strict=False)
         assert out["precision"] == 1.0
         assert out["recall"] == pytest.approx(2 / 3)
         # beta=0.5 favours the precise-but-shallow call over a deep wrong one
         assert out["f_beta"] > 0.85
 
     def test_abstention_costs_recall_only(self):
-        out = hierarchical_prf(self._rows(), {})
+        out = hierarchical_prf(self._rows(), {}, strict=False)
         assert out["precision"] == 0.0
         assert out["recall"] == 0.0
         assert out["f_beta"] == 0.0
 
     def test_beta_weights_precision_four_times(self):
         rows = self._rows()
-        shallow = hierarchical_prf(rows, {"r1": ("a", "family")}, beta=0.5)
+        shallow = hierarchical_prf(rows, {"r1": ("a", "family")}, beta=0.5, strict=False)
         # same read scored with beta=2 (recall-weighted) must rank it lower
-        recall_weighted = hierarchical_prf(rows, {"r1": ("a", "family")}, beta=2.0)
+        recall_weighted = hierarchical_prf(rows, {"r1": ("a", "family")}, beta=2.0, strict=False)
         assert shallow["f_beta"] > recall_weighted["f_beta"]
 
     def test_empty_truth_raises_rather_than_scoring_zero(self):
@@ -142,10 +143,52 @@ class TestHierarchicalPRF:
         # nothing, penalising exactly the tools that answer everywhere
         with pytest.raises(ValueError, match="empty true_lineage"):
             hierarchical_prf([{"read_id": "r1", "true_lineage": []}],
-                             {"r1": ("c", "species")})
+                             {"r1": ("c", "species")}, strict=False)
 
     def test_accepts_json_encoded_lineages(self):
         rows = [{"read_id": "r1",
                  "true_lineage": json.dumps([["c", "species"], ["b", "genus"]])}]
-        out = hierarchical_prf(rows, {"r1": ("c", "species")})
+        out = hierarchical_prf(rows, {"r1": ("c", "species")}, strict=False)
         assert out["recall"] == 1.0
+
+
+class TestAncestorCreditOffPath:
+    """Regressao de 2026-09-07: credito por ancestral so era dado a predicao que
+    ja estava no caminho verdadeiro.
+
+    O mapa `parent` vinha so das linhagens das eval_rows, entao um taxid predito
+    que nao aparecesse em nenhuma delas virava singleton e nao intersectava nada.
+    Efeito medido no piloto a 150 bp, faixa >=0,10 (774 reads): Kraken2 0,257 ->
+    0,627 e Kaiju 0,581 -> 0,729 so de reconstruir a cadeia; a cascata, que comita
+    em nos do proprio caminho, ficou em 0,737 -> 0,739. O vies era todo a favor da
+    cascata, e ele sustentava a afirmacao central da apresentacao do piloto.
+    """
+
+    ROWS = [{"read_id": "r1",
+             "true_lineage": [["sp_certa", "species"], ["fam", "family"],
+                              ["sk", "superkingdom"]]}]
+    # a especie irma nao aparece em linhagem nenhuma do eval, mas e da familia certa
+    TAX = {"sp_irma": "fam", "sp_certa": "fam", "fam": "sk", "sk": "1"}
+
+    def test_irma_na_familia_certa_ganha_credito(self):
+        out = hierarchical_prf(self.ROWS, {"r1": ("sp_irma", "species")},
+                               taxonomy_parents=self.TAX)
+        assert out["f_beta"] > 0.0, "acertar a familia tem de valer credito parcial"
+        assert out["off_path_singletons"] == 0
+
+    def test_sem_taxonomia_o_credito_sumia(self):
+        antes = hierarchical_prf(self.ROWS, {"r1": ("sp_irma", "species")},
+                                 strict=False)
+        assert antes["f_beta"] == 0.0          # o defeito, preservado como memoria
+        assert antes["off_path_singletons"] == 1
+
+    def test_strict_recusa_pontuar_sem_taxonomia(self):
+        with pytest.raises(ValueError, match="taxonomy_parents"):
+            hierarchical_prf(self.ROWS, {"r1": ("sp_irma", "species")})
+
+    def test_load_ncbi_parents(self, tmp_path):
+        dmp = tmp_path / "nodes.dmp"
+        dmp.write_text("10474\t|\t2732406\t|\tfamily\t|\n"
+                       "2732406\t|\t10239\t|\tphylum\t|\n")
+        pais = load_ncbi_parents(dmp)
+        assert pais == {"10474": "2732406", "2732406": "10239"}

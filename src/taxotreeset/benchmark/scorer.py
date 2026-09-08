@@ -142,10 +142,29 @@ def report_csv_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def load_ncbi_parents(nodes_dmp: "str | Path") -> dict[str, str]:
+    """Read ``taxid -> parent_taxid`` from an NCBI ``nodes.dmp``.
+
+    Supplies :func:`hierarchical_prf` with a COMPLETE ancestor source. Without it
+    the parent map can only be inferred from the eval set's own lineages, which
+    silently destroys hierarchical credit for any prediction that lands off the
+    true path -- see that function's "WHY THE TAXONOMY IS REQUIRED".
+    """
+    parents: dict[str, str] = {}
+    with open(nodes_dmp, encoding="utf-8", errors="ignore") as fh:
+        for line in fh:
+            fields = [x.strip() for x in line.split("|")]
+            if len(fields) >= 2 and fields[0]:
+                parents[fields[0]] = fields[1]
+    return parents
+
+
 def hierarchical_prf(
     eval_rows: list[dict],
     predictions: dict[str, tuple[str | None, str | None]],
     beta: float = 0.5,
+    taxonomy_parents: dict[str, str] | None = None,
+    strict: bool = True,
 ) -> dict[str, float]:
     """Micro-averaged hierarchical precision/recall/F_beta over lineage sets.
 
@@ -176,25 +195,52 @@ def hierarchical_prf(
     empty truth cannot be scored, and treating it as zero is what produced the
     error above.
 
+    WHY THE TAXONOMY IS REQUIRED. The parent map used to be inferred only from the
+    lineages present in ``eval_rows``. A predicted taxon that is NOT on some eval
+    read's true lineage therefore had no reconstructable ancestors, and
+    ``ancestors()`` returned it as a singleton -- so a tool that answered with the
+    right family but the wrong species scored zero instead of partial credit. The
+    bug is invisible in aggregate and strongly directional: the cascade commits at
+    nodes of the true path (which the eval lineages do contain) and kept its
+    credit, while exact-match baselines that miss the species collapsed to
+    singletons. Measured on the 1,200-read sample at 150 bp, divergence band
+    >=0.10: fixing ONLY the prediction side moves Kraken2 from 0.257 to 0.611 and
+    Kaiju from 0.581 to 0.716, and leaves PhyloCascadeGLM at 0.675 -- i.e. it
+    erased a lead that did not exist. Pass ``taxonomy_parents``
+    (:func:`load_ncbi_parents`); ``strict`` refuses to score without it.
+
     Args:
         eval_rows: Eval rows carrying ``read_id`` and ``true_lineage``.
         predictions: ``read_id -> (taxid, rank)``. Absent reads count as
             abstentions and contribute to the true side only.
         beta: F-measure beta. 0.5 (default) weights precision 4x recall.
+        taxonomy_parents: complete ``taxid -> parent`` map. Required for correct
+            hierarchical credit on off-path predictions.
+        strict: raise when ``taxonomy_parents`` is absent. Set False only to
+            reproduce a historical (biased) number, never to report a new one.
 
     Returns:
-        ``{"precision", "recall", "f_beta", "beta", "n_reads"}``.
+        ``{"precision", "recall", "f_beta", "beta", "n_reads", "off_path_singletons"}``.
+        ``off_path_singletons`` counts predictions whose ancestors could not be
+        reconstructed -- it must be 0 for the score to mean what the name says.
 
     Raises:
-        ValueError: if any row's true lineage is empty.
+        ValueError: if any row's true lineage is empty, or if ``strict`` and no
+            taxonomy was supplied.
     """
+    if taxonomy_parents is None and strict:
+        raise ValueError(
+            "hierarchical_prf needs taxonomy_parents (see load_ncbi_parents); "
+            "without it off-path predictions collapse to singletons and the "
+            "score is biased toward tools that commit on the true path"
+        )
     def _lineage(row: dict) -> list[str]:
         lin = row["true_lineage"]
         if isinstance(lin, str):
             lin = json.loads(lin)
         return [str(t) for t, _rank in lin]
 
-    parent: dict[str, str] = {}
+    parent: dict[str, str] = dict(taxonomy_parents or {})
     for row in eval_rows:
         chain = _lineage(row)[::-1]          # stored leaf-first; walk root-first
         for above, below in zip(chain, chain[1:]):
@@ -208,7 +254,7 @@ def hierarchical_prf(
             taxid = parent.get(taxid)
         return out
 
-    inter = pred_total = true_total = 0
+    inter = pred_total = true_total = singletons = 0
     for row in eval_rows:
         truth = set(_lineage(row))
         if not truth:
@@ -219,6 +265,8 @@ def hierarchical_prf(
             )
         got = predictions.get(row["read_id"])
         pred = ancestors(str(got[0])) if got and got[0] else set()
+        if len(pred) == 1 and str(got[0]) not in parent:
+            singletons += 1          # sem ancestral reconstruivel: credito perdido
         inter += len(pred & truth)
         pred_total += len(pred)
         true_total += len(truth)
@@ -229,4 +277,5 @@ def hierarchical_prf(
     f = ((1 + b2) * precision * recall / (b2 * precision + recall)
          if (precision + recall) else 0.0)
     return {"precision": precision, "recall": recall, "f_beta": f,
-            "beta": beta, "n_reads": len(eval_rows)}
+            "beta": beta, "n_reads": len(eval_rows),
+            "off_path_singletons": singletons}
