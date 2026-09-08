@@ -240,11 +240,27 @@ def hierarchical_prf(
             lin = json.loads(lin)
         return [str(t) for t, _rank in lin]
 
-    parent: dict[str, str] = dict(taxonomy_parents or {})
+    # Os elos vindos das eval_rows ficam num dict PEQUENO e a taxonomia completa
+    # entra como fallback. Copiar a taxonomia (2,9 M entradas) a cada chamada
+    # dominava o custo -- um bootstrap de 21.600 chamadas nao terminava. O
+    # resultado e identico: as eval_rows tem precedencia nos dois casos.
+    locais: dict[str, str] = {}
     for row in eval_rows:
         chain = _lineage(row)[::-1]          # stored leaf-first; walk root-first
         for above, below in zip(chain, chain[1:]):
-            parent[below] = above
+            locais[below] = above
+    _completa = taxonomy_parents or {}
+
+    class _Pais:
+        """Vista somente-leitura: eval_rows na frente, taxonomia completa atras."""
+        __slots__ = ()
+        def get(self, k, default=None):
+            v = locais.get(k)
+            return v if v is not None else _completa.get(k, default)
+        def __contains__(self, k):
+            return k in locais or k in _completa
+
+    parent = _Pais()
 
     def ancestors(taxid: str) -> set[str]:
         out, seen = set(), set()
