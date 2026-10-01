@@ -452,9 +452,9 @@ class _BottomUpCapacityComputer:
         """Resolve a node's key set by bottom-up union of its children.
 
         Leaf nodes load their accumulator from storage; internal nodes fold
-        their children one at a time (bounding peak memory to one child's keys
-        alongside the running accumulator), record their capacity, and return
-        the merged accumulator.
+        their children into a running accumulator (batching in-memory children
+        so each batch costs one sort, see below), record their capacity, and
+        return the merged accumulator.
         """
         import psutil
 
@@ -464,15 +464,40 @@ class _BottomUpCapacityComputer:
         if not node.children:
             return self._empty_acc()
 
-        # Progressive accumulation: process one child at a time so that
-        # at most one child's key array is live simultaneously alongside
-        # the running accumulator. This bounds peak memory to
-        # O(disk_threshold) regardless of how many children a node has,
-        # instead of O(n_children × disk_threshold) with a batch merge.
+        # Batched accumulation. Folding in-memory children one at a time
+        # re-sorts the WHOLE running set per child (np.unique over the
+        # concatenation), which is O(n_children × |running|): with 246 GiB free
+        # the RAM-derived disk_threshold keeps a 671-child node such as
+        # Caudoviricetes in memory, and every child -- however small -- paid a
+        # full re-sort of ~10^8 keys (~50-65 s), ~9 h for that node alone. The
+        # disk path is already linear per child (_inplace_extend appends).
+        #
+        # So in-memory children wait in ``pending`` and are unioned with the
+        # running set in ONE np.unique. Peak memory keeps the old bound: a
+        # child is only queued while running + pending + child stays under
+        # disk_threshold -- the same test _merge_pair applies to a pair -- and
+        # otherwise the queue is folded first and the child goes through
+        # _merge_pair, so the memory -> disk switch happens at exactly the same
+        # child as before. Set union is order-independent, so every capacity
+        # is identical; only the number of sorts changes.
         running = self._merge_subtree(node.children[0])
+        pending: list = []
+        pending_keys = 0
         for child_node in node.children[1:]:
             child_set = self._merge_subtree(child_node)
-            running = self._merge_pair(running, child_set)
+            if (
+                running._on_disk
+                or child_set._on_disk
+                or self._n_mem_keys(running) + pending_keys
+                + self._n_mem_keys(child_set) >= self.disk_threshold
+            ):
+                running = self._fold_pending(running, pending)
+                pending, pending_keys = [], 0
+                running = self._merge_pair(running, child_set)
+            else:
+                pending.append(child_set)
+                pending_keys += self._n_mem_keys(child_set)
+        running = self._fold_pending(running, pending)
 
         cap = running.cardinality()
         self.capacities[str(node.name)] = cap
@@ -504,6 +529,46 @@ class _BottomUpCapacityComputer:
             # The file is shared; deletion happens in bulk after Phase 2.
             return _NodeCapacityKeys(raw, amb, self.key_bytes)
         return self._empty_acc()
+
+    @staticmethod
+    def _n_mem_keys(acc: "_NodeCapacityKeys") -> int:
+        """Return the number of in-memory pure keys held by ``acc``."""
+        return acc._pure_keys.shape[0] if acc._pure_keys is not None else 0
+
+    def _fold_pending(
+        self,
+        running: "_NodeCapacityKeys",
+        pending: list,
+    ) -> "_NodeCapacityKeys":
+        """Union ``running`` with every queued in-memory child in ONE np.unique.
+
+        Only reached with an in-memory ``running`` when ``pending`` is non-empty
+        (children are queued only while running is in memory), and the caller
+        guarantees the total stays under ``disk_threshold``. Releases all inputs.
+        """
+        import numpy as np
+
+        if not pending:
+            return running
+        assert not running._on_disk, "pending children require an in-memory running set"
+        arrays = [
+            a for a in [running._pure_keys, *(c._pure_keys for c in pending)]
+            if a is not None and a.shape[0]
+        ]
+        pure_keys = (
+            np.unique(np.concatenate(arrays))
+            if arrays
+            else np.empty((0,), dtype=self.void_dtype)
+        )
+        merged = _NodeCapacityKeys(
+            pure_keys,
+            running._ambiguous_count + sum(c._ambiguous_count for c in pending),
+            self.key_bytes,
+        )
+        running.release()
+        for child_set in pending:
+            child_set.release()
+        return merged
 
     def _merge_pair(
         self,

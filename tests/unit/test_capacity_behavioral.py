@@ -262,3 +262,102 @@ def test_compute_all_capacities_parallel_matches_serial_and_truth(tmp_path):
 
     assert parallel == serial                       # spawn workers agree with serial
     assert serial["root"] == true_unique_kmers(seqs.values(), _MIN_LEN)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# High fan-out: batched in-memory union (regression for the O(k × |running|)
+# re-sort that made a 671-child node take ~9 h on a 246 GiB host)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _fanout_sequences(n: int = 30) -> dict[str, str]:
+    """``n`` sequences that share segments, so children overlap and dedup
+    across siblings is exercised, not just within a leaf."""
+    rnd = random.Random(7)
+    shared = "".join(rnd.choice("ACGT") for _ in range(60))
+    return {
+        f"NC_F{i:02d}": "".join(rnd.choice("ACGT") for _ in range(80))
+        + shared[: 20 + i]
+        for i in range(n)
+    }
+
+
+def _fanout_tree(seqs: dict[str, str], vault: str):
+    from bigtree import Node
+
+    root = Node("genus")
+    root.rank = "genus"
+    for i, hid in enumerate(seqs):
+        sp = Node(f"sp{i}", parent=root)
+        sp.rank = "species"
+        make_vault_leaf(hid, vault).parent = sp
+    return root
+
+
+def test_high_fanout_capacity_identical_in_memory_on_disk_and_mixed(
+    tmp_path, monkeypatch,
+):
+    """The batched in-memory fold must give the same capacity for every node
+    as the pure disk path and as a run that switches to disk mid-loop."""
+    from taxotreeset.core.generation import capacity
+    from taxotreeset.core.generation.capacity import compute_all_capacities
+
+    seqs = _fanout_sequences()
+    vault = make_test_vault(tmp_path, seqs)
+    truth = true_unique_kmers(seqs.values(), _MIN_LEN)
+
+    results = {}
+    # 10**9: never spills (batched path); 1: every set on disk; truth // 2:
+    # the root's running set crosses the threshold partway through its children.
+    for label, threshold in (("memory", 10**9), ("disk", 1), ("mixed", truth // 2)):
+        monkeypatch.setattr(
+            capacity, "_resolve_bottom_up_threshold", lambda kb, t=threshold: t
+        )
+        spill = tmp_path / label
+        spill.mkdir()
+        results[label] = compute_all_capacities(
+            _fanout_tree(seqs, vault), _MIN_LEN, spill_dir=str(spill),
+            n_workers=1, n_gpu_workers=0,
+        )
+
+    assert results["memory"] == results["disk"] == results["mixed"]
+    assert results["memory"]["genus"] == truth
+
+
+def test_high_fanout_in_memory_children_are_sorted_once(monkeypatch):
+    """k in-memory children cost ONE np.unique at the parent, not k - 1."""
+    import numpy as np
+    from bigtree import Node
+
+    from taxotreeset.core.generation import capacity
+    from taxotreeset.core.generation._capacity._bottomup import (
+        _BottomUpCapacityComputer,
+    )
+    from taxotreeset.core.generation._capacity._keys import _NodeCapacityKeys
+
+    monkeypatch.setattr(capacity, "_resolve_bottom_up_threshold", lambda kb: 10**9)
+    comp = _BottomUpCapacityComputer(
+        min_len=_MIN_LEN, spill_dir=None, n_workers=1, n_gpu_workers=0,
+    )
+    rng = np.random.default_rng(0)
+    root = Node("parent")
+    root.rank = "genus"
+    expected = set()
+    for i in range(20):
+        raw = rng.integers(0, 256, size=(50, comp.key_bytes), dtype=np.uint8)
+        keys = np.unique(raw.view(comp.void_dtype).ravel())
+        expected.update(k.tobytes() for k in keys)
+        comp.accumulators[f"leaf{i}"] = _NodeCapacityKeys(keys, 0, comp.key_bytes)
+        leaf = Node(f"leaf{i}", parent=root)
+        leaf.rank = "sequence"
+
+    calls = []
+    real_unique = np.unique
+    monkeypatch.setattr(
+        np, "unique", lambda *a, **k: calls.append(1) or real_unique(*a, **k)
+    )
+    merged = comp._merge_subtree(root)
+
+    assert len(calls) == 1
+    assert merged.cardinality() == len(expected)
+    assert comp.capacities["parent"] == len(expected)
