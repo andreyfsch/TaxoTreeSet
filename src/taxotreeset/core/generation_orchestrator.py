@@ -429,12 +429,19 @@ class GenerationOrchestrator:
         ui_logger.info(f"Stage 1/4: Downloading pending accessions{suffix}.")
         t1 = time.monotonic()
         self.downloader.download_all_pending()
-        n_downloaded = before - n_pending()
+        still_pending = n_pending()
+        n_downloaded = before - still_pending
+        summary = f"{n_downloaded:,} downloaded" if n_downloaded else "nothing to download"
+        if still_pending:
+            # Said on the summary line itself: "699 downloaded" alone read as a
+            # success on 2026-10-02 while 100 of 799 genomes were missing.
+            summary += f", {still_pending:,} STILL PENDING"
+            ui_logger.error(
+                "%d accession(s) are still pending after Stage 1; the tree is "
+                "built WITHOUT them. Rerun the same command to fetch them.",
+                still_pending)
         ui_logger.info(
-            "✓ Stage 1/4  %s   (%s)",
-            _fmt_elapsed(time.monotonic() - t1),
-            f"{n_downloaded:,} downloaded" if n_downloaded else "nothing to download",
-        )
+            "✓ Stage 1/4  %s   (%s)", _fmt_elapsed(time.monotonic() - t1), summary)
         # The cross-domain accessions are now downloaded, so the non-virus reject
         # pool can be materialised (rebuilt each round; cheap and idempotent).
         if self.reject_cross_domain:

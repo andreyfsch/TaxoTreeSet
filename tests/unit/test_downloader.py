@@ -417,7 +417,7 @@ class TestInvokeNcbiDatasetsCli:
         mock_registry.registry = {"accessions": {}}
         dl = NCBIDownloader(registry=mock_registry, vault_path=str(tmp_path))
 
-        with patch(
+        with patch("taxotreeset.io.downloader.time.sleep"), patch(
             "subprocess.run",
             side_effect=subprocess.CalledProcessError(1, "datasets", stderr="error"),
         ):
@@ -431,7 +431,7 @@ class TestInvokeNcbiDatasetsCli:
         mock_registry.registry = {"accessions": {}}
         dl = NCBIDownloader(registry=mock_registry, vault_path=str(tmp_path))
 
-        with patch("subprocess.run"):
+        with patch("taxotreeset.io.downloader.time.sleep"), patch("subprocess.run"):
             result = dl._invoke_ncbi_datasets_cli(["GCF_001"], archive_path)
 
         assert result is False
@@ -443,7 +443,7 @@ class TestInvokeNcbiDatasetsCli:
         mock_registry.registry = {"accessions": {}}
         dl = NCBIDownloader(registry=mock_registry, vault_path=str(tmp_path))
 
-        with patch("subprocess.run"):
+        with patch("taxotreeset.io.downloader.time.sleep"), patch("subprocess.run"):
             result = dl._invoke_ncbi_datasets_cli(["GCF_001"], archive_path)
 
         assert result is False
@@ -466,6 +466,37 @@ class TestInvokeNcbiDatasetsCli:
 
         assert "GCF_001" in captured["cmd"]
         assert "GCF_002" in captured["cmd"]
+
+    def test_transient_failure_is_retried_then_succeeds(self, tmp_path):
+        """2026-10-02: one batch failed once at NCBI; a retry fetches it."""
+        archive_path = str(tmp_path / "batch.zip")
+        mock_registry = MagicMock()
+        mock_registry.registry = {"accessions": {}}
+        dl = NCBIDownloader(registry=mock_registry, vault_path=str(tmp_path))
+        calls = []
+
+        def flaky(cmd, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise subprocess.CalledProcessError(1, "datasets", stderr="503")
+            (tmp_path / "batch.zip").write_bytes(b"PK\x03\x04ok")
+            return MagicMock()
+
+        with patch("taxotreeset.io.downloader.time.sleep") as nap, \
+                patch("subprocess.run", side_effect=flaky):
+            assert dl._invoke_ncbi_datasets_cli(["GCF_001"], archive_path) is True
+        assert len(calls) == 2 and nap.call_count == 1
+
+    def test_gives_up_after_all_attempts(self, tmp_path):
+        mock_registry = MagicMock()
+        mock_registry.registry = {"accessions": {}}
+        dl = NCBIDownloader(registry=mock_registry, vault_path=str(tmp_path))
+        with patch("taxotreeset.io.downloader.time.sleep"), patch(
+            "subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, "datasets", stderr="x"),
+        ) as run:
+            assert dl._invoke_ncbi_datasets_cli(["GCF_001"], str(tmp_path / "b.zip")) is False
+        assert run.call_count == 3
 
 
 # ---------------------------------------------------------------------------

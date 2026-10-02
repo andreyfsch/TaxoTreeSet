@@ -37,6 +37,7 @@ import logging
 import os
 import subprocess
 import tempfile
+import time
 import zipfile
 import zlib
 from typing import Any
@@ -44,6 +45,9 @@ from typing import Any
 import lmdb
 from tqdm import tqdm
 
+
+# Waits between attempts of one NCBI Datasets CLI call (so 3 attempts in all).
+_CLI_RETRY_WAITS_SECONDS: tuple[float, ...] = (10.0, 30.0)
 logger = logging.getLogger("TaxoTreeSet.IO.Downloader")
 
 LMDB_MAP_SIZE_BYTES = 1_099_511_627_776  # 1 TiB virtual address space
@@ -500,10 +504,38 @@ class NCBIDownloader:
             archive_path: Filesystem path where the resulting ZIP file
                 will be written.
 
+        A failed call is retried (``_CLI_RETRY_WAITS_SECONDS``) before giving up:
+        on 2026-10-02 one archaea batch of 100 genomes failed once at NCBI and,
+        with no retry, the run went on and built the tree from 699 of 799
+        genomes, while the same 100 downloaded fine on a later try.
+
         Returns:
-            True if the archive was produced and is non-empty. False on
-            any CLI failure or empty output.
+            True if the archive was produced and is non-empty. False when every
+            attempt failed or produced no output.
         """
+        attempts = 1 + len(_CLI_RETRY_WAITS_SECONDS)
+        for attempt in range(1, attempts + 1):
+            if self._invoke_ncbi_datasets_cli_once(accessions, archive_path):
+                return True
+            if os.path.exists(archive_path):
+                os.remove(archive_path)   # a failed attempt's partial file must not pass
+            if attempt < attempts:
+                wait = _CLI_RETRY_WAITS_SECONDS[attempt - 1]
+                logger.warning(
+                    "NCBI Datasets CLI attempt %d/%d failed for %d accession(s); "
+                    "retrying in %.0f s.", attempt, attempts, len(accessions), wait)
+                time.sleep(wait)
+        logger.error(
+            "NCBI Datasets CLI failed %d time(s) for a batch of %d accession(s); "
+            "they stay pending.", attempts, len(accessions))
+        return False
+
+    def _invoke_ncbi_datasets_cli_once(
+        self,
+        accessions: list[str],
+        archive_path: str,
+    ) -> bool:
+        """One CLI call; True when it produced a non-empty archive."""
         command = [
             "datasets",
             "download",
