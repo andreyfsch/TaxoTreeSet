@@ -208,3 +208,85 @@ class TestFetchRelease:
         with patch.object(plasmid_release.urllib.request, "urlopen", opener):
             with pytest.raises(RuntimeError):
                 fetch_release(dest, base_url="http://x/", retries=2)
+
+
+# The release as NCBI ships it since (at least) July 2026: CON records with a
+# CONTIG join and no ORIGIN, the sequence living in a separate genomic FASTA.
+_GBFF_CON = """\
+LOCUS       NZ_CON0001           24 bp    DNA     linear   CON 28-JUL-2026
+ACCESSION   NZ_CON0001
+VERSION     NZ_CON0001.1
+FEATURES             Location/Qualifiers
+     source          1..24
+                     /organism="Escherichia coli"
+                     /db_xref="taxon:562"
+CONTIG      join(NZ_CON0001000001.1:1..24)
+//
+LOCUS       NZ_CON0002           8 bp    DNA     linear   CON 28-JUL-2026
+ACCESSION   NZ_CON0002
+VERSION     NZ_CON0002.1
+FEATURES             Location/Qualifiers
+     source          1..8
+                     /organism="Klebsiella pneumoniae"
+                     /db_xref="taxon:573"
+CONTIG      join(NZ_CON0002000001.1:1..8)
+//
+"""
+_FNA = ">NZ_CON0001.1 Escherichia coli plasmid p1\nacgtacgtacgt\nTTTTGGGGCCCC\n"
+
+
+def _write_release(tmp_path, gbff=_GBFF_CON, fna=_FNA):
+    d = tmp_path / "release"
+    d.mkdir()
+    (d / "plasmid.1.genomic.gbff.gz").write_bytes(gzip.compress(gbff.encode()))
+    if fna is not None:
+        (d / "plasmid.1.1.genomic.fna.gz").write_bytes(gzip.compress(fna.encode()))
+        # rna FASTA must never reach the vault
+        (d / "plasmid.1.rna.fna.gz").write_bytes(gzip.compress(b">NZ_CON0002.1\nAAAA\n"))
+    return str(d)
+
+
+class TestIngestRelease:
+    def test_con_records_take_sequence_from_genomic_fasta(self, tmp_path):
+        from taxotreeset.io.plasmid_release import ingest_release_to_vault
+        release = _write_release(tmp_path, fna=_FNA + ">NZ_CON0002.1\nacgtacgt\n")
+        lmdb_path = str(tmp_path / "vault" / "sequences.lmdb")
+        reports = ingest_release_to_vault(release, lmdb_path)
+        assert [r["accession"] for r in reports] == ["NZ_CON0001.1", "NZ_CON0002.1"]
+        assert _read_single_sequence(lmdb_path, "NZ_CON0001.1") == "ACGTACGTACGTTTTTGGGGCCCC"
+        assert _read_single_sequence(lmdb_path, "NZ_CON0002.1") == "ACGTACGT"
+
+    def test_origin_records_are_unchanged_without_fasta(self, tmp_path):
+        from taxotreeset.io.plasmid_release import ingest_release_to_vault
+        release = _write_release(tmp_path, gbff=_GBFF, fna=None)
+        lmdb_path = str(tmp_path / "vault" / "sequences.lmdb")
+        reports = ingest_release_to_vault(release, lmdb_path)
+        assert [r["accession"] for r in reports] == ["NZ_CP012345.1"]
+        assert _read_single_sequence(lmdb_path, "NZ_CP012345.1") == (
+            "ATGCATGCAT" "GCATGCATGC" "ATGCATGCAT" "GCATGCATGC")
+
+    def test_systematic_missing_sequence_aborts(self, tmp_path):
+        """The failure seen on 2026-10-02: every record empty, rc=0 downstream."""
+        from taxotreeset.io.plasmid_release import ingest_release_to_vault
+        release = _write_release(tmp_path, fna=None)
+        with pytest.raises(RuntimeError, match="no sequence"):
+            ingest_release_to_vault(release, str(tmp_path / "vault" / "s.lmdb"))
+
+    def test_sporadic_missing_sequence_is_dropped_not_kept_empty(self, tmp_path):
+        from taxotreeset.io.plasmid_release import ingest_release_to_vault
+        release = _write_release(tmp_path)   # NZ_CON0002.1 only in the rna FASTA
+        reports = ingest_release_to_vault(
+            release, str(tmp_path / "vault" / "s.lmdb"), max_missing_fraction=0.6)
+        assert [r["accession"] for r in reports] == ["NZ_CON0001.1"]
+
+    def test_manifest_and_listing_keep_genomic_fasta_only(self):
+        text = (
+            "d41d8cd98f00b204e9800998ecf8427e  plasmid.1.1.genomic.fna.gz\n"
+            "d41d8cd98f00b204e9800998ecf8427e  plasmid.1.rna.fna.gz\n"
+        )
+        assert _parse_manifest(text) == [
+            ("plasmid.1.1.genomic.fna.gz", "d41d8cd98f00b204e9800998ecf8427e")]
+        html = ('<a href="plasmid.1.1.genomic.fna.gz">a</a>'
+                '<a href="plasmid.1.rna.fna.gz">b</a>'
+                '<a href="plasmid.wgs_mstr.gbff.gz">c</a>')
+        assert _parse_html_listing(html) == ["plasmid.1.1.genomic.fna.gz"]

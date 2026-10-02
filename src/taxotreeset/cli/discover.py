@@ -16,8 +16,7 @@ from taxotreeset.io.plasmid_release import (
     PLASMID_RELEASE_SUBDIR,
     PLASMID_SCOPE_KEY,
     fetch_release,
-    ingest_records_to_vault,
-    iter_release_records,
+    ingest_release_to_vault,
 )
 from taxotreeset.io.registry import NCBIRegistry
 
@@ -208,8 +207,7 @@ def _run_plasmid_discovery(
 
     lmdb_path = os.path.join(args.vault, "sequences.lmdb")
     logger.info("Ingesting plasmid sequences from %s into %s", release_dir, lmdb_path)
-    reports = ingest_records_to_vault(
-        iter_release_records(release_dir), lmdb_path)
+    reports = ingest_release_to_vault(release_dir, lmdb_path)
     orchestrator.discover_from_reports(
         reports,
         root_id_str=PLASMID_SCOPE_KEY,

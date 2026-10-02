@@ -11,11 +11,24 @@ pipeline needs: the accession (``VERSION``), the host TaxID (the ``source``
 feature's ``/db_xref="taxon:NNN"``), the organism name, and the sequence
 (``ORIGIN``).
 
+**Except that it no longer does.** Since (at least) the July 2026 release every
+GBFF record is a ``CON`` (constructed) record: a ``CONTIG join(...)`` line and NO
+``ORIGIN`` block, so the GBFF carries metadata only. Measured 2026-10-02 on the
+release dated 28-JUL-2026: 142,127 of 142,130 records ingested as empty sequences,
+which the pipeline then turned into a tree whose capacities were all 0 -- with
+rc=0 throughout. The sequences ship alongside, as FASTA
+(``plasmid.N.M.genomic.fna.gz``); in file 10 all 7,184 GBFF accessions are present
+there with length == LOCUS length. So the release is now read in two passes:
+GBFF for the metadata (and ``ORIGIN`` when a record still has one), FASTA for the
+sequence of every record that lacks it -- see :func:`ingest_release_to_vault`,
+which also refuses to continue when records are left without sequence.
+
 This module is the tool-free acquisition primitive (P9). It covers the whole
-release path: :func:`fetch_release` downloads the release's GBFF files (md5-
-verified, resumable), :func:`iter_release_records` / :func:`parse_gbff_records`
-stream them into :class:`PlasmidRecord`\\ s, :func:`ingest_records_to_vault`
-writes the sequences into the LMDB vault, and :func:`record_to_report` adapts
+release path: :func:`fetch_release` downloads the release's GBFF and genomic
+FASTA files (md5-verified when a manifest exists, resumable),
+:func:`iter_release_records` / :func:`parse_gbff_records` stream them into
+:class:`PlasmidRecord`\\ s, :func:`ingest_release_to_vault` writes the sequences
+(ORIGIN or release FASTA) into the LMDB vault, and :func:`record_to_report` adapts
 each record into the synthetic *assembly report* shape the discovery
 registration path already consumes — so the plasmid branch reuses the existing
 lineage-resolution + tree-building cascade unchanged (``core/orchestrator.py``).
@@ -58,8 +71,16 @@ PLASMID_RELEASE_SUBDIR = "refseq_plasmid"
 _RELEASE_BASE_URL = "https://ftp.ncbi.nlm.nih.gov/refseq/release/plasmid/"
 _MANIFEST_NAME = "plasmid.files.installed"
 _GBFF_SUFFIX = ".genomic.gbff.gz"
+# Genomic FASTA only: the release also ships rna.fna.gz / protein.faa.gz, which
+# are not plasmid sequences and must not reach the vault.
+_GENOMIC_FNA_SUFFIX = ".genomic.fna.gz"
+_RELEASE_SUFFIXES = (_GBFF_SUFFIX, _GENOMIC_FNA_SUFFIX)
+# Records left without a sequence after the FASTA pass are dropped; above this
+# fraction the release is treated as unreadable and ingestion aborts, so a format
+# change can never again pass through as a tree of empty plasmids.
+_MAX_MISSING_SEQUENCE_FRACTION = 0.001
 _MD5_RE = re.compile(r"^[0-9a-f]{32}$")
-_HREF_RE = re.compile(r'href="(plasmid[^"?/]*\.genomic\.gbff\.gz)"')
+_HREF_RE = re.compile(r'href="(plasmid[^"?/]*\.genomic\.(?:gbff|fna)\.gz)"')
 _DOWNLOAD_CHUNK = 1 << 20  # 1 MiB streaming chunk
 
 # The host TaxID lives in the source feature's /db_xref="taxon:NNN"; it is the
@@ -103,7 +124,7 @@ def fetch_release(
     retries: int = 3,
     timeout: int = 60,
 ) -> str:
-    """Download the RefSeq plasmid release GBFF files into ``dest_dir``.
+    """Download the RefSeq plasmid release GBFF + genomic FASTA files.
 
     Idempotent and resumable: each file is checksummed against the release
     manifest and skipped when already present and valid, so an interrupted sync
@@ -128,14 +149,15 @@ def fetch_release(
         base_url += "/"
     os.makedirs(dest_dir, exist_ok=True)
 
-    entries = _list_release_gbff(base_url, timeout)
+    entries = _list_release_files(base_url, timeout)
     if not entries:
         logger.warning(
-            "No %s files found at %s — nothing to fetch.", _GBFF_SUFFIX, base_url)
+            "No %s / %s files found at %s — nothing to fetch.",
+            _GBFF_SUFFIX, _GENOMIC_FNA_SUFFIX, base_url)
         return dest_dir
 
     logger.info(
-        "RefSeq plasmid release: syncing %d GBFF file(s) into %s",
+        "RefSeq plasmid release: syncing %d GBFF/FASTA file(s) into %s",
         len(entries), dest_dir,
     )
     for filename, md5 in entries:
@@ -147,12 +169,13 @@ def fetch_release(
     return dest_dir
 
 
-def _list_release_gbff(base_url: str, timeout: int) -> list[tuple[str, str | None]]:
-    """Enumerate the release's GBFF files as ``(filename, md5-or-None)`` pairs.
+def _list_release_files(base_url: str, timeout: int) -> list[tuple[str, str | None]]:
+    """Enumerate the release's GBFF + genomic FASTA files as (name, md5) pairs.
 
     Prefers the ``*.files.installed`` manifest (gives checksums for verified,
     resumable downloads); falls back to scraping the directory HTML listing when
-    the manifest is unreadable or lists no GBFF files.
+    the manifest is unreadable or lists no release files (it was HTTP 404 on
+    2026-10-02).
     """
     manifest = _fetch_text(base_url + _MANIFEST_NAME, timeout)
     if manifest is not None:
@@ -166,11 +189,11 @@ def _list_release_gbff(base_url: str, timeout: int) -> list[tuple[str, str | Non
 
 
 def _parse_manifest(text: str) -> list[tuple[str, str | None]]:
-    """Parse a RefSeq ``*.files.installed`` manifest into GBFF (name, md5) pairs.
+    """Parse a RefSeq ``*.files.installed`` manifest into (name, md5) pairs.
 
     The two columns are a 32-hex-char md5 and a path; their order varies across
     releases, so the md5 is identified by shape rather than position. Only
-    ``*.genomic.gbff.gz`` entries are kept.
+    ``*.genomic.gbff.gz`` and ``*.genomic.fna.gz`` entries are kept.
     """
     entries: list[tuple[str, str | None]] = []
     for line in text.splitlines():
@@ -178,13 +201,13 @@ def _parse_manifest(text: str) -> list[tuple[str, str | None]]:
         md5 = next((t for t in tokens if _MD5_RE.match(t)), None)
         name = next(
             (os.path.basename(t) for t in tokens if not _MD5_RE.match(t)), None)
-        if name and name.endswith(_GBFF_SUFFIX):
+        if name and name.endswith(_RELEASE_SUFFIXES):
             entries.append((name, md5))
     return entries
 
 
 def _parse_html_listing(html: str) -> list[str]:
-    """GBFF filenames linked in an FTP directory's autoindex HTML listing."""
+    """GBFF + genomic FASTA filenames linked in an autoindex HTML listing."""
     return sorted(set(_HREF_RE.findall(html)))
 
 
@@ -454,3 +477,186 @@ def ingest_records_to_vault(
 
     logger.info("Ingested %d plasmid sequence(s) into %s", len(reports), lmdb_path)
     return reports
+
+
+def iter_release_fasta(release_dir: str) -> Iterator[tuple[str, str]]:
+    """Stream ``(accession.version, sequence)`` from the release's genomic FASTA.
+
+    Reads ``*.genomic.fna`` / ``*.genomic.fna.gz`` (never ``rna.fna``) in sorted
+    order, one file open at a time, one record in memory at a time. The key is
+    the first whitespace-delimited token of the header, which is the same
+    ``accession.version`` the GBFF ``VERSION`` line gives; the sequence is
+    uppercased, as :func:`_extract_sequence` does for ``ORIGIN``.
+    """
+    paths = sorted({
+        p
+        for pattern in ("*.genomic.fna", "*.genomic.fna.gz")
+        for p in glob.glob(os.path.join(release_dir, pattern))
+    })
+    for path in paths:
+        opener = gzip.open if path.endswith(".gz") else open
+        with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
+            accession: str | None = None
+            parts: list[str] = []
+            for line in handle:
+                if line.startswith(">"):
+                    if accession is not None:
+                        yield accession, "".join(parts).upper()
+                    header = line[1:].split()
+                    accession = header[0] if header else None
+                    parts = []
+                elif accession is not None:
+                    parts.append(line.strip())
+            if accession is not None:
+                yield accession, "".join(parts).upper()
+
+
+class _VaultWriter:
+    """LMDB puts in the vault's contract, committed every ``_INGEST_COMMIT_EVERY``."""
+
+    def __init__(self, env) -> None:
+        self._env = env
+        self._txn = env.begin(write=True)
+        self._pending = 0
+
+    def put(self, accession: str, sequence: str) -> None:
+        self._txn.put(accession.encode("utf-8"),
+                      zlib.compress(sequence.encode("utf-8")))
+        self._pending += 1
+        if self._pending >= _INGEST_COMMIT_EVERY:
+            self._txn.commit()
+            self._txn = self._env.begin(write=True)
+            self._pending = 0
+
+    def commit(self) -> None:
+        self._txn.commit()
+
+    def abort(self) -> None:
+        self._txn.abort()
+
+
+def _ingest_gbff_pass(
+    release_dir: str, writer: _VaultWriter,
+) -> tuple[list[dict[str, Any]], dict[str, int], int]:
+    """Pass 1: a report per placeable record; write the ORIGIN sequences.
+
+    Returns the reports, the ``{accession: LOCUS length}`` of every record that
+    had no ORIGIN (to be filled from the FASTA), and the ORIGIN count.
+    """
+    reports: list[dict[str, Any]] = []
+    needs_sequence: dict[str, int] = {}
+    n_origin = 0
+    for record in iter_release_records(release_dir):
+        reports.append(record_to_report(record))
+        if record.sequence:
+            writer.put(record.accession, record.sequence)
+            n_origin += 1
+        else:
+            needs_sequence[record.accession] = record.length
+    return reports, needs_sequence, n_origin
+
+
+def _ingest_fasta_pass(
+    release_dir: str, writer: _VaultWriter, needs_sequence: dict[str, int],
+) -> tuple[int, int]:
+    """Pass 2: write the FASTA sequence of every record still without one.
+
+    Filled accessions are removed from ``needs_sequence``. Returns the number of
+    sequences written and how many differ in length from their LOCUS line.
+    """
+    n_fasta = n_length_mismatch = 0
+    for accession, sequence in iter_release_fasta(release_dir):
+        expected = needs_sequence.get(accession)
+        if expected is None or not sequence:
+            continue
+        writer.put(accession, sequence)
+        del needs_sequence[accession]
+        n_fasta += 1
+        n_length_mismatch += len(sequence) != expected
+    return n_fasta, n_length_mismatch
+
+
+def _drop_records_without_sequence(
+    reports: list[dict[str, Any]],
+    missing: dict[str, int],
+    max_missing_fraction: float,
+    release_dir: str,
+) -> list[dict[str, Any]]:
+    """Drop records left without sequence; abort when they are systematic."""
+    if not missing:
+        return reports
+    fraction = len(missing) / max(len(reports), 1)
+    logger.error(
+        "%d plasmid record(s) (%.2f%%) have no sequence in the GBFF (ORIGIN) "
+        "nor in the release FASTA; dropping them. Example: %s",
+        len(missing), 100 * fraction, sorted(missing)[:3])
+    if fraction > max_missing_fraction:
+        raise RuntimeError(
+            f"{len(missing)} of {len(reports)} plasmid records have no sequence "
+            f"({100 * fraction:.2f}% > {100 * max_missing_fraction:.2f}%): the "
+            f"release format is not what this parser reads. Is the genomic FASTA "
+            f"(*{_GENOMIC_FNA_SUFFIX}) in {release_dir}?")
+    return [r for r in reports if r["accession"] not in missing]
+
+
+def ingest_release_to_vault(
+    release_dir: str,
+    lmdb_path: str,
+    max_missing_fraction: float = _MAX_MISSING_SEQUENCE_FRACTION,
+) -> list[dict[str, Any]]:
+    """Ingest a release into the vault: GBFF metadata, sequence from ORIGIN or FASTA.
+
+    Pass 1 streams the GBFF records: every placeable record yields its report
+    (host TaxID, organism, LOCUS length), and its sequence is written only when
+    the record carries an ``ORIGIN`` block. Pass 2 streams the genomic FASTA and
+    writes the sequence of every record that had none -- in the current release,
+    all of them (``CON`` records). A record still without a sequence afterwards
+    is dropped from the returned reports, so it never becomes a zero-length leaf,
+    and when such records exceed ``max_missing_fraction`` the release is treated
+    as unreadable and a ``RuntimeError`` stops the sync: an empty vault must fail
+    loudly, not generate a tree of zero-capacity heads.
+
+    Same vault contract as :func:`ingest_records_to_vault` (key
+    ``accession.version``, value ``zlib.compress(sequence)``), so reads go through
+    ``dataset/utils._read_single_sequence`` unchanged.
+
+    Args:
+        release_dir: Directory holding the release's GBFF and FASTA files.
+        lmdb_path: Vault LMDB directory (created if absent).
+        max_missing_fraction: Abort threshold for records left without sequence.
+
+    Returns:
+        One synthetic assembly report per record that has a sequence in the vault.
+
+    Raises:
+        RuntimeError: If more than ``max_missing_fraction`` of the records have no
+            sequence in either the GBFF or the FASTA.
+    """
+    parent = os.path.dirname(lmdb_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    env = lmdb.open(lmdb_path, map_size=LMDB_MAP_SIZE_BYTES, max_dbs=0)
+    try:
+        writer = _VaultWriter(env)
+        try:
+            reports, missing, n_origin = _ingest_gbff_pass(release_dir, writer)
+            n_fasta, n_mismatch = (
+                _ingest_fasta_pass(release_dir, writer, missing) if missing else (0, 0))
+            writer.commit()
+        except BaseException:
+            writer.abort()
+            raise
+    finally:
+        env.close()
+
+    logger.info(
+        "Plasmid release ingested into %s: %d record(s), sequence from ORIGIN %d, "
+        "from FASTA %d, without sequence %d", lmdb_path, len(reports), n_origin,
+        n_fasta, len(missing))
+    if n_mismatch:
+        logger.warning(
+            "%d FASTA sequence(s) differ in length from their GBFF LOCUS line.",
+            n_mismatch)
+    return _drop_records_without_sequence(
+        reports, missing, max_missing_fraction, release_dir)

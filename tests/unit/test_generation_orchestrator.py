@@ -187,9 +187,7 @@ class TestSyncPlasmids:
         reports = [{"accession": "NZ_P1.1"}]
         with (
             patch("taxotreeset.core._orchestration._sync.fetch_release") as m_fetch,
-            patch("taxotreeset.core._orchestration._sync.iter_release_records",
-                  return_value=iter([])),
-            patch("taxotreeset.core._orchestration._sync.ingest_records_to_vault",
+            patch("taxotreeset.core._orchestration._sync.ingest_release_to_vault",
                   return_value=reports) as m_ingest,
             patch("taxotreeset.core._orchestration._sync.DiscoveryOrchestrator")
             as m_disc,
@@ -197,6 +195,7 @@ class TestSyncPlasmids:
             orch._sync_plasmids()
         assert m_fetch.call_args.args[0].endswith("refseq_plasmid")  # default dir
         m_ingest.assert_called_once()
+        assert m_ingest.call_args.args[0].endswith("refseq_plasmid")
         call = m_disc.return_value.discover_from_reports.call_args
         assert call.args[0] == reports
         assert call.kwargs["root_id_str"] == "plasmids"
@@ -206,9 +205,7 @@ class TestSyncPlasmids:
         orch = self._plasmid_orch(tmp_path, no_fetch=True)
         with (
             patch("taxotreeset.core._orchestration._sync.fetch_release") as m_fetch,
-            patch("taxotreeset.core._orchestration._sync.iter_release_records",
-                  return_value=iter([])),
-            patch("taxotreeset.core._orchestration._sync.ingest_records_to_vault",
+            patch("taxotreeset.core._orchestration._sync.ingest_release_to_vault",
                   return_value=[]),
             patch("taxotreeset.core._orchestration._sync.DiscoveryOrchestrator"),
         ):

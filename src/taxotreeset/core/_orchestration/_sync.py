@@ -27,8 +27,7 @@ from taxotreeset.io.plasmid_release import (
     PLASMID_RELEASE_SUBDIR,
     PLASMID_SCOPE_KEY,
     fetch_release,
-    ingest_records_to_vault,
-    iter_release_records,
+    ingest_release_to_vault,
 )
 from taxotreeset.logging_utils import get_ui_logger
 from taxotreeset.ranks import is_below_boundary
@@ -132,8 +131,7 @@ class _SyncManager:
 
         lmdb_path = os.path.join(self.ctx.vault_path, "sequences.lmdb")
         ui_logger.info("Ingesting plasmid sequences into %s", lmdb_path)
-        reports = ingest_records_to_vault(
-            iter_release_records(release_dir), lmdb_path)
+        reports = ingest_release_to_vault(release_dir, lmdb_path)
 
         with open(self.ctx.config_path, encoding="utf-8") as handle:
             mapping_config = json.load(handle)

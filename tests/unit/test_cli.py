@@ -335,9 +335,8 @@ class TestDiscoverRun:
             patch("taxotreeset.cli.discover.NCBIRegistry"),
             patch("taxotreeset.cli.discover.DiscoveryOrchestrator") as mock_orch,
             patch("taxotreeset.cli.discover.fetch_release") as mock_fetch,
-            patch("taxotreeset.cli.discover.iter_release_records", return_value=iter([])),
             patch(
-                "taxotreeset.cli.discover.ingest_records_to_vault",
+                "taxotreeset.cli.discover.ingest_release_to_vault",
                 return_value=[{"accession": "NZ_P1.1"}],
             ) as mock_ingest,
         ):
@@ -346,6 +345,8 @@ class TestDiscoverRun:
         mock_fetch.assert_called_once()
         assert mock_fetch.call_args.args[0].endswith("refseq_plasmid")
         mock_ingest.assert_called_once()
+        # GBFF + FASTA are read from the release dir (CON records carry no ORIGIN).
+        assert mock_ingest.call_args.args[0].endswith("refseq_plasmid")
         mock_orch.return_value.discover_from_root.assert_not_called()
         call = mock_orch.return_value.discover_from_reports.call_args
         assert call.args[0] == [{"accession": "NZ_P1.1"}]
@@ -363,8 +364,7 @@ class TestDiscoverRun:
             patch("taxotreeset.cli.discover.NCBIRegistry"),
             patch("taxotreeset.cli.discover.DiscoveryOrchestrator"),
             patch("taxotreeset.cli.discover.fetch_release") as mock_fetch,
-            patch("taxotreeset.cli.discover.iter_release_records", return_value=iter([])),
-            patch("taxotreeset.cli.discover.ingest_records_to_vault", return_value=[]),
+            patch("taxotreeset.cli.discover.ingest_release_to_vault", return_value=[]),
         ):
             discover.run(args)
         mock_fetch.assert_not_called()
