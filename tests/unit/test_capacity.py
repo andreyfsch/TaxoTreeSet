@@ -227,6 +227,50 @@ class TestResolveBottomUpThreshold:
         assert large_result > small_result
 
 
+    def test_env_limit_caps_available_memory(self, monkeypatch):
+        # A job capped below the host's free RAM must size the threshold from
+        # its cap: on a large idle host the uncapped pass planned for the whole
+        # machine and the job's memory guard stopped it.
+        import sys
+        import types
+
+        def make_psutil(available_bytes):
+            m = types.ModuleType("psutil")
+            mem = types.SimpleNamespace(available=available_bytes)
+            m.virtual_memory = lambda: mem
+            return m
+
+        monkeypatch.delenv("TAXOTREESET_MEM_LIMIT_GB", raising=False)
+        monkeypatch.setitem(sys.modules, "psutil", make_psutil(8 * 1024 ** 3))
+        at_8_gib = _resolve_bottom_up_threshold(key_bytes=4)
+
+        monkeypatch.setitem(sys.modules, "psutil", make_psutil(200 * 1024 ** 3))
+        monkeypatch.setenv("TAXOTREESET_MEM_LIMIT_GB", "8")
+        assert _resolve_bottom_up_threshold(key_bytes=4) == at_8_gib
+
+        # The limit only lowers the figure: less free RAM than the limit wins.
+        monkeypatch.setitem(sys.modules, "psutil", make_psutil(4 * 1024 ** 3))
+        assert _resolve_bottom_up_threshold(key_bytes=4) < at_8_gib
+
+
+class TestBottomUpRamBudgetLimit:
+    """The leaf-accumulation budget follows TAXOTREESET_MEM_LIMIT_GB too."""
+
+    def test_leaf_budget_capped_by_env_limit(self, monkeypatch):
+        monkeypatch.setenv("TAXOTREESET_MEM_LIMIT_GB", "1")
+        computer = _BottomUpCapacityComputer(
+            min_len=100, spill_dir=None, n_workers=1, n_gpu_workers=0
+        )
+        assert computer.ram_budget_keys == int(2**30 * 0.25) // computer.key_bytes
+
+    def test_leaf_budget_uncapped_without_env(self, monkeypatch):
+        monkeypatch.delenv("TAXOTREESET_MEM_LIMIT_GB", raising=False)
+        computer = _BottomUpCapacityComputer(
+            min_len=100, spill_dir=None, n_workers=1, n_gpu_workers=0
+        )
+        assert computer.ram_budget_keys > int(2**30 * 0.25) // computer.key_bytes
+
+
 class TestBottomUpWorkerClamp:
     """n_workers is normalized to >= 1, symmetric with the n_gpu_workers clamp,
     so an explicit --workers 0 / negative can't yield a nonsensical worker count

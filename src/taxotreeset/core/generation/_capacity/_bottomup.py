@@ -138,7 +138,11 @@ class _BottomUpCapacityComputer:
         # lazy: _resolve_bottom_up_threshold stays in capacity.py as a patch anchor;
         # importing it at call time avoids a capacity<->_bottomup import cycle while
         # keeping patch("capacity._resolve_bottom_up_threshold") effective.
-        from taxotreeset.core.generation.capacity import _resolve_bottom_up_threshold
+        from taxotreeset.core.generation.capacity import (
+            _MEM_LIMIT_ENV,
+            _available_ram_bytes,
+            _resolve_bottom_up_threshold,
+        )
 
         if n_workers is None:
             n_workers = max(1, (os.cpu_count() or 1) - 1)
@@ -162,10 +166,17 @@ class _BottomUpCapacityComputer:
         self.flat_bins: dict[str, tuple[str, int, int, int]] = {}
         self.flat_bin_file: str | None = None
         self.in_memory_key_count = 0
-        # Reserve 25 % of currently available RAM for leaf accumulation.
-        self.ram_budget_keys = max(
-            1, int(psutil.virtual_memory().available * 0.25) // self.key_bytes
-        )
+        # Reserve 25 % of currently available RAM (capped by the job's
+        # TAXOTREESET_MEM_LIMIT_GB, when set) for leaf accumulation.
+        planned = _available_ram_bytes()
+        self.ram_budget_keys = max(1, int(planned * 0.25) // self.key_bytes)
+        if os.environ.get(_MEM_LIMIT_ENV):
+            self.logger.info(
+                "[bottom-up] RAM budgets capped by %s=%s: planning for %.2f GiB "
+                "(host has %.2f GiB available)",
+                _MEM_LIMIT_ENV, os.environ[_MEM_LIMIT_ENV], planned / 2**30,
+                psutil.virtual_memory().available / 2**30,
+            )
         self.leaves_done = 0
         self.total_leaves = 0
         self.pbar = None

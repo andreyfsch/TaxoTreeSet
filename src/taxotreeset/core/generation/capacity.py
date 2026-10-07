@@ -55,6 +55,7 @@ Typical usage::
 """
 
 import logging
+import os
 
 from taxotreeset.core.generation._capacity._bloom import (  # re-exported for callers/tests
     _bloom_get_bit as _bloom_get_bit,
@@ -123,6 +124,33 @@ _BOTTOM_UP_RAM_FRACTION: float = 0.5
 _BOTTOM_UP_MERGE_OVERHEAD: int = 3
 _BOTTOM_UP_LIVE_SETS_ESTIMATE: int = 4
 
+# Both bottom-up budgets (the spill threshold above and the leaf-accumulation
+# budget in _bottomup) are fractions of the RAM read once at the start. On a
+# large idle host that plans for the whole machine: on 2026-10-07 the plasmid
+# generation started with 247 GiB free, reached 120 GB (~0.49x what it saw)
+# and was stopped by the job's memory guard. This variable caps the figure the
+# budgets are taken from, so they follow the job's limit instead.
+_MEM_LIMIT_ENV: str = "TAXOTREESET_MEM_LIMIT_GB"
+
+
+def _available_ram_bytes() -> int:
+    """Return the RAM the capacity pass may plan for, in bytes.
+
+    The host's currently available RAM, capped by ``TAXOTREESET_MEM_LIMIT_GB``
+    (GiB) when that variable is set. Raises whatever ``psutil`` raises, so
+    callers keep their own fallback.
+
+    Returns:
+        Available bytes, never more than the configured limit.
+    """
+    import psutil
+
+    available = psutil.virtual_memory().available
+    limit = os.environ.get(_MEM_LIMIT_ENV)
+    if limit:
+        available = min(available, int(float(limit) * 2**30))
+    return available
+
 
 def _resolve_bottom_up_threshold(key_bytes: int) -> int:
     """Derive the in-memory key ceiling for the bottom-up pass from RAM.
@@ -140,9 +168,7 @@ def _resolve_bottom_up_threshold(key_bytes: int) -> int:
         The maximum number of in-memory keys before spilling to disk.
     """
     try:
-        import psutil
-
-        available = psutil.virtual_memory().available
+        available = _available_ram_bytes()
     except Exception:
         return _HASHED_DISK_THRESHOLD
     budget = available * _BOTTOM_UP_RAM_FRACTION
