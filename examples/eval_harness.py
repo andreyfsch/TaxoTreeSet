@@ -368,6 +368,10 @@ def phylocascade_predictions(
                 "p_entry": float(getattr(path[0], "p", 0.0)),
                 "p_min": min(float(getattr(e, "p", 0.0)) for e in path),
                 "commit": str(getattr(path[-1], "taxid", path[-1])),
+                # "rejected" here means every node of this subtree rejected, its entry
+                # included: the classifier still hands back the least-eliminated path
+                # (just the entry), and this offer competes like an accepting one.
+                "stop_reason": getattr(res, "stop_reason", None),
                 "_res": res,
             })
         if not offers or (arbitration == "unanimous" and len(offers) > 1):
