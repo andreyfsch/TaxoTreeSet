@@ -1,6 +1,7 @@
 """Tests for taxotreeset.core.generation_orchestrator — pure/isolated helpers."""
 
 import json
+import logging
 import os
 import random
 from unittest.mock import MagicMock, patch
@@ -252,6 +253,68 @@ class TestCrossDomainNegatives:
         assert entry["cross_domain"] is True
         assert entry["downloaded"] is False          # queued as pending
         assert reg["lineages"] == {} and reg["taxons"] == {}  # kept out of the tree
+
+    def test_acquire_is_once_per_domain(self, tmp_path):
+        orch = self._orch(tmp_path)
+        report = {"accession": "GCF_1.1", "organism": {"tax_id": 562},
+                  "assembly_stats": {"total_sequence_length": 5000}}
+        with patch(
+            "taxotreeset.core._orchestration._sync.DiscoveryOrchestrator"
+        ) as m_disc:
+            m_disc.return_value.stream_reference_reports.side_effect = [[report], []]
+            orch._acquire_cross_domain_negatives()
+            # archaea gave nothing, so only bacteria counts as acquired
+            acquired = orch.registry.registry["cross_domain_acquired"]
+            assert set(acquired) == {"bacteria"}
+            assert acquired["bacteria"]["n"] == 1 and acquired["bacteria"]["bp"] == 5000
+            m_disc.return_value.stream_reference_reports.reset_mock()
+            m_disc.return_value.stream_reference_reports.side_effect = [[]]
+            orch._acquire_cross_domain_negatives()
+            # bacteria is not fetched again; archaea is retried
+            assert m_disc.return_value.stream_reference_reports.call_count == 1
+            assert m_disc.return_value.stream_reference_reports.call_args[0][0] == "2157"
+
+    def test_changed_parameters_keep_the_recorded_sample(self, tmp_path, caplog):
+        orch = self._orch(tmp_path)
+        orch.reject_cross_domain = ["bacteria"]
+        report = {"accession": "GCF_1.1", "organism": {"tax_id": 562},
+                  "assembly_stats": {"total_sequence_length": 5000}}
+        with patch(
+            "taxotreeset.core._orchestration._sync.DiscoveryOrchestrator"
+        ) as m_disc:
+            m_disc.return_value.stream_reference_reports.side_effect = [[report]]
+            orch._acquire_cross_domain_negatives()
+            orch.reject_cross_domain_sample = 50
+            with caplog.at_level(logging.WARNING):
+                orch._acquire_cross_domain_negatives()
+            assert m_disc.return_value.stream_reference_reports.call_count == 1
+        assert orch.registry.registry["cross_domain_negatives"] == ["GCF_1.1"]
+
+    def test_sampling_arguments_are_passed(self, tmp_path):
+        orch = self._orch(tmp_path)
+        orch.reject_cross_domain = ["eukaryotes"]
+        orch.reject_cross_domain_max_mb = 150
+        orch.reject_cross_domain_exclude = ["4930"]
+        with patch(
+            "taxotreeset.core._orchestration._sync.DiscoveryOrchestrator"
+        ) as m_disc:
+            m_disc.return_value.stream_reference_reports.side_effect = [[]]
+            orch._acquire_cross_domain_negatives()
+        args, kwargs = m_disc.return_value.stream_reference_reports.call_args
+        assert args == ("2759", 5)
+        assert kwargs == {"seed": orch.seed, "max_genome_bp": 150_000_000,
+                          "exclude_taxids": ["4930"]}
+
+    def test_pool_leaves_carry_domain_and_accession(self, tmp_path):
+        orch = self._orch(tmp_path)
+        orch.registry.registry["cross_domain_negatives"] = ["GCF_1.1"]
+        orch.registry.registry["accessions"] = {
+            "GCF_1.1": {"downloaded": True, "local_path": "/vault.lmdb",
+                        "cross_domain_group": "bacteria",
+                        "headers": [{"id": "c1"}]}}
+        (leaf,) = orch._build_cross_domain_pool()
+        assert leaf.cross_domain is True
+        assert leaf.clade == "cross_domain:bacteria" and leaf.accession == "GCF_1.1"
 
     def test_build_pool_from_downloaded_headers_only(self, tmp_path):
         orch = self._orch(tmp_path)

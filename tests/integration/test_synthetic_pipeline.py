@@ -313,6 +313,7 @@ def pipeline_output(synthetic_env, tmp_path_factory):
         rare_taxa_strategy="keep",
         n_gpu_workers=0,
         n_workers=1,
+        reject_cross_domain=None,  # the domain gate has its own test
     )
     orch.run_pipeline(target_group="viruses", sync=False, abundance_threshold=1)
     return {"output_dir": output_dir}
@@ -338,6 +339,7 @@ def binary_pipeline_output(synthetic_env, tmp_path_factory):
         rare_taxa_strategy="keep",
         n_gpu_workers=0,
         n_workers=1,
+        reject_cross_domain=None,  # the domain gate has its own test
         binary_only=True,
         binary_budget=60,
     )
@@ -420,6 +422,7 @@ def binary_pipeline_output_batched(synthetic_env, tmp_path_factory):
         rare_taxa_strategy="keep",
         n_gpu_workers=0,
         n_workers=1,
+        reject_cross_domain=None,  # the domain gate has its own test
         binary_only=True,
         binary_budget=60,
         binary_extract_batch_size=1,
@@ -611,6 +614,7 @@ def _single_level_orch(synthetic_env, output_dir, **overrides):
         rare_taxa_strategy="keep",
         n_gpu_workers=0,
         n_workers=1,
+        reject_cross_domain=None,  # the domain gate has its own test
     )
     kwargs.update(overrides)
     return GenerationOrchestrator(**kwargs)

@@ -274,6 +274,14 @@ def _write_run_metadata(
             # distributions and nothing in the artifact distinguishes them, while
             # the FR measured on that bucket feeds the cascade's prune margin.
             "reject_near_far_span": ctx.reject_near_far_span,
+            # The domain gate (P4), resolved: "auto" becomes the domains it drew from.
+            "reject_cross_domain": list(getattr(ctx, "reject_cross_domain", []) or []),
+            "reject_cross_domain_sample": getattr(ctx, "reject_cross_domain_sample", None),
+            "reject_cross_domain_depth": getattr(ctx, "reject_cross_domain_depth", None),
+            "reject_cross_domain_max_mb": getattr(ctx, "reject_cross_domain_max_mb", None),
+            "reject_cross_domain_exclude": list(
+                getattr(ctx, "reject_cross_domain_exclude", []) or []),
+            "cross_domain_acquired": ctx.registry.registry.get("cross_domain_acquired", {}),
             "binary_only": ctx.binary_only,
             "binary_budget": ctx.binary_budget,
             "all_ranks": ctx.all_ranks,

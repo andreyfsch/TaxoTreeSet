@@ -109,6 +109,73 @@ def _cap_pool(pool: list, max_per_pool: int, rng: random.Random) -> list:
     return pool
 
 
+_MAX_CROSS_LEAVES_PER_GENOME: int = 20
+"""Sequences kept per cross-domain genome (seeded random choice).
+
+A cross-domain leaf is one SEQUENCE, so a scaffold-level eukaryote brings thousands of
+leaves and a bacterium one or two. The per-pool leaf cap draws by count, which would
+fill the gate's negatives with eukaryotic scaffolds; capping per genome first keeps
+every sampled genome in. Its windows are spread over these sequences by length."""
+
+
+def _is_cross_domain(leaf) -> bool:
+    return bool(getattr(leaf, "cross_domain", False))
+
+
+def _genome_key(leaf) -> str:
+    """The genome a cross-domain leaf belongs to. Not ``fasta_path``: every genome in
+    an LMDB vault shares it, so a leaf without an accession stands for itself."""
+    return str(getattr(leaf, "accession", None) or getattr(leaf, "header_id", ""))
+
+
+def _cap_cross_pool(pool: list, per_genome: int, rng: random.Random) -> list:
+    """Keep up to ``per_genome`` leaves of each cross-domain genome (seeded)."""
+    by_genome: dict[str, list] = {}
+    for leaf in pool:
+        key = _genome_key(leaf)
+        by_genome.setdefault(key, []).append(leaf)
+    kept: list = []
+    for key in sorted(by_genome):
+        leaves = by_genome[key]
+        kept.extend(leaves if len(leaves) <= per_genome else rng.sample(leaves, per_genome))
+    return kept
+
+
+def _allocate_cross_domain(leaves: list, n: int, min_subseq_len: int) -> list[dict]:
+    """Spread ``n`` gate windows equally over domains, then equally over genomes.
+
+    The per-leaf allocator weighs by sequence length, which on the gate pool means
+    by genome size: 200 genomes per domain would give ~92% of the windows to
+    eukaryotes, ~8% to bacteria and ~0.1% to viruses (RefSeq reference sizes on
+    2026-10-15). Each domain is a distinct "outside" the head must learn, and each
+    genome a distinct organism, so both levels are split evenly; within a genome the
+    windows follow its sequences' lengths. Remainders go to the first groups in
+    sorted order, so the total is exactly ``n`` unless a genome cannot supply its
+    share (sequences shorter than ``min_subseq_len``).
+    """
+    if n <= 0 or not leaves:
+        return []
+    by_domain: dict[str, dict[str, list]] = {}
+    for leaf in leaves:
+        domain = str(getattr(leaf, "clade", "cross_domain:?"))
+        genome = _genome_key(leaf)
+        by_domain.setdefault(domain, {}).setdefault(genome, []).append(leaf)
+
+    def split(total: int, k: int) -> list[int]:
+        return [total // k + (1 if i < total % k else 0) for i in range(k)]
+
+    tasks: list[dict] = []
+    for domain, n_domain in zip(sorted(by_domain), split(n, len(by_domain))):
+        genomes = by_domain[domain]
+        for genome, n_genome in zip(sorted(genomes), split(n_domain, len(genomes))):
+            if n_genome <= 0:
+                continue
+            for task in _allocate_n_across_leaves(genomes[genome], n_genome, min_subseq_len):
+                task["cross_domain"] = domain
+                tasks.append(task)
+    return tasks
+
+
 def _leaf_key(leaf) -> tuple[str, str] | None:
     """Identify a sequence leaf by the sequence it points at, not by its node.
 
@@ -219,14 +286,16 @@ def sample_reject_leaves(
         near_set = set(near)
         far = [leaf for leaf in external if leaf not in near_set]
 
-    # Cross-domain (non-virus) gate: shallow heads also reject "not a virus at
-    # all". For the whole-tree head (no intra-tree external) this is the head's
-    # only negative source. Appended to `far` so the near/far budget split treats
-    # it as a distant clade (and gives the root head its entire reject budget).
+    # Cross-domain gate: shallow heads also reject "not this domain at all". For
+    # the whole-tree head (no intra-tree external) this is the head's only negative
+    # source. Appended to `far` so the near/far budget split treats it as a distant
+    # clade (and gives the domain head its entire reject budget); capped per GENOME,
+    # not by the per-pool leaf cap, which would draw scaffolds by count.
+    cross: list = []
     if cross_domain_leaves and current_node.depth <= cross_domain_max_depth:
-        far = far + list(cross_domain_leaves)
+        cross = _cap_cross_pool(list(cross_domain_leaves), _MAX_CROSS_LEAVES_PER_GENOME, rng)
 
-    return _cap_pool(near, max_per_pool, rng), _cap_pool(far, max_per_pool, rng)
+    return _cap_pool(near, max_per_pool, rng), _cap_pool(far, max_per_pool, rng) + cross
 
 
 def build_reject_tasks(
@@ -243,6 +312,10 @@ def build_reject_tasks(
     :func:`_allocate_n_across_leaves` (the same allocator used for real classes),
     so a reject window is produced exactly like any other. When only one pool is
     non-empty it receives the full budget.
+
+    Cross-domain leaves in ``far`` (the domain gate) are allocated apart, evenly by
+    domain and by genome (:func:`_allocate_cross_domain`); when ``far`` also holds
+    intra-tree leaves the far budget is halved between the two.
 
     Args:
         near_leaves: Sibling/cousin sequence leaves (see :func:`sample_reject_leaves`).
@@ -277,7 +350,12 @@ def build_reject_tasks(
             t["reject_pool"] = "near"
         tasks.extend(near_tasks)
     if n_far and far_leaves:
-        far_tasks = _allocate_n_across_leaves(far_leaves, n_far, min_subseq_len)
+        cross = [leaf for leaf in far_leaves if _is_cross_domain(leaf)]
+        intra = [leaf for leaf in far_leaves if not _is_cross_domain(leaf)]
+        n_cross = (n_far // 2 if intra else n_far) if cross else 0
+        far_tasks = (_allocate_n_across_leaves(intra, n_far - n_cross, min_subseq_len)
+                     if intra else [])
+        far_tasks += _allocate_cross_domain(cross, n_cross, min_subseq_len)
         for t in far_tasks:
             t["reject_pool"] = "far"
         tasks.extend(far_tasks)
@@ -314,6 +392,8 @@ def summarise_reject_provenance(
                    or id(leaf))
 
     def _clade(leaf) -> str:
+        if _is_cross_domain(leaf):
+            return str(getattr(leaf, "clade", "cross_domain:?"))
         p = getattr(leaf, "parent", None)
         return str(getattr(p, "name", "?")) if p is not None else "?"
 
@@ -337,4 +417,16 @@ def summarise_reject_provenance(
         out["near"]["windows"] / tot if tot else None
     )
     out["distinct_sources"] = out["near"]["leaves_used"] + out["far"]["leaves_used"]
+    cross = [t for t in tasks if t.get("cross_domain")]
+    if cross:
+        genome_of = {str(getattr(leaf, "header_id", "")): str(getattr(leaf, "accession", ""))
+                     for leaf in far_leaves if _is_cross_domain(leaf)}
+        per_domain: dict[str, dict] = {}
+        for t in cross:
+            d = per_domain.setdefault(t["cross_domain"], {"windows": 0, "genomes": set()})
+            d["windows"] += int(t.get("n", 0))
+            d["genomes"].add(genome_of.get(str(t.get("header_id")), t.get("fasta_path")))
+        out["cross_domain"] = {
+            k: {"windows": v["windows"], "genomes": len(v["genomes"])}
+            for k, v in sorted(per_domain.items())}
     return out

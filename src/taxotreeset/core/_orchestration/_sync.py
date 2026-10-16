@@ -45,6 +45,50 @@ _DOMAIN_GROUP_TO_TAXID: dict[str, str] = {
     "eukaryotes": "2759",
 }
 
+CROSS_DOMAIN_AUTO = "auto"
+_CROSS_DOMAIN_OFF = frozenset({"", "none", "off"})
+
+
+def resolve_cross_domain(
+    spec: "str | list[str] | None", target_group: str | None, plasmids: bool = False,
+) -> list[str]:
+    """Resolve the cross-domain gate setting into the domains to sample negatives from.
+
+    ``"auto"`` (the default) is every OTHER domain of life when ``--root`` is a single
+    domain: an archaea tree draws its gate negatives from bacteria, eukaryotes and
+    viruses, a viral tree from bacteria, archaea and eukaryotes. Without them the
+    domain head has no reject signal at all (it has no in-tree "outside"), and the
+    cascade commits every foreign read somewhere in the tree: on the archaea harness of
+    2026-10-15 the cascade rejected 0.00 of the non-archaea reads, against 0.90-1.00
+    for Kraken2, Centrifuge and Kaiju.
+
+    ``auto`` resolves to nothing for ``--plasmids`` (the plasmid gate's negative is the
+    host *chromosome*, not another domain; deferred in docs/BACKLOG.md P3) and for
+    ``all`` or multi-root scopes, whose domains are each other's "outside" already.
+    ``None`` and ``"none"``/``"off"`` disable the gate; an explicit comma list or list
+    is taken as given (domain names or their TaxIDs).
+    """
+    if spec is None:
+        return []
+    if isinstance(spec, str):
+        token = spec.strip().lower()
+        if token in _CROSS_DOMAIN_OFF:
+            return []
+        if token != CROSS_DOMAIN_AUTO:
+            return [d.strip() for d in spec.split(",") if d.strip()]
+        if plasmids:
+            return []
+        roots = [r.strip().lower() for r in (target_group or "").split(",") if r.strip()]
+        if len(roots) != 1:
+            return []
+        root = roots[0]
+        by_taxid = {v: k for k, v in _DOMAIN_GROUP_TO_TAXID.items()}
+        domain = root if root in _DOMAIN_GROUP_TO_TAXID else by_taxid.get(root)
+        if domain is None:
+            return []
+        return [d for d in _DOMAIN_GROUP_TO_TAXID if d != domain]
+    return [str(d).strip() for d in spec if str(d).strip()]
+
 
 class _SyncManager:
     """Stage-1 sync workflow bound to an orchestrator instance (``ctx``)."""
@@ -153,22 +197,56 @@ class _SyncManager:
         store their lineage, so tree building (which places accessions via
         ``lineages``/``taxons``) never puts them in the viral tree or schedules
         heads for them. Stage-1 download then fetches them like any accession; the
-        pool is materialised later by :meth:`_build_cross_domain_pool`. Idempotent
-        across runs (skips accessions already present).
+        pool is materialised later by :meth:`_build_cross_domain_pool`.
+
+        The sample is a seeded RANDOM draw over all of the domain's reference
+        genomes, not the head of the NCBI stream (which is ordered, so a prefix is
+        a biased sample). Genomes above ``reject_cross_domain_max_mb`` are skipped
+        before the draw -- a 3 Gbp vertebrate would be downloaded whole to give a
+        few dozen windows -- and so is any genome whose lineage contains a TaxID in
+        ``reject_cross_domain_exclude`` (to keep an evaluation set out of the
+        negatives).
+
+        Idempotent per domain: a domain already acquired (recorded under
+        ``cross_domain_acquired`` with the parameters used) is not fetched again, so
+        a ``--no-sync`` rerun reuses the same sample. Changing the parameters does
+        not silently mix two samples: it is logged and the recorded one is kept.
         """
         registry = self.ctx.registry.registry
         cross_ids: list[str] = registry.setdefault("cross_domain_negatives", [])
-        cross_set = set(cross_ids)
+        acquired: dict = registry.setdefault("cross_domain_acquired", {})
+        params = {
+            "sample": self.ctx.reject_cross_domain_sample,
+            "max_mb": self.ctx.reject_cross_domain_max_mb,
+            "exclude": sorted(self.ctx.reject_cross_domain_exclude),
+            "seed": self.ctx.seed,
+            "assembly_source": getattr(self.ctx, "assembly_source", "RefSeq"),
+        }
+        pending = []
+        for domain in self.ctx.reject_cross_domain:
+            done = acquired.get(domain)
+            if done is None:
+                pending.append(domain)
+            elif done.get("params") != params:
+                ui_logger.warning(
+                    "Cross-domain gate: %s was acquired with %s; keeping that sample "
+                    "(now asked for %s). Use a fresh registry to draw a new one.",
+                    domain, done.get("params"), params)
+        if not pending:
+            return
         with open(self.ctx.config_path, encoding="utf-8") as handle:
             mapping_config = json.load(handle)
         discovery = DiscoveryOrchestrator(
-            registry=self.ctx.registry, mapping_config=mapping_config)
+            registry=self.ctx.registry, mapping_config=mapping_config,
+            assembly_source=params["assembly_source"])
 
-        for domain in self.ctx.reject_cross_domain:
+        max_bp = int(params["max_mb"] * 1e6) if params["max_mb"] else None
+        for domain in pending:
             taxid = _DOMAIN_GROUP_TO_TAXID.get(domain, domain)
             reports = discovery.stream_reference_reports(
-                taxid, self.ctx.reject_cross_domain_sample)
-            added = 0
+                taxid, params["sample"], seed=params["seed"], max_genome_bp=max_bp,
+                exclude_taxids=params["exclude"])
+            added, bp = 0, 0
             for report in reports:
                 accession = report.get("accession")
                 if not accession or accession in registry["accessions"]:
@@ -176,13 +254,16 @@ class _SyncManager:
                 host = str(report.get("organism", {}).get("tax_id", ""))
                 entry = self.ctx.registry._build_accession_entry(host, report)
                 entry["cross_domain"] = True
+                entry["cross_domain_group"] = domain
                 registry["accessions"][accession] = entry
                 cross_ids.append(accession)
-                cross_set.add(accession)
                 added += 1
+                bp += int(report.get("assembly_stats", {}).get("total_sequence_length", 0) or 0)
+            if reports:
+                acquired[domain] = {"params": params, "n": added, "bp": bp}
             ui_logger.info(
-                "Cross-domain gate: %d reference genome(s) from %s queued as "
-                "non-virus negatives.", added, domain,
+                "Cross-domain gate: %d reference genome(s) from %s (%.2f Gbp) queued "
+                "as negatives for the domain head.", added, domain, bp / 1e9,
             )
 
     def _build_cross_domain_pool(self) -> list:
@@ -202,9 +283,14 @@ class _SyncManager:
             if not entry or not entry.get("downloaded"):
                 continue
             vault = entry.get("local_path")
+            # The leaf has no parent in the tree; ``clade`` is what the reject
+            # provenance reports for it, so label_map.json says which domain the
+            # head was trained to reject.
+            clade = f"cross_domain:{entry.get('cross_domain_group', '?')}"
             for header in entry.get("headers", []):
                 pool.append(SimpleNamespace(
-                    rank="sequence", header_id=header["id"], fasta_path=vault))
+                    rank="sequence", header_id=header["id"], fasta_path=vault,
+                    cross_domain=True, clade=clade, accession=accession))
         return pool
 
     def _domains_to_sync(self) -> list[str]:

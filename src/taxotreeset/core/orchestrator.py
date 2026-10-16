@@ -49,8 +49,10 @@ Typical usage::
 import json
 import logging
 import os
+import random
 import subprocess
 import tempfile
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
 import taxoniq
@@ -82,6 +84,41 @@ _NCBI_API_KEY_ENV_VAR = "NCBI_API_KEY"
 # TaxIDs per bulk `datasets summary taxonomy taxon` call when prefetching the
 # NCBI lineage fallback (keeps each command line well under OS arg limits).
 _TAXONOMY_BATCH_SIZE = 300
+
+
+def sample_reports(
+    reports: list[dict[str, Any]],
+    limit: int,
+    seed: int = 0,
+    max_genome_bp: int | None = None,
+    is_excluded: "Callable[[dict[str, Any]], bool] | None" = None,
+) -> list[dict[str, Any]]:
+    """Seeded random sample of ``limit`` genome reports, size cap and exclusions first.
+
+    The candidates are put in accession order before the shuffle, so the draw
+    depends on the seed and the set of genomes, never on the order NCBI streamed
+    them in. ``is_excluded`` is only called on candidates as they are drawn (a
+    lineage lookup per genome, so not over the whole domain).
+    """
+    if limit <= 0:
+        return []
+
+    def size(report: dict[str, Any]) -> int:
+        return int(report.get("assembly_stats", {}).get("total_sequence_length", 0) or 0)
+
+    candidates = sorted(
+        (r for r in reports
+         if r.get("accession") and (not max_genome_bp or size(r) <= max_genome_bp)),
+        key=lambda r: r["accession"])
+    random.Random(seed).shuffle(candidates)
+    sample: list[dict[str, Any]] = []
+    for report in candidates:
+        if is_excluded is not None and is_excluded(report):
+            continue
+        sample.append(report)
+        if len(sample) >= limit:
+            break
+    return sample
 
 
 class DiscoveryOrchestrator:
@@ -303,34 +340,72 @@ class DiscoveryOrchestrator:
         logger.info("Marked %d pre-acquired accession(s) as downloaded.", marked)
 
     def stream_reference_reports(
-        self, taxid: str, limit: int,
+        self,
+        taxid: str,
+        limit: int,
+        seed: int = 0,
+        max_genome_bp: int | None = None,
+        exclude_taxids: "list[str] | None" = None,
     ) -> list[dict[str, Any]]:
-        """Stream up to ``limit`` RefSeq *reference*-genome reports for a taxon.
+        """Draw a seeded random sample of ``limit`` genome reports for a taxon.
 
-        A bounded, reference-only variant of :meth:`_stream_ncbi_summaries` used to
-        acquire a small cross-domain negative sample (the P4 non-virus gate)
-        without crawling a whole domain: it requests ``--reference`` genomes and
-        stops after ``limit`` reports, terminating the subprocess early. Returns an
-        empty list on spawn/parse failure (tolerant, like discovery).
+        Used to acquire the cross-domain negatives of the domain gate (P4). Streams
+        EVERY RefSeq *reference* genome of the taxon and samples from the whole
+        list: the NCBI stream is ordered, so stopping after ``limit`` lines (what
+        this did until 2026-10-15) gave a prefix, not a sample. The full stream is
+        cheap -- 22,871 bacterial and 2,390 eukaryotic reference reports on
+        2026-10-15. RefSeq marks no viral genome as reference (0 reports), so an
+        empty reference stream falls back to all RefSeq assemblies of the taxon.
+
+        Genomes larger than ``max_genome_bp`` are dropped before the draw (the
+        eukaryotic reference median is 496 Mbp; a genome is downloaded whole to
+        give a few dozen windows), and so is any genome whose lineage, the organism
+        included, contains a TaxID in ``exclude_taxids``. Returns an empty list on
+        spawn/parse failure (tolerant, like discovery).
 
         Args:
-            taxid: Domain/clade TaxID to sample reference genomes from.
-            limit: Maximum reports to return (<= 0 returns nothing).
+            taxid: Domain/clade TaxID to sample genomes from.
+            limit: Sample size (<= 0 returns nothing).
+            seed: Seed of the draw (the generation seed, so a rerun is identical).
+            max_genome_bp: Size cap in bp; ``None`` or 0 keeps every size.
+            exclude_taxids: TaxIDs whose subtrees never enter the sample.
 
         Returns:
-            Up to ``limit`` assembly report dicts, in stream order.
+            Up to ``limit`` assembly report dicts, in draw order.
         """
         if limit <= 0:
             return []
-        command = [
+        base = [
             "datasets", "summary", "genome", "taxon", str(taxid),
-            "--assembly-source", self.assembly_source, "--reference",
-            "--as-json-lines",
+            "--assembly-source", self.assembly_source, "--as-json-lines",
         ]
+        reports = self._stream_reports(base + ["--reference"])
+        if not reports:
+            logger.info(
+                "No reference genome under TaxID %s; sampling from all %s "
+                "assemblies instead.", taxid, self.assembly_source)
+            reports = self._stream_reports(base)
+        excluded = {str(t) for t in (exclude_taxids or [])}
+
+        def is_excluded(report: dict[str, Any]) -> bool:
+            if not excluded:
+                return False
+            org = report.get("organism", {}).get("tax_id")
+            if org is None:
+                return False
+            return bool(excluded & self._lineage_taxids(int(org)))
+
+        sample = sample_reports(
+            reports, limit, seed=seed, max_genome_bp=max_genome_bp,
+            is_excluded=is_excluded)
         logger.info(
-            "Sampling up to %d reference genome(s) under TaxID %s (cross-domain "
-            "negatives).", limit, taxid,
-        )
+            "Sampled %d of %d genome report(s) under TaxID %s (seed %d, cap %s bp, "
+            "%d excluded TaxID(s)).", len(sample), len(reports), taxid, seed,
+            max_genome_bp or "none", len(excluded))
+        return sample
+
+    def _stream_reports(self, command: list[str]) -> list[dict[str, Any]]:
+        """Run one ``datasets summary`` command and parse its JSON lines."""
         reports: list[dict[str, Any]] = []
         stderr_file = tempfile.TemporaryFile(mode="w+b")
         try:
@@ -350,12 +425,21 @@ class DiscoveryOrchestrator:
                         reports.append(json.loads(line))
                     except json.JSONDecodeError:
                         continue
-                    if len(reports) >= limit:
-                        process.terminate()  # bounded: stop the stream early
-                        break
         finally:
             stderr_file.close()
         return reports
+
+    def _lineage_taxids(self, taxid: int) -> set[str]:
+        """Every TaxID from ``taxid`` up to the root, the taxon itself included.
+
+        Full lineage (all ranks), so an exclusion at a non-canonical node still
+        matches; an unresolvable TaxID yields just itself.
+        """
+        try:
+            ids = {str(a.tax_id) for a in taxoniq.Taxon(taxid).lineage}
+        except KeyError:
+            ids = {str(a.tax_id) for a in self._fetch_lineage_via_ncbi(taxid)}
+        return ids | {str(taxid)}
 
     @staticmethod
     def _log_api_key_status() -> None:

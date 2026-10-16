@@ -133,7 +133,22 @@ negative there). Off by default. Tests: `TestCrossDomainGate` (reject_bucket),
 `TestCrossDomainNegatives` (acquire tags+no-lineage / pool skips undownloaded), CLI
 threading. Suite 1121.
 
-**Effort.** Reject class: done. Non-virus gate: DONE.
+**Update (2026-10-15) — the gate is ON by default, and it now actually produces a head.**
+Two defects kept it from ever working in binary mode: the binary scheduler only gave
+heads to the domain node's DESCENDANTS, so the gate negatives (depth <= 2) reached no
+head at all; and the sample was the head of the NCBI stream, not a random draw. On the
+archaea harness the cascade rejected 0.00 of the non-archaea reads (Kraken2/Centrifuge/
+Kaiju 0.90-1.00). Now: `--reject-cross-domain auto` (default) = every other domain of
+life for a single-domain `--root` (off for `--plasmids` and `all`); the domain node gets
+its own binary head (positives = the domain, negatives = the other domains only); the
+sample is a seeded random draw over all reference genomes (all RefSeq for viruses, which
+have none flagged reference), with a size cap (`--reject-cross-domain-max-mb`, 200) and
+lineage exclusions (`--reject-cross-domain-exclude`); windows are split evenly by domain
+and then by genome (length-weighted they would be ~92% eukaryote); acquisition is once
+per registry and also runs under `--no-sync` (skipped for a single deep head).
+Tests: `tests/unit/test_cross_domain_gate.py`, `tests/integration/test_domain_gate.py`.
+
+**Effort.** Reject class: done. Non-virus gate: DONE (default on since 2026-10-15).
 
 Files: `core/generation/reject_bucket.py` (`sample_reject_leaves` gate),
 `core/orchestrator.py` (`stream_reference_reports`), `core/_orchestration/_sync.py`

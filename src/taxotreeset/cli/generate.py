@@ -379,14 +379,15 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--reject-cross-domain",
         type=str,
-        default=None,
+        default="auto",
         metavar="DOMAINS",
-        help="Cross-domain reject gate (P4): comma-separated non-virus domains "
-        "(e.g. 'bacteria,archaea,eukaryotes') to sample as NON-VIRUS negatives for "
-        "shallow heads, so the root/shallow heads learn 'not a virus at all' "
-        "(they have no intra-tree outside). A bounded set of RefSeq reference "
-        "genomes is fetched during the sync. Works with --reject-class or "
-        "--binary-only.",
+        help="Domain gate (P4). 'auto' (default): when --root is one domain, sample "
+        "negatives from every OTHER domain of life (archaea -> bacteria,eukaryotes,"
+        "viruses) and give the domain node its own binary head, so a foreign read "
+        "can be rejected at the top. 'none' disables it; or a comma list of domains "
+        "(viruses, bacteria, archaea, eukaryotes). 'auto' is off for --plasmids and "
+        "for 'all'/multi-root scopes. The sample is fetched once and reused, also "
+        "with --no-sync.",
     )
     parser.add_argument(
         "--reject-cross-domain-sample",
@@ -400,8 +401,24 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=2,
         help="Max head depth (bigtree, root=1) that receives cross-domain "
-        "negatives; deeper heads keep intra-clade negatives only. "
-        "Only used with --reject-cross-domain.",
+        "negatives; 2 is the domain node, deeper heads keep intra-clade negatives "
+        "only. Only used with --reject-cross-domain.",
+    )
+    parser.add_argument(
+        "--reject-cross-domain-max-mb",
+        type=float,
+        default=200.0,
+        help="Skip gate genomes larger than this (Mbp) before the random draw; "
+        "0 keeps every size. The eukaryotic reference median is ~500 Mbp, and a "
+        "genome is downloaded whole to give a few dozen windows.",
+    )
+    parser.add_argument(
+        "--reject-cross-domain-exclude",
+        type=str,
+        default=None,
+        metavar="TAXIDS",
+        help="Comma-separated TaxIDs whose subtrees never enter the gate "
+        "negatives (keeps an evaluation set out of training).",
     )
     parser.add_argument(
         "--binary-only",
@@ -544,9 +561,15 @@ def run(args: argparse.Namespace) -> None:
         if args.holdout_clades
         else None
     )
-    reject_cross_domain = (
-        [d.strip() for d in args.reject_cross_domain.split(",") if d.strip()]
-        if args.reject_cross_domain
+    # "auto" stays a string: it is resolved against --root by the orchestrator.
+    reject_cross_domain = args.reject_cross_domain
+    if reject_cross_domain is not None and reject_cross_domain.strip().lower() not in (
+            "auto", "none", "off", ""):
+        reject_cross_domain = [
+            d.strip() for d in reject_cross_domain.split(",") if d.strip()]
+    reject_cross_domain_exclude = (
+        [t.strip() for t in args.reject_cross_domain_exclude.split(",") if t.strip()]
+        if getattr(args, "reject_cross_domain_exclude", None)
         else None
     )
 
@@ -602,6 +625,8 @@ def run(args: argparse.Namespace) -> None:
             reject_cross_domain=reject_cross_domain,
             reject_cross_domain_sample=args.reject_cross_domain_sample,
             reject_cross_domain_depth=args.reject_cross_domain_depth,
+            reject_cross_domain_max_mb=getattr(args, "reject_cross_domain_max_mb", 200.0),
+            reject_cross_domain_exclude=reject_cross_domain_exclude,
             binary_only=args.binary_only,
             binary_budget=args.binary_budget,
             binary_extract_batch_size=args.extract_batch_size,

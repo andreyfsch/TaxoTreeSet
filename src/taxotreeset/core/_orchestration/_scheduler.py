@@ -376,6 +376,20 @@ class _CascadeScheduler:
             if getattr(n, "rank", "") != "sequence"
             and (target_taxid is None or str(n.name) == target_taxid)
         ]
+        # The domain gate: with cross-domain negatives the domain node itself gets
+        # a head (positives = the whole domain, negatives = the other domains),
+        # the one place a foreign read can be stopped. Without it the descendants
+        # above were the only heads, so the gate negatives (depth <= 2) reached
+        # nothing: an archaea tree had no head at 2157 and its cascade rejected
+        # 0.00 of the non-archaea reads (harness of 2026-10-15). Exempt from the
+        # passthrough rule below: its negatives differ from its child's.
+        gate_taxid = None
+        if (self.ctx._cross_domain_pool
+                and domain_node.depth <= self.ctx.reject_cross_domain_depth
+                and getattr(domain_node, "rank", "") != "sequence"
+                and (target_taxid is None or str(domain_node.name) == target_taxid)):
+            gate_taxid = str(domain_node.name)
+            nodes.insert(0, domain_node)
         if target_taxid is not None and not nodes:
             ui_logger.warning(
                 "single-level target TaxID %s is not a taxonomic node under "
@@ -419,7 +433,7 @@ class _CascadeScheduler:
             # redundant. Skip it (no head/parquet) and record the collapse, so
             # only genuine branching nodes become heads.
             node_children = _collect_real_children(node)
-            if _is_passthrough_case(node_children):
+            if taxid != gate_taxid and _is_passthrough_case(node_children):
                 passthrough_map[taxid] = str(node_children[0].name)
                 passthrough += 1
                 continue

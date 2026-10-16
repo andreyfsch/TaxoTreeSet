@@ -222,19 +222,33 @@ equal for a flat, depth-independent ratio. Depth here counts only **decidable**
 taxon under a long single-child chain (common with `--all-ranks`) is not treated as
 artificially deep.
 
-**Cross-domain gate (non-virus negatives).** The `near`/`far` negatives above are
-all *other viruses* — they teach "not in this clade", not "not a virus at all". The
-root and shallow heads need the latter: a foreign, non-virus input enters the
-cascade at the top, and the root head (which has no in-tree "outside") otherwise has
-no reject signal to stop it. `--reject-cross-domain bacteria,archaea,eukaryotes`
-fetches a **bounded** sample of RefSeq reference genomes from those domains during
-the sync (`--reject-cross-domain-sample`, default 200 per domain) and adds them as
-non-virus negatives to heads at `depth <= --reject-cross-domain-depth` (default 2) —
-for the root head, they become its entire reject class. Deeper heads keep
-intra-clade negatives only (a bacterium is a trivial negative for a coronavirus
-genus). The sampled genomes are used **only** as negatives — they are never placed
-in the tree or given heads of their own. Off by default; works with `--reject-class`
-or `--binary-only`.
+**Domain gate (cross-domain negatives) — on by default.** The `near`/`far` negatives
+above all come from *inside* the tree — they teach "not in this clade", not "not this
+domain at all". A foreign input enters the cascade at the top, and the domain node
+has no in-tree "outside", so without the gate nothing can stop it: on the archaea
+harness of 2026-10-15 the cascade rejected 0.00 of the non-archaea reads, against
+0.90–1.00 for Kraken2, Centrifuge and Kaiju. `--reject-cross-domain auto` (the
+default) resolves, when `--root` is a single domain, to every *other* domain of life
+(archaea → bacteria, eukaryotes, viruses; viruses → bacteria, archaea, eukaryotes),
+and the **domain node gets its own binary head**: positives are the whole domain,
+negatives are the other domains. `none` disables it; a comma list names the domains
+explicitly. `auto` is off for `--plasmids` (the plasmid negative is the host
+chromosome; see BACKLOG P3) and for `all`/multi-root scopes.
+
+The negatives are a **seeded random sample** (the generation `--seed`) of
+`--reject-cross-domain-sample` genomes per domain (default 200) drawn from all of the
+domain's RefSeq *reference* genomes — all RefSeq assemblies for viruses, which have
+no reference designation. Genomes above `--reject-cross-domain-max-mb` (default 200
+Mbp; the eukaryotic reference median is ~500 Mbp) are skipped before the draw, and
+`--reject-cross-domain-exclude TAXIDS` keeps whole subtrees out (an evaluation set,
+say). Windows are split **evenly by domain and then by genome** (length-weighted
+only within a genome), so 200 eukaryotes do not drown 200 bacteria. They go to heads
+at `depth <= --reject-cross-domain-depth` (default 2, the domain node) — deeper heads
+keep intra-clade negatives only (a bacterium is a trivial negative for a coronavirus
+genus). The sample is acquired once per registry and reused, also with `--no-sync`;
+the sampled genomes are used **only** as negatives, never placed in the tree. Each
+head's `label_map.json` records the windows and genomes per domain under
+`reject_provenance.cross_domain`. Works with `--reject-class` or `--binary-only`.
 
 ### Binary heads (optional)
 

@@ -97,6 +97,7 @@ from taxotreeset.core._orchestration._manifest import (
 from taxotreeset.core._orchestration._sync import (
     _DOMAIN_GROUP_TO_TAXID,
     _SyncManager,
+    resolve_cross_domain,
 )
 from taxotreeset.core._orchestration._scheduler import (
     _CascadeScheduler,
@@ -203,9 +204,11 @@ class GenerationOrchestrator:
         reject_near_far_start: float = 0.5,
         reject_near_far_end: float = 0.9,
         reject_near_far_span: int = 9,
-        reject_cross_domain: list[str] | None = None,
+        reject_cross_domain: list[str] | str | None = "auto",
         reject_cross_domain_sample: int = 200,
         reject_cross_domain_depth: int = 2,
+        reject_cross_domain_max_mb: float = 200.0,
+        reject_cross_domain_exclude: list[str] | None = None,
         binary_only: bool = False,
         binary_budget: int = 30000,
         binary_extract_batch_size: int = 300,
@@ -293,6 +296,19 @@ class GenerationOrchestrator:
                 feeds the inference-time prune margin, that drift would reach
                 the cascade's calibration silently. The default 9 reproduces
                 the previous tree-relative behaviour exactly on the viral tree.
+            reject_cross_domain: The domain gate (P4). ``"auto"`` (default)
+                draws negatives from every other domain of life when the root is
+                a single domain, and the domain node itself then gets a binary
+                head (positives: the whole domain; negatives: the other domains).
+                ``None``/``"none"`` disables it; a list names the domains. See
+                :func:`~taxotreeset.core._orchestration._sync.resolve_cross_domain`.
+            reject_cross_domain_sample: Genomes drawn per gate domain.
+            reject_cross_domain_depth: Max node depth (bigtree, root = 1) whose
+                head receives the gate negatives; 2 is the domain node.
+            reject_cross_domain_max_mb: Genome size cap (Mbp) applied before the
+                draw; 0 keeps every size.
+            reject_cross_domain_exclude: TaxIDs whose subtrees never enter the
+                gate negatives (keeps an evaluation set out of training).
         """
         self.registry: Any = registry
         self.config_path: str = config_path
@@ -337,7 +353,15 @@ class GenerationOrchestrator:
         self.reject_near_far_start: float = reject_near_far_start
         self.reject_near_far_end: float = reject_near_far_end
         self.reject_near_far_span: int = reject_near_far_span
-        self.reject_cross_domain: list[str] = reject_cross_domain or []
+        # Resolved against --root in generate(); until then only an explicit list
+        # is known ("auto" needs the root).
+        self._reject_cross_domain_spec: list[str] | str | None = reject_cross_domain
+        self.reject_cross_domain: list[str] = (
+            resolve_cross_domain(reject_cross_domain, None)
+            if not isinstance(reject_cross_domain, str) else [])
+        self.reject_cross_domain_max_mb: float = reject_cross_domain_max_mb
+        self.reject_cross_domain_exclude: list[str] = [
+            str(t) for t in (reject_cross_domain_exclude or [])]
         self.reject_cross_domain_sample: int = reject_cross_domain_sample
         self.reject_cross_domain_depth: int = reject_cross_domain_depth
         # Non-virus negative leaves, materialised after Stage-1 download (P4 gate).
@@ -560,8 +584,32 @@ class GenerationOrchestrator:
             sync=sync,
         )
 
+        if isinstance(self._reject_cross_domain_spec, str):
+            self.reject_cross_domain = resolve_cross_domain(
+                self._reject_cross_domain_spec, target_group, self.plasmids)
+        gate_taxid = _DOMAIN_GROUP_TO_TAXID.get(
+            (target_group or "").strip().lower(), (target_group or "").strip())
+        if (self.reject_cross_domain and self._single_level_taxid is not None
+                and self._single_level_taxid != gate_taxid):
+            # Regenerating one deep head (the documented drop-in use of
+            # --single-level with --no-sync) needs no gate negatives: only the
+            # domain head (depth <= reject_cross_domain_depth) receives them.
+            logger.info("single-level %s is not the domain head; domain gate skipped.",
+                        self._single_level_taxid)
+            self.reject_cross_domain = []
+        if self.reject_cross_domain:
+            ui_logger.info(
+                "Domain gate: negatives from %s (%d genomes each, <= %s Mbp) for "
+                "heads at depth <= %d.", ", ".join(self.reject_cross_domain),
+                self.reject_cross_domain_sample,
+                self.reject_cross_domain_max_mb or "any",
+                self.reject_cross_domain_depth)
         if sync:
             self._run_sync_stage(target_group)
+        elif self.reject_cross_domain:
+            # --no-sync skips the domain walk, not the gate: the bounded sample is
+            # acquired once (idempotent per domain) and Stage 1 downloads it.
+            self._acquire_cross_domain_negatives()
 
         # Plasmids register under a sparse host forest (bacteria/archaea/...), so
         # the tree spans every registered domain regardless of --root ("all").
