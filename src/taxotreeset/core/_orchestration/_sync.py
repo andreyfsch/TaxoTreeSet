@@ -265,6 +265,9 @@ class _SyncManager:
                 "Cross-domain gate: %d reference genome(s) from %s (%.2f Gbp) queued "
                 "as negatives for the domain head.", added, domain, bp / 1e9,
             )
+        # Persist the draw now: the downloader only saves after its first chunk, so
+        # a failure before that would lose the sample (and the record of its params).
+        self.ctx.registry.save()
 
     def _build_cross_domain_pool(self) -> list:
         """Materialise the downloaded cross-domain accessions into leaf objects.
